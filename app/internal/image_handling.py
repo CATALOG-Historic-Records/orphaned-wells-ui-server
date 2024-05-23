@@ -57,10 +57,8 @@ def process_zip(
             if mime_type is None:
                 os.remove(unzipped_img_filepath)
     backend_url = os.getenv("BACKEND_URL")
-    # _log.info(f"bulk uploading: {zip_path} to {backend_url}")
     background_tasks.add_task(
         upload_documents_from_directory,
-        ## TODO: use an env variable to make this work in both dev and prod
         backend_url=backend_url,
         user_email=user_info["email"],
         project_id=project_id,
@@ -247,10 +245,39 @@ def process_image(
     RESOURCE_NAME = docai_client.processor_path(PROJECT_ID, LOCATION, processor_id)
 
     raw_document = documentai.RawDocument(content=image_content, mime_type=mime_type)
-    request = documentai.ProcessRequest(name=RESOURCE_NAME, raw_document=raw_document)
+    try:
+        request = documentai.ProcessRequest(
+            name=RESOURCE_NAME, raw_document=raw_document
+        )
+    except Exception as e:
+        _log.error(f"error on documentai.ProcessRequest: {e}")
+        record = {
+            "project_id": project_id,
+            "filename": f"{file_name}",
+            "status": "error",
+            "error_message": str(e),
+        }
+        data_manager.updateRecord(
+            record_id, record, update_type="record", forceUpdate=True
+        )
+        return
 
     # Use the Document AI client to process the document
-    result = docai_client.process_document(request=request)
+    try:
+        result = docai_client.process_document(request=request)
+    except Exception as e:
+        _log.error(f"error on docai_client.process_document: {e}")
+        record = {
+            "project_id": project_id,
+            "filename": f"{file_name}",
+            "status": "error",
+            "error_message": str(e),
+        }
+        data_manager.updateRecord(
+            record_id, record, update_type="record", forceUpdate=True
+        )
+        return
+
     _log.info(f"processed document in doc_ai")
     document_object = result.document
 
@@ -353,14 +380,13 @@ def process_image(
                 "edited": False,
             }
 
-    ## gotta create the record in the db
+    ## gotta update the record in the db
     record = {
         "project_id": project_id,
         "attributes": attributes,
         "filename": f"{file_name}",
         "status": "digitized",
     }
-    # new_record_id = data_manager.createRecord(record)
     data_manager.updateRecord(record_id, record, update_type="record", forceUpdate=True)
     _log.info(f"updated record in db: {record_id}")
 
