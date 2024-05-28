@@ -144,6 +144,23 @@ async def auth_refresh(request: Request):
         return user_tokens
 
 
+@router.post("/check_auth")
+async def check_authorization(user_info: dict = Depends(authenticate)):
+    """Function authenticating API calls; required as a dependency for all API calls.
+
+    Args:
+        id_token: token provided upon signin
+
+    Returns:
+        user account information
+    """
+    role = data_manager.checkForUser(
+        {"email": user_info.get("email", "")}, update=False, add=False
+    )
+    user_info["role"] = role
+    return user_info
+
+
 @router.post("/logout")
 async def logout(request: Request):
     """Function for logging out and revoking tokens.
