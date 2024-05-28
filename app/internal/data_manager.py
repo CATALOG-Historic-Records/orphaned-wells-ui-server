@@ -625,7 +625,7 @@ class DataManager:
         settings = project_document.get("settings", {})
         settings["exportColumns"] = selectedColumns
         update = {"settings": settings}
-        self.updateProject(project_id, update, user)
+        self.updateProject(project_id, update, user_info)
         self.recordHistory("downloadRecords", user=user, project_id=project_id)
         return output_file
 
