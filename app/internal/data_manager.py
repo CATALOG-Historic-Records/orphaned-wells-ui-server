@@ -474,14 +474,71 @@ class DataManager:
             _id = ObjectId(record_id)
             search_query = {"_id": _id}
             if update_type == "record":
-                update_query = {"$set": new_data}
+                data_update = new_data
+                update_query = {"$set": data_update}
             else:
-                update_query = {"$set": {update_type: new_data.get(update_type, None)}}
+                data_update = {update_type: new_data.get(update_type, None)}
+                if (
+                    update_type == "attributes"
+                    and new_data.get("review_status", None) == "unreviewed"
+                ):
+                    ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
+                    data_update["review_status"] = "incomplete"
+                elif (
+                    update_type == "review_status"
+                    and new_data.get("review_status", None) == "unreviewed"
+                ):
+                    data_update = self.resetRecord(record_id, new_data, user)
+                update_query = {"$set": data_update}
             self.db.records.update_one(search_query, update_query)
             self.recordHistory("updateRecord", user, record_id=record_id)
-            return True
+            return data_update
         else:
             return False
+
+    def resetRecord(self, record_id, record_data, user):
+        print(f"resetting record: {record_id}")
+        record_attributes = record_data["attributes"]
+        for attribute_name in record_attributes:
+            if record_attributes[attribute_name]["normalized_value"] != "":
+                original_value = record_attributes[attribute_name]["normalized_value"]
+            else:
+                original_value = record_attributes[attribute_name]["raw_text"]
+            record_attributes[attribute_name]["value"] = original_value
+            record_attributes[attribute_name]["confidence"] = record_attributes[
+                attribute_name
+            ]["ai_confidence"]
+            record_attributes[attribute_name]["edited"] = False
+            ## check for subattributes and reset those
+            if record_attributes[attribute_name]["subattributes"] is not None:
+                record_subattributes = record_attributes[attribute_name][
+                    "subattributes"
+                ]
+                for subattribute_name in record_subattributes:
+                    if (
+                        record_subattributes[subattribute_name]["normalized_value"]
+                        != ""
+                    ):
+                        original_value = record_subattributes[subattribute_name][
+                            "normalized_value"
+                        ]
+                    else:
+                        original_value = record_subattributes[subattribute_name][
+                            "raw_text"
+                        ]
+                    record_subattributes[subattribute_name]["value"] = original_value
+                    record_subattributes[subattribute_name][
+                        "confidence"
+                    ] = record_subattributes[subattribute_name].get(
+                        "ai_confidence", None
+                    )
+                    record_subattributes[subattribute_name]["edited"] = False
+        update = {
+            "review_status": "unreviewed",
+            "attributes": record_attributes,
+        }
+        self.recordHistory("resetRecord", user, record_id=record_id)
+        return update
 
     def deleteProject(self, project_id, background_tasks, user_info):
         ## TODO: check if user is a part of the team who owns this project

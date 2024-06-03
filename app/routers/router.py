@@ -406,11 +406,11 @@ async def update_record(
     req = await request.json()
     data = req.get("data", None)
     update_type = req.get("type", None)
-    updated = data_manager.updateRecord(record_id, data, update_type, user_info)
-    if not updated:
+    update = data_manager.updateRecord(record_id, data, update_type, user_info)
+    if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
 
-    return {"response": "success"}
+    return update
 
 
 @router.post("/delete_project/{project_id}")
