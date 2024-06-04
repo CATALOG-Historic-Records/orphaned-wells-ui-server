@@ -154,7 +154,9 @@ class DataManager:
             _log.error(f"unable to find {query} in {collection}: {e}")
             return None
 
-    def checkForUser(self, user_info, update=True, add=True, team="Testing"):
+    def checkForUser(
+        self, user_info, update=True, add=True, team="Testing", login=False
+    ):
         cursor = self.db.users.find({"email": user_info["email"]})
         foundUser = False
         for document in cursor:
@@ -162,9 +164,12 @@ class DataManager:
             role = document.get("role", Roles.pending)
             if update:
                 self.updateUser(user_info)
+            if login:
+                self.recordHistory("login", user_info["email"])
         if not foundUser and add:
             role = Roles.base_user
             self.addUser(user_info, team, role)
+            self.recordHistory("addUser", user_info["email"])
         elif not foundUser and not add:
             role = "not found"
         return role

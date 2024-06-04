@@ -60,6 +60,7 @@ async def authenticate(token: str = Depends(oauth2_scheme)):
         user_info = id_token.verify_oauth2_token(
             token, google_requests.Request(), client_id
         )
+        user_info["email"] = user_info.get("email", "").lower()
         # _log.info(f"user_info: {user_info}")
         return user_info
     except Exception as e:  # should probably specify exception type
@@ -93,11 +94,12 @@ async def auth_login(request: Request):
         user_info = id_token.verify_oauth2_token(
             user_tokens["id_token"], google_requests.Request(), client_id
         )
+        user_info["email"] = user_info.get("email", "").lower()
     except Exception as e:  # should probably specify exception type
         _log.info(f"unable to authenticate: {e}")
         raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
 
-    role = data_manager.checkForUser(user_info, add=False)
+    role = data_manager.checkForUser(user_info, add=False, login=True)
     if role == "not found":
         _log.info(f"user is not authorized")
         raise HTTPException(status_code=403, detail=user_info)
@@ -332,6 +334,7 @@ async def upload_document(
     Returns:
         New document record identifier.
     """
+    user_email = user_email.lower()
     user_info = data_manager.getUserInfo(user_email)
     project_is_valid = data_manager.checkProjectValidity(project_id)
     if not project_is_valid:
@@ -522,6 +525,7 @@ async def approve_user(email: str, user_info: dict = Depends(authenticate)):
     Returns:
         approved user information
     """
+    email = email.lower()
     if data_manager.hasRole(user_info, Roles.admin):
         return data_manager.approveUser(email)
     else:
@@ -540,6 +544,7 @@ async def add_user(email: str, user_info: dict = Depends(authenticate)):
     Returns:
         user status
     """
+    email = email.lower().replace(" ", "")
     if data_manager.hasRole(user_info, Roles.admin):
         ## TODO check if provided email is a valid email address
         admin_document = data_manager.getDocument(
@@ -582,6 +587,7 @@ async def delete_user(email: str, user_info: dict = Depends(authenticate)):
     Returns:
         result
     """
+    email = email.lower()
     if data_manager.hasRole(user_info, Roles.admin):
         data_manager.deleteUser(email, user_info)
         return {"Deleted", email}
