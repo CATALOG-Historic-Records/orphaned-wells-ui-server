@@ -300,6 +300,7 @@ def process_image(
         }
     """
     attributes = {}
+    attributesList = []
     for entity in document_entities:
         text_value = entity.text_anchor.content
         normalized_value = entity.normalized_value.text
@@ -313,6 +314,7 @@ def process_image(
             value = raw_text
         coordinates = get_coordinates(entity, attribute)
         subattributes = {}
+        subattributesList = []
         for prop in entity.properties:
             sub_text_value = prop.text_anchor.content
             sub_normalized_value = prop.normalized_value.text
@@ -340,9 +342,28 @@ def process_image(
                 "value": sub_value,
                 "normalized_vertices": sub_coordinates,
                 "normalized_value": sub_normalized_value,
+                "edited": False,
             }
+            subattributesList.append(
+                {
+                    "key": original_sub_attribute,
+                    "ai_confidence": confidence,
+                    "confidence": sub_confidence,
+                    "raw_text": sub_raw_text,
+                    "text_value": sub_text_value,
+                    "value": sub_value,
+                    "normalized_vertices": sub_coordinates,
+                    "normalized_value": sub_normalized_value,
+                    "isSubattribute": True,
+                    "topLevelAttribute": attribute,
+                    "edited": False,
+                }
+            )
+
         if len(subattributes) == 0:
             subattributes = None
+        if len(subattributesList) == 0:
+            subattributesList = None
 
         counter = 2
         original_attribute = attribute
@@ -363,6 +384,21 @@ def process_image(
             "subattributes": subattributes,
             "edited": False,
         }
+        attributesList.append(
+            {
+                "key": original_attribute,
+                "ai_confidence": confidence,
+                "confidence": confidence,
+                "raw_text": raw_text,
+                "text_value": text_value,
+                "value": value,
+                "normalized_vertices": coordinates,
+                "normalized_value": normalized_value,
+                "subattributes": subattributesList,
+                "isSubattribute": False,
+                "edited": False,
+            }
+        )
 
     ## add attributes that weren't found:
     found_attributes = attributes.keys()
@@ -380,11 +416,27 @@ def process_image(
                 "subattributes": None,
                 "edited": False,
             }
+            attributesList.append(
+                {
+                    "key": attr,
+                    "ai_confidence": None,
+                    "confidence": None,
+                    "raw_text": "",
+                    "text_value": "",
+                    "value": "",
+                    "normalized_vertices": None,
+                    "normalized_value": None,
+                    "subattributes": None,
+                    "isSubattribute": False,
+                    "edited": False,
+                }
+            )
 
     ## gotta update the record in the db
     record = {
         "project_id": project_id,
         "attributes": attributes,
+        "attributesList": attributesList,
         "filename": f"{file_name}",
         "status": "digitized",
     }

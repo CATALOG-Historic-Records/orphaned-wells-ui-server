@@ -484,7 +484,7 @@ class DataManager:
             else:
                 data_update = {update_type: new_data.get(update_type, None)}
                 if (
-                    update_type == "attributes"
+                    update_type == "attributesList"
                     and new_data.get("review_status", None) == "unreviewed"
                 ):
                     ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
@@ -503,44 +503,30 @@ class DataManager:
 
     def resetRecord(self, record_id, record_data, user):
         print(f"resetting record: {record_id}")
-        record_attributes = record_data["attributes"]
-        for attribute_name in record_attributes:
-            if record_attributes[attribute_name]["normalized_value"] != "":
-                original_value = record_attributes[attribute_name]["normalized_value"]
+        record_attributes = record_data["attributesList"]
+        for attribute in record_attributes:
+            attribute_name = attribute["key"]
+            if attribute["normalized_value"] != "":
+                original_value = attribute["normalized_value"]
             else:
-                original_value = record_attributes[attribute_name]["raw_text"]
-            record_attributes[attribute_name]["value"] = original_value
-            record_attributes[attribute_name]["confidence"] = record_attributes[
-                attribute_name
-            ]["ai_confidence"]
-            record_attributes[attribute_name]["edited"] = False
+                original_value = attribute["raw_text"]
+            attribute["value"] = original_value
+            attribute["confidence"] = attribute["ai_confidence"]
+            attribute["edited"] = False
             ## check for subattributes and reset those
-            if record_attributes[attribute_name]["subattributes"] is not None:
-                record_subattributes = record_attributes[attribute_name][
-                    "subattributes"
-                ]
-                for subattribute_name in record_subattributes:
-                    if (
-                        record_subattributes[subattribute_name]["normalized_value"]
-                        != ""
-                    ):
-                        original_value = record_subattributes[subattribute_name][
-                            "normalized_value"
-                        ]
+            if attribute["subattributes"] is not None:
+                record_subattributes = attribute["subattributes"]
+                for subattribute in record_subattributes:
+                    if subattribute["normalized_value"] != "":
+                        original_value = subattribute["normalized_value"]
                     else:
-                        original_value = record_subattributes[subattribute_name][
-                            "raw_text"
-                        ]
-                    record_subattributes[subattribute_name]["value"] = original_value
-                    record_subattributes[subattribute_name][
-                        "confidence"
-                    ] = record_subattributes[subattribute_name].get(
-                        "ai_confidence", None
-                    )
-                    record_subattributes[subattribute_name]["edited"] = False
+                        original_value = subattribute["raw_text"]
+                    subattribute["value"] = original_value
+                    subattribute["confidence"] = subattribute.get("ai_confidence", None)
+                    subattribute["edited"] = False
         update = {
             "review_status": "unreviewed",
-            "attributes": record_attributes,
+            "attributesList": record_attributes,
         }
         self.recordHistory("resetRecord", user, record_id=record_id)
         return update
@@ -633,34 +619,31 @@ class DataManager:
         attributes = ["file"]
         subattributes = []
         project_document = project_cursor.next()
-        for each in project_document.get("attributes", {}):
-            if each["name"] in selectedColumns:
-                attributes.append(each["name"])
+        # for each in project_document.get("attributes", {}):
+        #     if each["name"] in selectedColumns:
+        #         attributes.append(each["name"])
         project_name = project_document.get("name", "")
         cursor = self.db.records.find({"project_id": project_id})
         record_attributes = []
         if exportType == "csv":
             for document in cursor:
                 record_attribute = {}
-                for attribute in attributes:
-                    if attribute in document.get("attributes", []):
-                        document_attribute = document["attributes"][attribute]
-                        record_attribute[attribute] = document_attribute["value"]
-
+                for document_attribute in document["attributesList"]:
+                    attribute_name = document_attribute["key"]
+                    if attribute_name in selectedColumns:
+                        attributes.append(attribute_name)
+                        record_attribute[attribute_name] = document_attribute["value"]
                         ## add subattributes
                         if document_attribute.get("subattributes", None):
-                            for subattribute in document_attribute["subattributes"]:
-                                document_subattribute = document_attribute[
-                                    "subattributes"
-                                ][subattribute]
-                                record_attribute[subattribute] = document_subattribute[
-                                    "value"
-                                ]
-                                if subattribute not in subattributes:
-                                    subattributes.append(subattribute)
-
-                    else:
-                        record_attribute[attribute] = "N/A"
+                            for document_subattribute in document_attribute[
+                                "subattributes"
+                            ]:
+                                subattribute_name = document_subattribute["key"]
+                                record_attribute[
+                                    subattribute_name
+                                ] = document_subattribute["value"]
+                                # if subattribute_name not in subattributes:
+                                subattributes.append(subattribute_name)
                 record_attribute["file"] = document.get("filename", "")
                 record_attributes.append(record_attribute)
 
@@ -672,12 +655,10 @@ class DataManager:
         else:
             for document in cursor:
                 record_attribute = {}
-                for attribute in attributes:
-                    if attribute in document.get("attributes", []):
-                        document_attribute = document["attributes"][attribute]
-                        record_attribute[attribute] = document_attribute
-                    else:
-                        record_attribute[attribute] = "N/A"
+                for document_attribute in document["attributesList"]:
+                    attribute_name = document_attribute["key"]
+                    if attribute_name in selectedColumns:
+                        record_attribute[attribute_name] = document_attribute
                 record_attribute["file"] = document.get("filename", "")
                 record_attributes.append(record_attribute)
             with open(output_file, "w", newline="") as jsonfile:
