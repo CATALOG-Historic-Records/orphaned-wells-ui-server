@@ -8,3 +8,4 @@ uploaded_images/
 __pycache__/
 *.egg-info/
 build/
+bulk_upload_script.py

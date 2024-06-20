@@ -299,8 +299,9 @@ def process_image(
             text: "1972-08-25"
         }
     """
-    attributes = {}
+    # attributes = {}
     attributesList = []
+    found_attributes = {}
     for entity in document_entities:
         text_value = entity.text_anchor.content
         normalized_value = entity.normalized_value.text
@@ -313,7 +314,7 @@ def process_image(
         else:
             value = raw_text
         coordinates = get_coordinates(entity, attribute)
-        subattributes = {}
+        # subattributes = {}
         subattributesList = []
         for prop in entity.properties:
             sub_text_value = prop.text_anchor.content
@@ -326,24 +327,8 @@ def process_image(
                 sub_value = sub_normalized_value
             else:
                 sub_value = sub_raw_text
-            counter = 2
             original_sub_attribute = sub_attribute
-            while (
-                sub_attribute in subattributes
-            ):  ## if we make it inside this loop, then this subattribute appears multiple times
-                sub_attribute = f"{original_sub_attribute}_{counter}"
-                counter += 1
 
-            subattributes[sub_attribute] = {
-                "ai_confidence": confidence,
-                "confidence": sub_confidence,
-                "raw_text": sub_raw_text,
-                "text_value": sub_text_value,
-                "value": sub_value,
-                "normalized_vertices": sub_coordinates,
-                "normalized_value": sub_normalized_value,
-                "edited": False,
-            }
             subattributesList.append(
                 {
                     "key": original_sub_attribute,
@@ -360,30 +345,11 @@ def process_image(
                 }
             )
 
-        if len(subattributes) == 0:
-            subattributes = None
         if len(subattributesList) == 0:
             subattributesList = None
 
-        counter = 2
         original_attribute = attribute
-        while (
-            attribute in attributes
-        ):  ## if we make it inside this loop, then this attribute appears multiple times
-            attribute = f"{original_attribute}_{counter}"
-            counter += 1
-
-        attributes[attribute] = {
-            "ai_confidence": confidence,
-            "confidence": confidence,
-            "raw_text": raw_text,
-            "text_value": text_value,
-            "value": value,
-            "normalized_vertices": coordinates,
-            "normalized_value": normalized_value,
-            "subattributes": subattributes,
-            "edited": False,
-        }
+        found_attributes[original_attribute] = len(attributesList)
         attributesList.append(
             {
                 "key": original_attribute,
@@ -400,23 +366,15 @@ def process_image(
             }
         )
 
-    ## add attributes that weren't found:
-    found_attributes = attributes.keys()
+    ## sort attributes and add attributes that weren't found:
+    sortedAttributesList = []
     for processor_attribute in processor_attributes:
         attr = processor_attribute["name"]
-        if attr not in found_attributes:
-            attributes[attr] = {
-                "ai_confidence": None,
-                "confidence": None,
-                "raw_text": "",
-                "text_value": "",
-                "value": "",
-                "normalized_vertices": None,
-                "normalized_value": None,
-                "subattributes": None,
-                "edited": False,
-            }
-            attributesList.append(
+        if attr in found_attributes:
+            idx = found_attributes[attr]
+            sortedAttributesList.append(attributesList[idx])
+        else:
+            sortedAttributesList.append(
                 {
                     "key": attr,
                     "ai_confidence": None,
@@ -435,8 +393,8 @@ def process_image(
     ## gotta update the record in the db
     record = {
         "project_id": project_id,
-        "attributes": attributes,
-        "attributesList": attributesList,
+        # "attributes": attributes,
+        "attributesList": sortedAttributesList,
         "filename": f"{file_name}",
         "status": "digitized",
     }
