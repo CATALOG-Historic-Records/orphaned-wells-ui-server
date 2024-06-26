@@ -112,15 +112,17 @@ def process_document(
     mime_type,
 ):
     if file_ext == ".tif" or file_ext == ".tiff":
-        output_path = convert_tiff(
+        output_paths = convert_tiff(
             filename, file_ext, data_manager.app_settings.img_dir
         )
         file_ext = ".png"
     elif file_ext.lower() == ".pdf":
-        output_path = convert_pdf(filename, file_ext, data_manager.app_settings.img_dir)
+        output_paths = convert_pdf(
+            filename, file_ext, data_manager.app_settings.img_dir
+        )
         file_ext = ".png"
     else:
-        output_path = original_output_path
+        output_paths = [original_output_path]
 
     ## add record to DB without attributes
     new_record = {
@@ -130,6 +132,7 @@ def process_document(
         "contributor": user_info,
         "status": "processing",
         "review_status": "unreviewed",
+        "image_files": [output_path.split("/")[-1] for output_path in output_paths],
     }
     new_record_id = data_manager.createRecord(new_record, user_info)
 
@@ -137,12 +140,14 @@ def process_document(
     processor_id, processor_attributes = data_manager.getProcessor(project_id)
 
     ## upload to cloud storage (this will overwrite any existing files of the same name):
-    background_tasks.add_task(
-        upload_to_google_storage,
-        file_path=output_path,
-        file_name=f"{filename}{file_ext}",
-        folder=f"uploads/{project_id}/{new_record_id}",
-    )
+    for output_path in output_paths:
+        filepath = output_path.split("/")[-1]
+        background_tasks.add_task(
+            upload_to_google_storage,
+            file_path=output_path,
+            file_name=f"{filepath}",
+            folder=f"uploads/{project_id}/{new_record_id}",
+        )
 
     ## send to google doc AI
     background_tasks.add_task(
@@ -159,8 +164,8 @@ def process_document(
 
     ## remove file after 120 seconds to allow for the operations to finish
     ## if file was converted to PNG, remove original file as well
-    files_to_delete = [output_path]
-    if original_output_path != output_path:
+    files_to_delete = output_paths  # [output_path]
+    if original_output_path not in output_path:
         files_to_delete.append(original_output_path)
     background_tasks.add_task(
         data_manager.deleteFiles, filepaths=files_to_delete, sleep_time=60
@@ -171,21 +176,34 @@ def process_document(
 def convert_pdf(filename, file_ext, output_directory, convert_to=".png"):
     filepath = f"{output_directory}/{filename}{file_ext}"
     try:
+        output_paths = []
         dpi = 100  ## higher dpi will result in higher quality but longer wait time
         doc = fitz.open(filepath)
         zoom = 4
         mat = fitz.Matrix(zoom, zoom)
-        outfile = f"{output_directory}/{filename}{convert_to}"
 
         ## we must assume the PDF has one page
-        page = doc.load_page(0)
-        pix = page.get_pixmap(matrix=mat, dpi=dpi)
-        pix.save(outfile)
+        i = 0
+        for page in doc:
+            # page = doc.load_page(0)
+            pix = page.get_pixmap(matrix=mat, dpi=dpi)
+            if i == 0:
+                print(f" i = 1")
+                outfile = f"{output_directory}/{filename}{convert_to}"
+                print(f"outfile is {outfile}")
+            else:
+                print(f"this doc has more than one page")
+                print(f"i == {i}")
+                outfile = f"{output_directory}/{filename}_{i+1}{convert_to}"
+                print(f"outfile is {outfile}")
+            pix.save(outfile)
+            output_paths.append(outfile)
+            i += 1
         doc.close()
-        return outfile
+        return output_paths
     except Exception as e:
         print(f"failed to convert {filename}: {e}")
-        return filepath
+        return [filepath]
 
 
 def convert_tiff(filename, file_ext, output_directory, convert_to=".png"):
@@ -201,11 +219,11 @@ def convert_tiff(filename, file_ext, output_directory, convert_to=".png"):
             return outfile
         except Exception as e:
             print(f"unable to save {filename}: {e}")
-            return filepath
+            return [filepath]
 
     except Exception as e:
         print(f"failed to convert {filename}: {e}")
-        return filepath
+        return [filepath]
 
 
 def get_coordinates(entity, attribute):
@@ -219,6 +237,15 @@ def get_coordinates(entity, attribute):
         coordinates = None
         _log.info(f"unable to get coordinates of attribute {attribute}: {e}")
     return coordinates
+
+
+def get_page(entity, attribute):
+    try:
+        page = entity.page_anchor.page_refs[0].page
+    except Exception as e:
+        page = None
+        _log.info(f"unable to get coordinates of attribute {attribute}: {e}")
+    return page
 
 
 ## Document AI functions
@@ -314,6 +341,9 @@ def process_image(
         else:
             value = raw_text
         coordinates = get_coordinates(entity, attribute)
+
+        ## page numbers start at 0
+        page = get_page(entity, attribute)
         # subattributes = {}
         subattributesList = []
         for prop in entity.properties:
@@ -323,6 +353,7 @@ def process_image(
             sub_confidence = prop.confidence
             sub_raw_text = prop.mention_text
             sub_coordinates = get_coordinates(prop, sub_attribute)
+            sub_page = get_page(prop, sub_attribute)
             if sub_normalized_value:
                 sub_value = sub_normalized_value
             else:
@@ -342,6 +373,7 @@ def process_image(
                     "isSubattribute": True,
                     "topLevelAttribute": attribute,
                     "edited": False,
+                    "page": sub_page,
                 }
             )
 
@@ -363,6 +395,7 @@ def process_image(
                 "subattributes": subattributesList,
                 "isSubattribute": False,
                 "edited": False,
+                "page": page,
             }
         )
 
@@ -387,6 +420,7 @@ def process_image(
                     "subattributes": None,
                     "isSubattribute": False,
                     "edited": False,
+                    "page": None,
                 }
             )
 

@@ -378,10 +378,20 @@ class DataManager:
         user_projects = self.getUserProjectList(user)
         if not project_id in user_projects:
             return None, None
-        # document["_id"] = str(document["_id"])
-        document["img_url"] = generate_download_signed_url_v4(
-            document["project_id"], document["_id"], document["filename"]
-        )
+        image_urls = []
+        for image in document.get("image_files", []):
+            image_urls.append(
+                generate_download_signed_url_v4(
+                    document["project_id"], document["_id"], image
+                )
+            )
+        if len(image_urls) == 0:
+            image_urls.append(
+                generate_download_signed_url_v4(
+                    document["project_id"], document["_id"], document["filename"]
+                )
+            )
+        document["img_urls"] = image_urls
 
         ## get project name
         project = self.getDocument("projects", {"_id": project_id})
