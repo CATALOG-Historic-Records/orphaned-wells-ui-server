@@ -1,14 +1,10 @@
-import io
 import os
 import logging
 import aiofiles
 import requests
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
-from typing import Annotated
-import jwt
 from fastapi import (
-    # Body,
     Request,
     APIRouter,
     HTTPException,
@@ -16,22 +12,12 @@ from fastapi import (
     UploadFile,
     BackgroundTasks,
     Depends,
-    status,
 )
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
-import zipfile
 
-from app.internal.data_manager import data_manager, Project, Roles
-from app.internal.image_handling import (
-    process_single_file,
-    process_document,
-    process_zip,
-    convert_pdf,
-    convert_tiff,
-    process_image,
-    upload_to_google_storage,
-)
+from app.internal.data_manager import data_manager, Roles
+from app.internal.image_handling import process_document, process_zip
 import app.internal.auth as auth
 
 _log = logging.getLogger(__name__)
@@ -48,7 +34,7 @@ router = APIRouter(
 
 @router.post("/token")
 async def authenticate(token: str = Depends(oauth2_scheme)):
-    """Function authenticating API calls; required as a dependency for all API calls.
+    """Authenticate API calls; required as a dependency for other API calls.
 
     Args:
         id_token: token provided upon signin
@@ -61,17 +47,15 @@ async def authenticate(token: str = Depends(oauth2_scheme)):
             token, google_requests.Request(), client_id
         )
         user_info["email"] = user_info.get("email", "").lower()
-        # _log.info(f"user_info: {user_info}")
         return user_info
-    except Exception as e:  # should probably specify exception type
-        ## return something to inform the frontend to prompt the user to log back in
+    except Exception as e:
         _log.info(f"unable to authenticate: {e}")
         raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
 
 
 @router.post("/auth_login")
 async def auth_login(request: Request):
-    """Function for logging into google account.
+    """Authorize OGRRE account.
 
     Args:
         code: code provided by react google sign in
@@ -113,7 +97,7 @@ async def auth_login(request: Request):
 
 @router.post("/auth_refresh")
 async def auth_refresh(request: Request):
-    """Function for refreshing user tokens.
+    """Refresh user tokens.
 
     Args:
         refresh_token: refresh token provided upon signin
@@ -148,7 +132,7 @@ async def auth_refresh(request: Request):
 
 @router.post("/check_auth")
 async def check_authorization(user_info: dict = Depends(authenticate)):
-    """Function authenticating API calls; required as a dependency for all API calls.
+    """Ensure user is authorized.
 
     Args:
         id_token: token provided upon signin
@@ -165,7 +149,7 @@ async def check_authorization(user_info: dict = Depends(authenticate)):
 
 @router.post("/logout")
 async def logout(request: Request):
-    """Function for logging out and revoking tokens.
+    """Log user out, revoke refresh token.
 
     Args:
         refresh_token: refresh token provided upon signin
@@ -184,8 +168,10 @@ async def logout(request: Request):
 
 @router.get("/get_projects", response_model=list)
 async def get_projects(user_info: dict = Depends(authenticate)):
-    """
-    Fetch all projects
+    """Fetch all projects that a user has access to.
+
+    Returns:
+        List containing projects and metadata
     """
     resp = data_manager.fetchProjects(user_info.get("email", ""))
     return resp
@@ -193,13 +179,13 @@ async def get_projects(user_info: dict = Depends(authenticate)):
 
 @router.get("/get_project/{project_id}")
 async def get_project_data(project_id: str, user_info: dict = Depends(authenticate)):
-    """Fetch project data.
+    """Fetch individual project data.
 
     Args:
         project_id: Project identifier
 
     Returns:
-        Project data, all records associated with that project
+        Dictionary containing project data, list of records
     """
     project_data, records = data_manager.fetchProjectData(
         project_id, user_info.get("email", "")
@@ -214,13 +200,13 @@ async def get_project_data(project_id: str, user_info: dict = Depends(authentica
 
 @router.get("/get_team_records")
 async def get_team_records(user_info: dict = Depends(authenticate)):
-    """Fetch project data.
+    """Fetch records from all projects that a team has access to.
 
     Args:
         project_id: Project identifier
 
     Returns:
-        Project data, all records associated with that project
+        List of records
     """
     records = data_manager.getTeamRecords(user_info)
     return {"records": records}
@@ -234,7 +220,7 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
         record_id: Record identifier
 
     Returns:
-        Record data
+        List containing record data
     """
     record, is_locked = data_manager.fetchRecordData(record_id, user_info)
     if record is None:
@@ -251,13 +237,13 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
 
 @router.post("/get_next_record")
 async def get_next_record(request: Request, user_info: dict = Depends(authenticate)):
-    """Fetch document record data.
+    """Fetch next document record data.
 
     Args:
         record_id: Record identifier
 
     Returns:
-        Record data
+        List containing record data
     """
     req = await request.json()
     data = req.get("data", {})
@@ -281,13 +267,13 @@ async def get_next_record(request: Request, user_info: dict = Depends(authentica
 async def get_previous_record(
     request: Request, user_info: dict = Depends(authenticate)
 ):
-    """Fetch document record data.
+    """Fetch previous document record data.
 
     Args:
         record_id: Record identifier
 
     Returns:
-        Record data
+        List containing record data
     """
     data = await request.json()
     record, is_locked = data_manager.fetchPreviousRecord(
@@ -305,10 +291,11 @@ async def add_project(request: Request, user_info: dict = Depends(authenticate))
     """Add new project.
 
     Args:
-        request data: Project data
+        Request body
+            data: Project data
 
     Returns:
-        New project identifier
+        New project id
     """
     data = await request.json()
 
@@ -323,9 +310,8 @@ async def upload_document(
     user_email: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    # user_info: dict = Depends(authenticate),
 ):
-    """Upload document for processing.Documents are processed asynchronously.
+    """Upload document for processing. Documents are processed asynchronously.
 
     Args:
         project_id: Project identifier to be associated with this document
@@ -382,7 +368,8 @@ async def update_project(
 
     Args:
         project_id: Project identifier
-        request data: New data for provided project
+        request body:
+            data: New data for provided project
 
     Returns:
         Success response
@@ -401,7 +388,8 @@ async def update_record(
 
     Args:
         record_id: Record identifier
-        request data: New data for provided record
+        request body:
+            data: New data for provided record
 
     Returns:
         Success response
@@ -461,9 +449,12 @@ async def download_records(
 
     Args:
         project_id: Project identifier
+        request body:
+            exportType: type of export (csv or json)
+            columns: list attributes to export
 
     Returns:
-        CSV file containing all records associated with that project
+        CSV or JSON file containing all record data for provided project
     """
     req = await request.json()
     # _log.info(req)
@@ -496,22 +487,22 @@ async def get_users(
     return users
 
 
-@router.post("/add_contributors/{project_id}")
-async def add_contributors(
-    project_id: str, request: Request, user_info: dict = Depends(authenticate)
-):
-    """Add user to application database with role 'pending'
+# @router.post("/add_contributors/{project_id}")
+# async def add_contributors(
+#     project_id: str, request: Request, user_info: dict = Depends(authenticate)
+# ):
+#     """Add user to application database with role 'pending'
 
-    Args:
-        email: User email address
+#     Args:
+#         email: User email address
 
-    Returns:
-        user status
-    """
-    ## TODO: change project to team
-    req = await request.json()
-    users = req.get("users", "")
-    return data_manager.addUsersToProject(users, project_id)
+#     Returns:
+#         user status
+#     """
+#     ## TODO: change project to team
+#     req = await request.json()
+#     users = req.get("users", "")
+#     return data_manager.addUsersToProject(users, project_id)
 
 
 ## admin functions
