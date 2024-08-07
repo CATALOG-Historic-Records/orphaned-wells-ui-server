@@ -354,6 +354,7 @@ async def upload_document(
                 filename,
                 data_manager,
                 mime_type,
+                content,
             )
         except Exception as e:
             _log.error(f"unable to read image file: {e}")

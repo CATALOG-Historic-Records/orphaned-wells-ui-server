@@ -110,7 +110,9 @@ def process_document(
     filename,
     data_manager,
     mime_type,
+    content,
 ):
+    # _log.info(f"inside process document, content type is: {type(content)}")
     if file_ext == ".tif" or file_ext == ".tiff":
         output_paths = convert_tiff(
             filename, file_ext, data_manager.app_settings.img_dir
@@ -152,7 +154,6 @@ def process_document(
     ## send to google doc AI
     background_tasks.add_task(
         process_image,
-        file_path=original_output_path,
         file_name=f"{filename}{file_ext}",
         mime_type=mime_type,
         project_id=project_id,
@@ -160,6 +161,7 @@ def process_document(
         processor_id=processor_id,
         processor_attributes=processor_attributes,
         data_manager=data_manager,
+        image_content=content,
     )
 
     ## remove file after 120 seconds to allow for the operations to finish
@@ -250,7 +252,6 @@ def get_page(entity, attribute):
 
 ## Document AI functions
 def process_image(
-    file_path,
     file_name,
     mime_type,
     project_id,
@@ -258,11 +259,8 @@ def process_image(
     processor_id,
     processor_attributes,
     data_manager,
+    image_content,
 ):
-    _log.info(f"processing {file_path} with mime type {mime_type}")
-    with open(file_path, "rb") as image:
-        image_content = image.read()
-
     if processor_id is None:
         _log.info(
             f"processor id is none, rolling with default processor: {PROCESSOR_ID}"
