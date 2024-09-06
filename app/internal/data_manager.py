@@ -304,7 +304,9 @@ class DataManager:
 
         return str(new_project_id)
 
-    def fetchProjectData(self, project_id, user):
+    def fetchProjectData(
+        self, project_id, user, page, records_per_page, sort_by, filter_by
+    ):
         ## get user's projects, check if user has access to this project
         user_projects = self.getUserProjectList(user)
         _id = ObjectId(project_id)
@@ -319,16 +321,31 @@ class DataManager:
 
         ## get project's records
         records = []
-        cursor = self.db.records.find({"project_id": project_id}).sort(
-            "dateCreated", ASCENDING
-        )
+        filter_by["project_id"] = project_id
         record_index = 1
+        if page is not None and records_per_page is not None and records_per_page != -1:
+            cursor = (
+                self.db.records.find(filter_by)
+                .sort(
+                    sort_by[0],
+                    sort_by[1]
+                    # )
+                )
+                .skip(records_per_page * page)
+                .limit(records_per_page)
+            )
+            record_index += page * records_per_page
+        else:
+            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
+
         for document in cursor:
             document["_id"] = str(document["_id"])
             document["recordIndex"] = record_index
             record_index += 1
             records.append(document)
-        return project_data, records
+
+        record_count = self.db.records.count_documents(filter_by)
+        return project_data, records, record_count
 
     def getTeamRecords(self, user_info):
         user = user_info.get("email", "")
