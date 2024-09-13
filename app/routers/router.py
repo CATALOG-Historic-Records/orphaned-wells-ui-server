@@ -83,16 +83,21 @@ async def auth_login(request: Request):
         _log.info(f"unable to authenticate: {e}")
         raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
 
-    role = data_manager.checkForUser(user_info, add=False, login=True)
-    if role == "not found":
-        _log.info(f"user is not authorized")
+    email = user_info["email"]
+    user = data_manager.getUser(email)
+    if user is None:
+        _log.info(f"user {email} is not found in database")
+        data_manager.recordHistory("login", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
+    role = user.get("role", None)
+    _log.info(f"{email} has role {role}")
     if role < Roles.base_user:
         _log.info(f"user is not authorized")
+        data_manager.recordHistory("login", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
-    else:
-        _log.info(f"user has role {role}")
-        return user_tokens
+    data_manager.recordHistory("login", email)
+    data_manager.updateUserObject(user_info)
+    return user_tokens
 
 
 @router.post("/auth_refresh")
@@ -121,13 +126,20 @@ async def auth_refresh(request: Request):
     except Exception as e:
         _log.info(f"unable to authenticate: {e}")
         raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
-    role = data_manager.checkForUser(user_info)
+    email = user_info["email"]
+    user = data_manager.getUser(email)
+    if user is None:
+        _log.info(f"user {email} is not found in database")
+        data_manager.recordHistory("refresh", email, notes="denied access")
+        raise HTTPException(status_code=403, detail=user_info)
+    role = user.get("role", None)
+    _log.info(f"{email} has role {role}")
     if role < Roles.base_user:
         _log.info(f"user is not authorized")
+        data_manager.recordHistory("refresh", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
-    else:
-        _log.info(f"user has role {role}")
-        return user_tokens
+    data_manager.recordHistory("refresh", email)
+    return user_tokens
 
 
 @router.post("/check_auth")
@@ -140,11 +152,9 @@ async def check_authorization(user_info: dict = Depends(authenticate)):
     Returns:
         user account information
     """
-    role = data_manager.checkForUser(
-        {"email": user_info.get("email", "")}, update=False, add=False
-    )
-    user_info["role"] = role
-    return user_info
+    email = user_info["email"]
+    user = data_manager.getUser(email)
+    return user
 
 
 @router.post("/logout")
@@ -254,58 +264,7 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
         return JSONResponse(
             status_code=303, content={"direction": "next", "recordData": record}
         )
-    return record
-
-
-@router.post("/get_next_record")
-async def get_next_record(request: Request, user_info: dict = Depends(authenticate)):
-    """Fetch next document record data.
-
-    Args:
-        record_id: Record identifier
-
-    Returns:
-        List containing record data
-    """
-    req = await request.json()
-    data = req.get("data", {})
-    reviewed = req.get("reviewed", False)
-    reviewStatus = req.get("review_status", None)
-    if reviewed:
-        data_manager.updateRecordReviewStatus(
-            data.get("_id", ""), reviewStatus, user_info
-        )
-    record, is_locked = data_manager.fetchNextRecord(
-        data.get("dateCreated", ""), data.get("project_id", ""), user_info
-    )
-    if is_locked:
-        return JSONResponse(
-            status_code=303, content={"direction": "next", "recordData": record}
-        )
-    return record
-
-
-@router.post("/get_previous_record")
-async def get_previous_record(
-    request: Request, user_info: dict = Depends(authenticate)
-):
-    """Fetch previous document record data.
-
-    Args:
-        record_id: Record identifier
-
-    Returns:
-        List containing record data
-    """
-    data = await request.json()
-    record, is_locked = data_manager.fetchPreviousRecord(
-        data.get("dateCreated", ""), data.get("project_id", ""), user_info
-    )
-    if is_locked:
-        return JSONResponse(
-            status_code=303, content={"direction": "previous", "recordData": record}
-        )
-    return record
+    return {"recordData": record}
 
 
 @router.post("/add_project")
@@ -510,24 +469,6 @@ async def get_users(
     return users
 
 
-# @router.post("/add_contributors/{project_id}")
-# async def add_contributors(
-#     project_id: str, request: Request, user_info: dict = Depends(authenticate)
-# ):
-#     """Add user to application database with role 'pending'
-
-#     Args:
-#         email: User email address
-
-#     Returns:
-#         user status
-#     """
-#     ## TODO: change project to team
-#     req = await request.json()
-#     users = req.get("users", "")
-#     return data_manager.addUsersToProject(users, project_id)
-
-
 ## admin functions
 @router.post("/approve_user/{email}")
 async def approve_user(email: str, user_info: dict = Depends(authenticate)):
@@ -565,26 +506,32 @@ async def add_user(email: str, user_info: dict = Depends(authenticate)):
             "users", {"email": user_info.get("email", "")}
         )
         team = admin_document.get("default_team", None)
-        ## this function will check for and then add user if it is not found
-        role = data_manager.checkForUser(
-            {"email": email}, update=False, team=team, add=False
-        )
-        if role == "not found":
+
+        new_user = data_manager.getUser(email)
+        if new_user is None:
             resp = data_manager.addUser({"email": email}, team, role=Roles.base_user)
-        elif role > 0:
-            ## TODO: in this case, just add user to team without creating new user
-            resp = data_manager.addUserToTeam(email, team, role=Roles.base_user)
-            if resp == "already_exists":
-                ## 406 Not acceptable: user provided an email that is already on this team
+        else:
+            new_user_role = new_user.get("role", None)
+            if new_user_role is None:  ## this shouldnt be possible
+                resp = data_manager.addUser(
+                    {"email": email}, team, role=Roles.base_user
+                )
+
+            elif new_user_role > 0:
+                ## in this case, just add user to team without creating new user
+                resp = data_manager.addUserToTeam(email, team, role=Roles.base_user)
+                if resp == "already_exists":
+                    ## 406 Not acceptable: user provided an email that is already on this team
+                    raise HTTPException(
+                        status_code=406, detail=f"This user is already on this team."
+                    )
+                else:
+                    return {"base_user": email}
+            else:
+                ## TODO: user exists but is pending
                 raise HTTPException(
                     status_code=406, detail=f"This user is already on this team."
                 )
-            else:
-                return {"base_user": email}
-
-        else:
-            return {"base_user": email}
-
     else:
         raise HTTPException(
             status_code=403, detail=f"User is not authorized to perform this operation"
