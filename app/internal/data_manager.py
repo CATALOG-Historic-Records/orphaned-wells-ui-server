@@ -43,7 +43,6 @@ class Project(BaseModel):
     description: str = ""
     state: str = ""
     history: List = []
-    attributes: List = []
     documentType: str = ""
     creator: Union[str, dict] = ""
     dateCreated: Union[float, None] = None
@@ -286,13 +285,27 @@ class DataManager:
                     description=document.get("description", ""),
                     state=document.get("state", ""),
                     history=document.get("history", []),
-                    attributes=document.get("attributes", []),
                     documentType=document.get("documentType", ""),
                     creator=document.get("creator", ""),
                     dateCreated=document.get("dateCreated", None),
                 )
             )
         return projects
+
+    def getProcessorByGoogleId(self, google_id):
+        cursor = self.db.processors.find({"processor_id": google_id})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def fetchProcessors(self, user, state):
+        processors = []
+        cursor = self.db.processors.find({"state": state})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            processors.append(document)
+        return processors
 
     def createProject(self, project_info, user_info):
         ## get user's default team
@@ -309,6 +322,10 @@ class DataManager:
         project_info["team"] = default_team
         project_info["dateCreated"] = time.time()
         project_info["settings"] = {}
+
+        ## get processor id
+        processor_document = self.getProcessorByGoogleId(project_info["processorId"])
+        project_info["processor_id"] = str(processor_document["_id"])
         ## add project to db collection
         # _log.info(f"creating project with data: {project_info}")
         db_response = self.db.projects.insert_one(project_info)
@@ -648,9 +665,13 @@ class DataManager:
         try:
             cursor = self.db.projects.find({"_id": _id})
             document = cursor.next()
-            processor_id = document.get("processorId", None)
-            processor_attributes = document.get("attributes", None)
-            return processor_id, processor_attributes
+            google_id = document.get("processorId", None)
+            processor_id = document.get("processor_id", None)
+            _processor_id = ObjectId(processor_id)
+            processor_cursor = self.db.processors.find({"_id": _processor_id})
+            processor_document = processor_cursor.next()
+            processor_attributes = processor_document.get("attributes", None)
+            return google_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
             return None

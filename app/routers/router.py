@@ -187,6 +187,17 @@ async def get_projects(user_info: dict = Depends(authenticate)):
     return resp
 
 
+@router.get("/get_processors/{state}", response_model=list)
+async def get_processors(state: str, user_info: dict = Depends(authenticate)):
+    """Fetch all projects that a user has access to.
+
+    Returns:
+        List containing projects and metadata
+    """
+    resp = data_manager.fetchProcessors(user_info.get("email", ""), state)
+    return resp
+
+
 @router.post("/get_project/{project_id}")
 async def get_project_data(
     request: Request,
