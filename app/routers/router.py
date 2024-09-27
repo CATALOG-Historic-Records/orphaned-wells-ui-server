@@ -192,9 +192,20 @@ async def get_processors(state: str, user_info: dict = Depends(authenticate)):
     """Fetch all projects that a user has access to.
 
     Returns:
-        List containing projects and metadata
+        List containing processors and metadata
     """
     resp = data_manager.fetchProcessors(user_info.get("email", ""), state)
+    return resp
+
+
+@router.get("/get_processor_data/{google_id}", response_model=dict)
+async def get_processor_data(google_id: str, user_info: dict = Depends(authenticate)):
+    """Fetch processor data for provided id.
+
+    Returns:
+        Dictionary containing processor data
+    """
+    resp = data_manager.fetchProcessor(google_id)
     return resp
 
 
@@ -368,9 +379,7 @@ async def update_project(
         Success response
     """
     data = await request.json()
-    data_manager.updateProject(project_id, data, user_info)
-
-    return {"response": "success"}
+    return data_manager.updateProject(project_id, data, user_info)
 
 
 @router.post("/update_record/{record_id}")
