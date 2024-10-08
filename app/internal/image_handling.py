@@ -34,7 +34,7 @@ docai_client = documentai.DocumentProcessorServiceClient(
 
 
 def process_zip(
-    project_id,
+    rg_id,
     user_info,
     background_tasks,
     zip_file,
@@ -61,7 +61,7 @@ def process_zip(
         upload_documents_from_directory,
         backend_url=backend_url,
         user_email=user_info["email"],
-        project_id=project_id,
+        rg_id=rg_id,
         local_directory=zip_path,
         delete_local_files=True,
     )
@@ -70,7 +70,7 @@ def process_zip(
 
 
 async def process_single_file(
-    project_id,
+    rg_id,
     user_info,
     background_tasks,
     file,
@@ -87,7 +87,7 @@ async def process_single_file(
             await out_file.write(content)
 
         return await process_document(
-            project_id,
+            rg_id,
             user_info,
             background_tasks,
             original_output_path,
@@ -102,7 +102,7 @@ async def process_single_file(
 
 
 def process_document(
-    project_id,
+    rg_id,
     user_info,
     background_tasks,
     original_output_path,
@@ -127,7 +127,7 @@ def process_document(
 
     ## add record to DB without attributes
     new_record = {
-        "project_id": project_id,
+        "record_group_id": rg_id,
         "name": filename,
         "filename": f"{filename}{file_ext}",
         "contributor": user_info,
@@ -138,7 +138,7 @@ def process_document(
     new_record_id = data_manager.createRecord(new_record, user_info)
 
     ## fetch processor id
-    processor_id, processor_attributes = data_manager.getProcessor(project_id)
+    processor_id, processor_attributes = data_manager.getProcessorByRecordGroupID(rg_id)
 
     ## upload to cloud storage
     for output_path in output_paths:
@@ -147,7 +147,7 @@ def process_document(
             upload_to_google_storage,
             file_path=output_path,
             file_name=f"{filepath}",
-            folder=f"uploads/{project_id}/{new_record_id}",
+            folder=f"uploads/{rg_id}/{new_record_id}",
         )
 
     ## send to google doc AI
@@ -155,7 +155,7 @@ def process_document(
         process_image,
         file_name=f"{filename}{file_ext}",
         mime_type=mime_type,
-        project_id=project_id,
+        rg_id=rg_id,
         record_id=new_record_id,
         processor_id=processor_id,
         processor_attributes=processor_attributes,
@@ -245,7 +245,7 @@ def get_page(entity, attribute):
 def process_image(
     file_name,
     mime_type,
-    project_id,
+    rg_id,
     record_id,
     processor_id,
     processor_attributes,
@@ -268,7 +268,7 @@ def process_image(
     except Exception as e:
         _log.error(f"error on documentai.ProcessRequest: {e}")
         record = {
-            "project_id": project_id,
+            "record_group_id": rg_id,
             "filename": f"{file_name}",
             "status": "error",
             "error_message": str(e),
@@ -288,7 +288,7 @@ def process_image(
     except Exception as e:
         _log.error(f"error on docai_client.process_document: {e}")
         record = {
-            "project_id": project_id,
+            "record_group_id": rg_id,
             "filename": f"{file_name}",
             "status": "error",
             "error_message": str(e),
@@ -418,8 +418,7 @@ def process_image(
 
     ## gotta update the record in the db
     record = {
-        "project_id": project_id,
-        # "attributes": attributes,
+        "record_group_id": rg_id,
         "attributesList": sortedAttributesList,
         "filename": f"{file_name}",
         "status": "digitized",
@@ -458,7 +457,7 @@ async def upload_to_google_storage(file_path, file_name, folder="uploads"):
 
 
 def generate_download_signed_url_v4(
-    project_id, record_id, filename, bucket_name=BUCKET_NAME
+    rg_id, record_id, filename, bucket_name=BUCKET_NAME
 ):
     """Generates a v4 signed URL for downloading a blob.
 
@@ -474,7 +473,7 @@ def generate_download_signed_url_v4(
     )
 
     # blob_name: path to file in google cloud bucket
-    blob_name = f"uploads/{project_id}/{record_id}/{filename}"
+    blob_name = f"uploads/{rg_id}/{record_id}/{filename}"
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
@@ -489,13 +488,13 @@ def generate_download_signed_url_v4(
     return url
 
 
-def delete_google_storage_directory(project_id, bucket_name=BUCKET_NAME):
-    _log.info(f"deleting project {project_id} from google storage")
+def delete_google_storage_directory(rg_id, bucket_name=BUCKET_NAME):
+    _log.info(f"deleting record group {rg_id} from google storage")
     storage_client = storage.Client.from_service_account_json(
         f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
     )
     bucket = storage_client.get_bucket(bucket_name)
-    blobs = bucket.list_blobs(prefix=f"uploads/{project_id}")
+    blobs = bucket.list_blobs(prefix=f"uploads/{rg_id}")
     for blob in blobs:
         _log.info(f"deleting {blob}")
         blob.delete()

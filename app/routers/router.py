@@ -187,6 +187,65 @@ async def get_projects(user_info: dict = Depends(authenticate)):
     return resp
 
 
+@router.get("/get_record_groups/{project_id}", response_model=dict)
+async def get_record_groups(project_id: str, user_info: dict = Depends(authenticate)):
+    """Fetch all record groups are in a project.
+
+    Returns:
+        List containing record groups and metadata
+    """
+    resp = data_manager.fetchRecordGroups(project_id, user_info.get("email", ""))
+    return resp
+
+
+@router.post("/get_records/{get_by}", response_model=dict)
+async def get_records(
+    request: Request,
+    get_by: str,
+    page: int = None,
+    records_per_page: int = None,
+    user_info: dict = Depends(authenticate),
+):
+    """Fetch records for a given query.
+
+    Args:
+        request.query: DB Query
+
+    Returns:
+        List of records
+    """
+    _log.info(f"inside get records")
+    data = await request.json()
+    if get_by == "project" or get_by == "record_group":
+        sort_by = data.get(
+            "sort", ["dateCreated", 1]
+        )  ## 1 is ascending, -1 is descending`
+        if sort_by[1] != 1 and sort_by[1] != -1:
+            sort_by[1] = 1
+        filter_by = data.get("filter", {})
+        if get_by == "project":
+            project_id = data.get("id", None)
+            if project_id is not None:
+                records, record_count = data_manager.fetchRecordsByProject(
+                    user_info,
+                    project_id,
+                    page,
+                    records_per_page,
+                    sort_by,
+                    filter_by,
+                )
+                return {"records": records, "record_count": record_count}
+        elif get_by == "record_group":
+            rg_id = data.get("id", None)
+            if rg_id is not None:
+                records, record_count = data_manager.fetchRecordsByRecordGroup(
+                    user_info, rg_id, page, records_per_page, sort_by, filter_by
+                )
+                return {"records": records, "record_count": record_count}
+    _log.error(f"unable to process record query")
+    raise HTTPException(400, detail=f"unable to process record query")
+
+
 @router.get("/get_processors/{state}", response_model=list)
 async def get_processors(state: str, user_info: dict = Depends(authenticate)):
     """Fetch all projects that a user has access to.
@@ -195,17 +254,6 @@ async def get_processors(state: str, user_info: dict = Depends(authenticate)):
         List containing processors and metadata
     """
     resp = data_manager.fetchProcessors(user_info.get("email", ""), state)
-    return resp
-
-
-@router.get("/get_processor_data/{google_id}", response_model=dict)
-async def get_processor_data(google_id: str, user_info: dict = Depends(authenticate)):
-    """Fetch processor data for provided id.
-
-    Returns:
-        Dictionary containing processor data
-    """
-    resp = data_manager.fetchProcessor(google_id)
     return resp
 
 
@@ -252,18 +300,31 @@ async def get_project_data(
     }
 
 
-@router.get("/get_team_records")
-async def get_team_records(user_info: dict = Depends(authenticate)):
-    """Fetch records from all projects that a team has access to.
+@router.get("/get_record_group/{rg_id}")
+async def get_record_group_data(
+    rg_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Fetch record group data.
 
     Args:
-        project_id: Project identifier
+        rg_id: Document group identifier
 
     Returns:
-        List of records
+        Dictionary containing record group data, list of records
     """
-    records = data_manager.getTeamRecords(user_info)
-    return {"records": records}
+    project_document, rg_data = data_manager.fetchRecordGroupData(
+        rg_id, user_info.get("email", "")
+    )
+    if rg_data is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
+    return {
+        "rg_data": rg_data,
+        "project": project_document,
+    }
 
 
 @router.get("/get_record/{record_id}")
@@ -289,6 +350,30 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
     return {"recordData": record}
 
 
+@router.get("/get_processor_data/{google_id}", response_model=dict)
+async def get_processor_data(google_id: str, user_info: dict = Depends(authenticate)):
+    """Fetch processor data for provided id.
+
+    Returns:
+        Dictionary containing processor data
+    """
+    resp = data_manager.fetchProcessor(google_id)
+    return resp
+
+
+@router.get("/get_column_data/{location}/{_id}", response_model=dict)
+async def get_column_data(
+    location: str, _id: str, user_info: dict = Depends(authenticate)
+):
+    """Fetch processor data for provided id.
+
+    Returns:
+        Dictionary containing processor data
+    """
+    resp = data_manager.fetchColumnData(location, _id)
+    return resp
+
+
 @router.post("/add_project")
 async def add_project(request: Request, user_info: dict = Depends(authenticate)):
     """Add new project.
@@ -307,9 +392,24 @@ async def add_project(request: Request, user_info: dict = Depends(authenticate))
     return new_id
 
 
-@router.post("/upload_document/{project_id}/{user_email}")
+@router.post("/add_record_group")
+async def add_record_group(request: Request, user_info: dict = Depends(authenticate)):
+    """Add new record group.
+
+    Args:
+        Request body
+            data: Document group data
+
+    Returns:
+        New project id
+    """
+    data = await request.json()
+    return data_manager.createRecordGroup(data, user_info)
+
+
+@router.post("/upload_document/{rg_id}/{user_email}")
 async def upload_document(
-    project_id: str,
+    rg_id: str,
     user_email: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -317,7 +417,7 @@ async def upload_document(
     """Upload document for processing. Documents are processed asynchronously.
 
     Args:
-        project_id: Project identifier to be associated with this document
+        rg_id: Record group identifier to be associated with this document
         file: Document file
 
     Returns:
@@ -325,14 +425,14 @@ async def upload_document(
     """
     user_email = user_email.lower()
     user_info = data_manager.getUserInfo(user_email)
-    project_is_valid = data_manager.checkProjectValidity(project_id)
+    project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail=f"Project not found")
     filename, file_ext = os.path.splitext(file.filename)
     if file_ext.lower() == ".zip":
         output_dir = f"{data_manager.app_settings.img_dir}"
         return process_zip(
-            project_id,
+            rg_id,
             user_info,
             background_tasks,
             file,
@@ -349,7 +449,7 @@ async def upload_document(
                 content = await file.read()  # async read
                 await out_file.write(content)
             return process_document(
-                project_id,
+                rg_id,
                 user_info,
                 background_tasks,
                 original_output_path,
@@ -380,6 +480,24 @@ async def update_project(
     """
     data = await request.json()
     return data_manager.updateProject(project_id, data, user_info)
+
+
+@router.post("/update_record_group/{rg_id}")
+async def update_record_group(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    """Update record group data.
+
+    Args:
+        rg_id: Project identifier
+        request body:
+            data: New data for provided project
+
+    Returns:
+        Success response
+    """
+    data = await request.json()
+    return data_manager.updateRecordGroup(rg_id, data, user_info)
 
 
 @router.post("/update_record/{record_id}")
@@ -425,6 +543,24 @@ async def delete_project(
     return {"response": "success"}
 
 
+@router.post("/delete_record_group/{rg_id}")
+async def delete_record_group(
+    rg_id: str,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    """Delete Document group.
+
+    Args:
+        rg_id: Document group identifier
+
+    Returns:
+        Success response
+    """
+    data_manager.deleteRecordGroup(rg_id, background_tasks, user_info)
+    return {"response": "success"}
+
+
 @router.post("/delete_record/{record_id}")
 async def delete_record(record_id: str, user_info: dict = Depends(authenticate)):
     """Delete record.
@@ -440,9 +576,13 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
     return {"response": "success"}
 
 
-@router.post("/download_records/{project_id}", response_class=FileResponse)
+@router.post(
+    "/download_records/{location}/{_id}/{export_type}", response_class=FileResponse
+)
 async def download_records(
-    project_id: str,
+    location: str,
+    _id: str,
+    export_type: str,
     request: Request,
     background_tasks: BackgroundTasks,
     user_info: dict = Depends(authenticate),
@@ -460,11 +600,26 @@ async def download_records(
     """
     req = await request.json()
     # _log.info(req)
-    exportType = req.get("exportType", "csv")
-    selectedColumns = req.get("columns", None)
+    selectedColumns = req.get("columns", [])
+    keep_all_columns = False
+    if len(selectedColumns) == 0:
+        keep_all_columns = True
+
+    if location == "project":
+        records, _ = data_manager.fetchRecordsByProject(user_info, _id)
+    elif location == "record_group":
+        records, _ = data_manager.fetchRecordsByRecordGroup(user_info, _id)
+    else:
+        return None
 
     export_file = data_manager.downloadRecords(
-        project_id, exportType, selectedColumns, user_info
+        records,
+        export_type,
+        user_info,
+        _id,
+        location,
+        selectedColumns=selectedColumns,
+        keep_all_columns=keep_all_columns,
     )
     ## remove file after 30 seconds to allow for the user download to finish
     background_tasks.add_task(
@@ -482,7 +637,6 @@ async def get_users(
     Returns:
         List of users, role types
     """
-    ## TODO: add team id as a request parameter
     req = await request.json()
     project_id = req.get("project_id", None)
     users = data_manager.getUsers(Roles[role], user_info, project_id_exclude=project_id)
@@ -521,7 +675,6 @@ async def add_user(email: str, user_info: dict = Depends(authenticate)):
     """
     email = email.lower().replace(" ", "")
     if data_manager.hasRole(user_info, Roles.admin):
-        ## TODO check if provided email is a valid email address
         admin_document = data_manager.getDocument(
             "users", {"email": user_info.get("email", "")}
         )

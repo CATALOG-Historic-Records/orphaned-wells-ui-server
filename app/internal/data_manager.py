@@ -49,6 +49,7 @@ class DataManager:
         ## lock_duration: amount of seconds that records remain locked if no changes are made
         self.lock_duration = 120
 
+    ## lock functions
     def fetchLock(self, user):
         ## Can't use variable stored in memory for this
         while self.LOCKED and self.LOCKED != user:
@@ -126,19 +127,7 @@ class DataManager:
             _log.error(f"error trying to lock record: {e}")
             return False
 
-    def getDocument(self, collection, query, clean_id=False, return_list=False):
-        try:
-            cursor = self.db[collection].find(query)
-            if not return_list:
-                document = cursor.next()
-                if clean_id:
-                    document_id = document.get("_id", "")
-                    document["_id"] = str(document_id)
-                return document
-        except Exception as e:
-            _log.error(f"unable to find {query} in {collection}: {e}")
-            return None
-
+    ## user functions
     def getUser(self, email):
         cursor = self.db.users.find({"email": email})
         user = None
@@ -245,502 +234,6 @@ class DataManager:
         self.db.users.update_one(myquery, newvalues)
         return "success"
 
-    def getTeamProjectList(self, team):
-        team_query = {"name": team}
-        team_cursor = self.db.teams.find(team_query)
-        team_document = team_cursor.next()
-        projects = team_document.get("projects", [])
-        return projects
-
-    def getUserProjectList(self, user):
-        user_query = {"email": user}
-        user_cursor = self.db.users.find(user_query)
-        user_document = user_cursor.next()
-        default_team = user_document.get("default_team", None)
-        return self.getTeamProjectList(default_team)
-
-    def fetchProjects(self, user):
-        user_projects = self.getUserProjectList(user)
-        projects = []
-        cursor = self.db.projects.find({"_id": {"$in": user_projects}})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            projects.append(document)
-        return projects
-
-    def getProcessorByGoogleId(self, google_id):
-        cursor = self.db.processors.find({"processor_id": google_id})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            return document
-        return None
-
-    def fetchProcessor(self, google_id):
-        cursor = self.db.processors.find({"id": google_id})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            return document
-        return None
-
-    def fetchProcessors(self, user, state):
-        processors = []
-        cursor = self.db.processors.find({"state": state})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            processors.append(document)
-        return processors
-
-    def createProject(self, project_info, user_info):
-        ## get user's default team
-        user_email = user_info.get("email", "")
-        user_document = self.getDocument("users", ({"email": user_email}))
-        default_team = user_document.get("default_team", None)
-        if default_team is None:
-            ## TODO: handle project creation when a user has no default project
-            _log.info(f"user {user_email} has no default team")
-            return False
-
-        ## add user and timestamp to project
-        project_info["creator"] = user_info
-        project_info["team"] = default_team
-        project_info["dateCreated"] = time.time()
-        project_info["settings"] = {}
-
-        ## get processor id
-        processor_document = self.getProcessorByGoogleId(project_info["processorId"])
-        project_info["processor_id"] = str(processor_document["_id"])
-        ## add project to db collection
-        # _log.info(f"creating project with data: {project_info}")
-        db_response = self.db.projects.insert_one(project_info)
-        new_project_id = db_response.inserted_id
-
-        ## add project to team's project list:
-        team_query = {"name": default_team}
-        team_document = self.getDocument("teams", team_query)
-        team_projects = team_document.get("projects", [])
-        team_projects.append(new_project_id)
-        newvalues = {"$set": {"projects": team_projects}}
-        self.db.teams.update_one(team_query, newvalues)
-
-        self.recordHistory("createProject", user_email, str(new_project_id))
-
-        return str(new_project_id)
-
-    def fetchProjectData(
-        self, project_id, user, page, records_per_page, sort_by, filter_by
-    ):
-        ## get user's projects, check if user has access to this project
-        user_projects = self.getUserProjectList(user)
-        _id = ObjectId(project_id)
-        if not _id in user_projects:
-            return None, None
-
-        ## get project data
-        cursor = self.db.projects.find({"_id": _id})
-        project_data = cursor.next()
-        project_data["_id"] = str(project_data["_id"])
-
-        ## get project's records
-        records = []
-        filter_by["project_id"] = project_id
-        record_index = 1
-        if page is not None and records_per_page is not None and records_per_page != -1:
-            cursor = (
-                self.db.records.find(filter_by)
-                .sort(
-                    sort_by[0],
-                    sort_by[1]
-                    # )
-                )
-                .skip(records_per_page * page)
-                .limit(records_per_page)
-            )
-            record_index += page * records_per_page
-        else:
-            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
-
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            document["recordIndex"] = record_index
-            record_index += 1
-            records.append(document)
-
-        record_count = self.db.records.count_documents(filter_by)
-        return project_data, records, record_count
-
-    def getTeamRecords(self, user_info):
-        user = user_info.get("email", "")
-        ## get user's projects, check if user has access to this project
-        user_document = self.getDocument("users", {"email": user})
-        default_team = user_document.get("default_team", None)
-        team_document = self.getDocument("teams", {"name": default_team})
-        projects_list = team_document.get("projects", [])
-        records = []
-        for _id in projects_list:
-            project_id = str(_id)
-            ## get project data
-            cursor = self.db.projects.find({"_id": _id})
-            ## errors out sometimes ?
-            try:
-                project_data = cursor.next()
-                project_data["_id"] = str(project_data["_id"])
-                # _log.info(f"checking for records with project_id {project_id}")
-                cursor = self.db.records.find({"project_id": project_id}).sort(
-                    "dateCreated", ASCENDING
-                )
-                record_index = 1
-                for document in cursor:
-                    document["_id"] = str(document["_id"])
-                    document["recordIndex"] = record_index
-                    record_index += 1
-                    records.append(document)
-            except Exception as e:
-                _log.error(f"unable to add records from project {project_id}: {e}")
-        return records
-
-    def fetchRecordData(self, record_id, user_info, direction="next"):
-        user = user_info.get("email", "")
-        _id = ObjectId(record_id)
-        cursor = self.db.records.find({"_id": _id})
-        document = cursor.next()
-        document["_id"] = str(document["_id"])
-        projectId = document.get("project_id", "")
-        project_id = ObjectId(projectId)
-
-        ## try to attain lock
-        attained_lock = self.tryLockingRecord(record_id, user)
-
-        user_projects = self.getUserProjectList(user)
-        if not project_id in user_projects:
-            return None, None
-        image_urls = []
-        for image in document.get("image_files", []):
-            image_urls.append(
-                generate_download_signed_url_v4(
-                    document["project_id"], document["_id"], image
-                )
-            )
-        if len(image_urls) == 0:
-            image_urls.append(
-                generate_download_signed_url_v4(
-                    document["project_id"], document["_id"], document["filename"]
-                )
-            )
-        document["img_urls"] = image_urls
-
-        ## get project name
-        project = self.getDocument("projects", {"_id": project_id})
-        project_name = project.get("name", "")
-        document["project_name"] = project_name
-
-        ## get record index
-        dateCreated = document.get("dateCreated", 0)
-        record_index_query = {
-            "dateCreated": {"$lte": dateCreated},
-            "project_id": projectId,
-        }
-        record_index = self.db.records.count_documents(record_index_query)
-        document["recordIndex"] = record_index
-
-        ## get previous and next IDs
-        document["previous_id"] = self.getPreviousRecordId(dateCreated, projectId)
-        document["next_id"] = self.getNextRecordId(dateCreated, projectId)
-
-        return document, not attained_lock
-
-    def getNextRecordId(self, dateCreated, projectId):
-        cursor = self.db.records.find(
-            {"dateCreated": {"$gt": dateCreated}, "project_id": projectId}
-        ).sort("dateCreated", ASCENDING)
-        for document in cursor:
-            record_id = str(document.get("_id", ""))
-            return record_id
-        cursor = self.db.records.find({"project_id": projectId}).sort(
-            "dateCreated", ASCENDING
-        )
-        document = cursor.next()
-        record_id = str(document.get("_id", ""))
-        return record_id
-
-    def getPreviousRecordId(self, dateCreated, projectId):
-        _log.info(f"fetching previous record")
-        cursor = self.db.records.find(
-            {"dateCreated": {"$lt": dateCreated}, "project_id": projectId}
-        ).sort("dateCreated", DESCENDING)
-        for document in cursor:
-            record_id = str(document.get("_id", ""))
-            return record_id
-        cursor = self.db.records.find({"project_id": projectId}).sort(
-            "dateCreated", DESCENDING
-        )
-        document = cursor.next()
-        record_id = str(document.get("_id", ""))
-        return record_id
-
-    def createRecord(self, record, user_info={}):
-        user = user_info.get("email", None)
-        ## add timestamp to project
-        record["dateCreated"] = time.time()
-        ## add record to db collection
-        db_response = self.db.records.insert_one(record)
-        new_id = db_response.inserted_id
-        self.recordHistory("createRecord", user, record_id=str(new_id))
-        return str(new_id)
-
-    def updateProject(self, project_id, new_data, user_info={}):
-        user = user_info.get("email", None)
-        _id = ObjectId(project_id)
-        ## need to choose a subset of the data to update. can't update entire record because _id is immutable
-        myquery = {"_id": _id}
-        newvalues = {"$set": new_data}
-        self.db.projects.update_one(myquery, newvalues)
-        self.recordHistory("updateProject", user, project_id)
-        cursor = self.db.projects.find(myquery)
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            return document
-        return None
-
-    def updateUserProjects(self, email, new_data):
-        _log.info(f"updating {email} to be {new_data}")
-        ## need to choose a subset of the data to update. can't update entire record because _id is immutable
-        myquery = {"email": email}
-        newvalues = {"$set": new_data}
-        self.db.users.update_one(myquery, newvalues)
-        # _log.info(f"successfully updated project? cursor is : {cursor}")
-        return "success"
-
-    def updateRecordReviewStatus(self, record_id, review_status, user_info):
-        new_data = {"review_status": review_status}
-        self.updateRecord(record_id, new_data, "record", user_info)
-
-    def updateRecord(
-        self, record_id, new_data, update_type=None, user_info=None, forceUpdate=False
-    ):
-        # _log.info(f"updating {record_id} to be {new_data}")
-        attained_lock = False
-        user = None
-        if user_info is None and not forceUpdate:
-            return False
-        elif user_info is not None:
-            user = user_info.get("email", None)
-            attained_lock = self.tryLockingRecord(record_id, user)
-        if attained_lock or forceUpdate:
-            if update_type is None:
-                return False
-            _id = ObjectId(record_id)
-            search_query = {"_id": _id}
-            if update_type == "record":
-                data_update = new_data
-                update_query = {"$set": data_update}
-            else:
-                data_update = {update_type: new_data.get(update_type, None)}
-                if (
-                    update_type == "attributesList"
-                    and new_data.get("review_status", None) == "unreviewed"
-                ):
-                    ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
-                    data_update["review_status"] = "incomplete"
-                elif (
-                    update_type == "review_status"
-                    and new_data.get("review_status", None) == "unreviewed"
-                ):
-                    data_update = self.resetRecord(record_id, new_data, user)
-                update_query = {"$set": data_update}
-            self.db.records.update_one(search_query, update_query)
-            self.recordHistory("updateRecord", user, record_id=record_id)
-            return data_update
-        else:
-            return False
-
-    def resetRecord(self, record_id, record_data, user):
-        print(f"resetting record: {record_id}")
-        record_attributes = record_data["attributesList"]
-        for attribute in record_attributes:
-            attribute_name = attribute["key"]
-            if attribute["normalized_value"] != "":
-                original_value = attribute["normalized_value"]
-            else:
-                original_value = attribute["raw_text"]
-            attribute["value"] = original_value
-            attribute["confidence"] = attribute["ai_confidence"]
-            attribute["edited"] = False
-            ## check for subattributes and reset those
-            if attribute["subattributes"] is not None:
-                record_subattributes = attribute["subattributes"]
-                for subattribute in record_subattributes:
-                    if subattribute["normalized_value"] != "":
-                        original_value = subattribute["normalized_value"]
-                    else:
-                        original_value = subattribute["raw_text"]
-                    subattribute["value"] = original_value
-                    subattribute["confidence"] = subattribute.get("ai_confidence", None)
-                    subattribute["edited"] = False
-        update = {
-            "review_status": "unreviewed",
-            "attributesList": record_attributes,
-        }
-        self.recordHistory("resetRecord", user, record_id=record_id)
-        return update
-
-    def deleteProject(self, project_id, background_tasks, user_info):
-        ## TODO: check if user is a part of the team who owns this project
-        _log.info(f"deleting project {project_id}")
-        _id = ObjectId(project_id)
-        myquery = {"_id": _id}
-
-        ## add to deleted projects collection first
-        project_cursor = self.db.projects.find(myquery)
-        project_document = project_cursor.next()
-        project_document["deleted_by"] = user_info
-        team = project_document.get("team", "")
-        self.db.deleted_projects.insert_one(project_document)
-
-        ## delete from projects collection
-        self.db.projects.delete_one(myquery)
-
-        ## add records to deleted records collection and remove from records collection
-        background_tasks.add_task(
-            self.deleteRecords,
-            query={"project_id": project_id},
-            deletedBy=user_info,
-        )
-
-        self.recordHistory(
-            "deleteProject", user_info.get("email", None), project_id=project_id
-        )
-
-        self.removeProjectFromTeam(_id, team)
-        return "success"
-
-    def deleteRecord(self, record_id, user_info):
-        user = user_info.get("email", None)
-        ## TODO: check if user is a part of the team who owns the project that owns this record
-        _log.info(f"deleting {record_id}")
-        _id = ObjectId(record_id)
-        myquery = {"_id": _id}
-        self.db.records.delete_one(myquery)
-        self.recordHistory("deleteRecord", user=user, record_id=record_id)
-        return "success"
-
-    def deleteRecords(self, query, deletedBy):
-        user = deletedBy.get("email", None)
-        _log.info(f"deleting records with query: {query}")
-        ## add records to deleted records collection
-        record_cursor = self.db.records.find(query)
-        try:
-            for record_document in record_cursor:
-                record_document["deleted_by"] = deletedBy
-                self.db.deleted_records.insert_one(record_document)
-        except Exception as e:
-            _log.error(f"unable to move all deleted records: {e}")
-
-        ## Delete records associated with this project
-        self.db.records.delete_many(query)
-        # self.recordHistory("deleteRecords", user=user, notes=query)
-        return "success"
-
-    def removeProjectFromTeam(self, project_id, team):
-        team_query = {"name": team}
-        update = {"$pull": {"projects": project_id}}
-        self.db.teams.update_many(team_query, update)
-
-    def getProcessor(self, project_id):
-        _id = ObjectId(project_id)
-        try:
-            cursor = self.db.projects.find({"_id": _id})
-            document = cursor.next()
-            google_id = document.get("processorId", None)
-            processor_id = document.get("processor_id", None)
-            _processor_id = ObjectId(processor_id)
-            processor_cursor = self.db.processors.find({"_id": _processor_id})
-            processor_document = processor_cursor.next()
-            processor_attributes = processor_document.get("attributes", None)
-            return google_id, processor_attributes
-        except Exception as e:
-            _log.error(f"unable to find processor id: {e}")
-            return None
-
-    def downloadRecords(self, project_id, exportType, selectedColumns, user_info):
-        user = user_info.get("email", None)
-        ## TODO: check if user is a part of the team who owns this project
-
-        _id = ObjectId(project_id)
-        today = time.time()
-        output_dir = self.app_settings.export_dir
-        output_file = os.path.join(output_dir, f"{project_id}_{today}.{exportType}")
-        project_cursor = self.db.projects.find({"_id": _id})
-        attributes = ["file"]
-        subattributes = []
-        project_document = project_cursor.next()
-        # for each in project_document.get("attributes", {}):
-        #     if each["name"] in selectedColumns:
-        #         attributes.append(each["name"])
-        project_name = project_document.get("name", "")
-        cursor = self.db.records.find({"project_id": project_id})
-        record_attributes = []
-        if exportType == "csv":
-            for document in cursor:
-                current_attributes = set()
-                record_attribute = {}
-                for document_attribute in document["attributesList"]:
-                    attribute_name = document_attribute["key"].replace(" ", "")
-                    if attribute_name in selectedColumns:
-                        original_attribute_name = attribute_name
-                        i = 2
-                        while attribute_name in current_attributes:
-                            ## add a number to the end of the attribute so it (and its subattributes)
-                            ## is differentiable from other instances of the attribute
-                            attribute_name = f"{original_attribute_name}_{i}"
-                            i += 1
-                        current_attributes.add(attribute_name)
-                        if attribute_name not in attributes:
-                            attributes.append(attribute_name)
-                        record_attribute[attribute_name] = document_attribute["value"]
-                        ## add subattributes
-                        if document_attribute.get("subattributes", None):
-                            for document_subattribute in document_attribute[
-                                "subattributes"
-                            ]:
-                                subattribute_name = (
-                                    f"{attribute_name}[{document_subattribute['key']}]"
-                                )
-                                record_attribute[
-                                    subattribute_name
-                                ] = document_subattribute["value"]
-                                if subattribute_name not in subattributes:
-                                    subattributes.append(subattribute_name)
-                record_attribute["file"] = document.get("filename", "")
-                record_attributes.append(record_attribute)
-
-            # compute the output file directory and name
-            with open(output_file, "w", newline="") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=attributes + subattributes)
-                writer.writeheader()
-                writer.writerows(record_attributes)
-        else:
-            for document in cursor:
-                record_attribute = {}
-                for document_attribute in document["attributesList"]:
-                    attribute_name = document_attribute["key"]
-                    if attribute_name in selectedColumns:
-                        record_attribute[attribute_name] = document_attribute
-                record_attribute["file"] = document.get("filename", "")
-                record_attributes.append(record_attribute)
-            with open(output_file, "w", newline="") as jsonfile:
-                json.dump(record_attributes, jsonfile)
-
-        self.recordHistory("downloadRecords", user=user, project_id=project_id)
-        return output_file
-
-    def deleteFiles(self, filepaths, sleep_time=5):
-        _log.info(f"deleting files: {filepaths} in {sleep_time} seconds")
-        time.sleep(sleep_time)
-        for filepath in filepaths:
-            if os.path.isfile(filepath):
-                os.remove(filepath)
-                _log.info(f"deleted {filepath}")
-
     def hasRole(self, user_info, role=Roles.admin):
         email = user_info.get("email", "")
         cursor = self.db.users.find({"email": email})
@@ -843,6 +336,765 @@ class DataManager:
             _log.error(f"unable to add users: {e}")
             return {"result": f"{e}"}
 
+    ## Fetch/get functions
+    def getDocument(self, collection, query, clean_id=False, return_list=False):
+        try:
+            cursor = self.db[collection].find(query)
+            if not return_list:
+                document = cursor.next()
+                if clean_id:
+                    document_id = document.get("_id", "")
+                    document["_id"] = str(document_id)
+                return document
+        except Exception as e:
+            _log.error(f"unable to find {query} in {collection}: {e}")
+            return None
+
+    def getProjectFromRecordGroup(self, rg_id):
+        project_cursor = self.db.new_projects.find({"record_groups": rg_id})
+        project_document = project_cursor.next()
+        project_document["_id"] = str(project_document["_id"])
+        return project_document
+
+    def getTeamProjectList(self, team):
+        team_query = {"name": team}
+        team_cursor = self.db.teams.find(team_query)
+        team_document = team_cursor.next()
+        projects = team_document.get("project_list", [])
+        for i in range(len(projects)):
+            projects[i] = ObjectId(projects[i])
+        return projects
+
+    def getUserProjectList(self, user):
+        user_query = {"email": user}
+        user_cursor = self.db.users.find(user_query)
+        user_document = user_cursor.next()
+        default_team = user_document.get("default_team", None)
+        return self.getTeamProjectList(default_team)
+
+    def getUserRecordGroups(self, user):
+        projects = self.fetchProjects(user)
+        record_groups = []
+        for project in projects:
+            record_groups += project.get("record_groups", [])
+        return record_groups
+
+    def fetchProject(self, project_id):
+        cursor = self.db.new_projects.find({"_id": ObjectId(project_id)})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def fetchProjects(self, user):
+        user_projects = self.getUserProjectList(user)
+        projects = []
+        cursor = self.db.new_projects.find({"_id": {"$in": user_projects}})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            projects.append(document)
+        return projects
+
+    def getProjectRecordGroupsList(self, project_id):
+        query = {"_id": ObjectId(project_id)}
+        cursor = self.db.new_projects.find(query)
+        document = cursor.next()
+        record_groups_list = document.get("record_groups", [])
+        return record_groups_list
+
+    def fetchRecords(
+        self, sort_by=["dateCreated", 1], filter_by={}, page=None, records_per_page=None
+    ):
+        records = []
+        record_index = 1
+        if page is not None and records_per_page is not None and records_per_page != -1:
+            cursor = (
+                self.db.records.find(filter_by)
+                .sort(
+                    sort_by[0],
+                    sort_by[1]
+                    # )
+                )
+                .skip(records_per_page * page)
+                .limit(records_per_page)
+            )
+            record_index += page * records_per_page
+        else:
+            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
+
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            document["recordIndex"] = record_index
+            record_index += 1
+            records.append(document)
+        record_count = self.db.records.count_documents(filter_by)
+        return records, record_count
+
+    def fetchRecordsByRecordGroup(
+        self,
+        user,
+        rg_id,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by={},
+    ):
+        filter_by["record_group_id"] = rg_id
+        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
+
+    def fetchRecordsByProject(
+        self,
+        user,
+        project_id,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by={},
+    ):
+        ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
+        if "record_group_id" not in filter_by:
+            record_group_ids = self.getProjectRecordGroupsList(project_id)
+            filter_by["record_group_id"] = {"$in": record_group_ids}
+        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
+
+    def fetchRecordGroups(self, project_id, user):
+        project = self.fetchProject(project_id)
+        if project is None:
+            _log.info(f"project {project_id} not found")
+            return []
+        project_record_groups = project.get("record_groups", [])
+        record_group_ids = []
+        for i in range(len(project_record_groups)):
+            record_group_ids.append(ObjectId(project_record_groups[i]))
+        record_groups = []
+        cursor = self.db.record_groups.find({"_id": {"$in": record_group_ids}})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            record_groups.append(document)
+        return {"project": project, "record_groups": record_groups}
+
+    def fetchColumnData(self, location, _id):
+        if location == "project":
+            # get project, set name and settings
+            project_document = self.db.new_projects.find({"_id": ObjectId(_id)}).next()
+            project_document["_id"] = _id
+            columns = set()
+            # get all record groups
+            record_groups = self.getProjectRecordGroupsList(_id)
+            for rg_id in record_groups:
+                rg_document = self.db.record_groups.find(
+                    {"_id": ObjectId(rg_id)}
+                ).next()
+                google_id = rg_document["processorId"]
+                processor = self.getProcessorByGoogleId(google_id)
+                for attr in processor["attributes"]:
+                    columns.add(attr["name"])
+            columns = list(columns)
+            return {"columns": columns, "obj": project_document}
+        elif location == "record_group":
+            columns = []
+            rg_document = self.db.record_groups.find({"_id": ObjectId(_id)}).next()
+            rg_document["_id"] = _id
+            google_id = rg_document["processorId"]
+            processor = self.getProcessorByGoogleId(google_id)
+            for attr in processor["attributes"]:
+                columns.append(attr["name"])
+            return {"columns": columns, "obj": rg_document}
+        return None
+
+    def getProcessorByGoogleId(self, google_id):
+        cursor = self.db.processors.find({"processor_id": google_id})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def fetchProcessor(self, google_id):
+        cursor = self.db.processors.find({"id": google_id})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def fetchProcessors(self, user, state):
+        processors = []
+        cursor = self.db.processors.find({"state": state})
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            processors.append(document)
+        return processors
+
+    def fetchProjectData(
+        self, project_id, user, page, records_per_page, sort_by, filter_by
+    ):
+        ## get user's projects, check if user has access to this project
+        user_projects = self.getUserProjectList(user)
+        _id = ObjectId(project_id)
+        if not _id in user_projects:
+            return None, None
+
+        ## get project data
+        cursor = self.db.projects.find({"_id": _id})
+        project_data = cursor.next()
+        project_data["_id"] = str(project_data["_id"])
+
+        ## get project's records
+        records = []
+        filter_by["project_id"] = project_id
+        record_index = 1
+        if page is not None and records_per_page is not None and records_per_page != -1:
+            cursor = (
+                self.db.records.find(filter_by)
+                .sort(
+                    sort_by[0],
+                    sort_by[1]
+                    # )
+                )
+                .skip(records_per_page * page)
+                .limit(records_per_page)
+            )
+            record_index += page * records_per_page
+        else:
+            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
+
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            document["recordIndex"] = record_index
+            record_index += 1
+            records.append(document)
+
+        record_count = self.db.records.count_documents(filter_by)
+        return project_data, records, record_count
+
+    def fetchRecordGroupData(self, rg_id, user):
+        ## get user's projects, check if user has access to this project
+        user_record_groups = self.getUserRecordGroups(user)
+        if not rg_id in user_record_groups:
+            return None, None
+
+        ## get record group data
+        _id = ObjectId(rg_id)
+        cursor = self.db.record_groups.find({"_id": _id})
+        record_group = cursor.next()
+        record_group["_id"] = str(record_group["_id"])
+
+        project_document = self.getProjectFromRecordGroup(rg_id)
+
+        return project_document, record_group
+
+    def fetchRecordData(self, record_id, user_info, direction="next"):
+        user = user_info.get("email", "")
+        _id = ObjectId(record_id)
+        cursor = self.db.records.find({"_id": _id})
+        document = cursor.next()
+        document["_id"] = str(document["_id"])
+        rg_id = document.get("record_group_id", "")
+        # projectId = document.get("project_id", "")
+        # project_id = ObjectId(projectId)
+
+        ## try to attain lock
+        attained_lock = self.tryLockingRecord(record_id, user)
+
+        user_record_groups = self.getUserRecordGroups(user)
+        if not rg_id in user_record_groups:
+            return None, None
+        image_urls = []
+        for image in document.get("image_files", []):
+            if self.imageIsValid(image):
+                image_urls.append(
+                    generate_download_signed_url_v4(
+                        document["record_group_id"], document["_id"], image
+                    )
+                )
+        if len(image_urls) == 0:
+            if document.get("filename", False):
+                image_urls.append(
+                    generate_download_signed_url_v4(
+                        document["record_group_id"],
+                        document["_id"],
+                        document["filename"],
+                    )
+                )
+        document["img_urls"] = image_urls
+
+        ## get record group name
+        rg = self.getDocument("record_groups", {"_id": ObjectId(rg_id)})
+        rg_name = rg.get("name", "")
+        document["rg_name"] = rg_name
+        document["rg_id"] = rg_id
+
+        ## get project name
+        project_document = self.getProjectFromRecordGroup(rg_id)
+        project_name = project_document.get("name", "")
+        project_id = str(project_document.get("_id", ""))
+        document["project_name"] = project_name
+        document["project_id"] = project_id
+
+        ## get record index
+        dateCreated = document.get("dateCreated", 0)
+        record_index_query = {
+            "dateCreated": {"$lte": dateCreated},
+            "record_group_id": rg_id,
+        }
+        record_index = self.db.records.count_documents(record_index_query)
+        document["recordIndex"] = record_index
+
+        ## get previous and next IDs
+        document["previous_id"] = self.getPreviousRecordId(dateCreated, rg_id)
+        document["next_id"] = self.getNextRecordId(dateCreated, rg_id)
+
+        return document, not attained_lock
+
+    def getNextRecordId(self, dateCreated, rg_id):
+        # _log.info(f"fetching next record for {dateCreated} and {rg_id}")
+        cursor = self.db.records.find(
+            {"dateCreated": {"$gt": dateCreated}, "record_group_id": rg_id}
+        ).sort("dateCreated", ASCENDING)
+        for document in cursor:
+            record_id = str(document.get("_id", ""))
+            return record_id
+        cursor = self.db.records.find({"record_group_id": rg_id}).sort(
+            "dateCreated", ASCENDING
+        )
+        document = cursor.next()
+        record_id = str(document.get("_id", ""))
+        return record_id
+
+    def getPreviousRecordId(self, dateCreated, rg_id):
+        # _log.info(f"fetching previous record for {dateCreated} and {rg_id}")
+        cursor = self.db.records.find(
+            {"dateCreated": {"$lt": dateCreated}, "record_group_id": rg_id}
+        ).sort("dateCreated", DESCENDING)
+        for document in cursor:
+            record_id = str(document.get("_id", ""))
+            return record_id
+        cursor = self.db.records.find({"record_group_id": rg_id}).sort(
+            "dateCreated", DESCENDING
+        )
+        document = cursor.next()
+        record_id = str(document.get("_id", ""))
+        return record_id
+
+    def getProcessorByRecordGroupID(self, rg_id):
+        _id = ObjectId(rg_id)
+        try:
+            cursor = self.db.record_groups.find({"_id": _id})
+            document = cursor.next()
+            google_id = document.get("processorId", None)
+            processor_id = document.get("processor_id", None)
+            _processor_id = ObjectId(processor_id)
+            processor_cursor = self.db.processors.find({"_id": _processor_id})
+            processor_document = processor_cursor.next()
+            processor_attributes = processor_document.get("attributes", None)
+            return google_id, processor_attributes
+        except Exception as e:
+            _log.error(f"unable to find processor id: {e}")
+            return None
+
+    ## create/add functions
+    def createProject(self, project_info, user_info):
+        ## get user's default team
+        user_email = user_info.get("email", "")
+        user_document = self.getDocument("users", ({"email": user_email}))
+        default_team = user_document.get("default_team", None)
+        if default_team is None:
+            _log.info(f"user {user_email} has no default team")
+            return False
+
+        ## add default data to project
+        project_info["creator"] = user_info
+        project_info["team"] = default_team
+        project_info["dateCreated"] = time.time()
+        project_info["record_groups"] = []
+        project_info["history"] = []
+        project_info["tags"] = []
+        project_info["settings"] = {}
+
+        ## create new project entry
+        db_response = self.db.new_projects.insert_one(project_info)
+        new_project_id = db_response.inserted_id
+
+        ## add project to team's project list:
+        team_query = {"name": default_team}
+        team_document = self.getDocument("teams", team_query)
+        team_projects = team_document.get("project_list", [])
+        team_projects.append(new_project_id)
+        newvalues = {"$set": {"project_list": team_projects}}
+        self.db.teams.update_one(team_query, newvalues)
+
+        self.recordHistory("createProject", user_email, str(new_project_id))
+
+        return str(new_project_id)
+
+    def createRecordGroup(self, rg_info, user_info):
+        ## get user's default team
+        user_email = user_info.get("email", "")
+        user_document = self.getDocument("users", ({"email": user_email}))
+        default_team = user_document.get("default_team", None)
+        if default_team is None:
+            _log.info(f"user {user_email} has no default team")
+            return False
+
+        ## add user and timestamp to record group
+        rg_info["creator"] = user_info
+        rg_info["team"] = default_team
+        rg_info["dateCreated"] = time.time()
+        rg_info["settings"] = {}
+
+        ## get processor id
+        processor_document = self.getProcessorByGoogleId(rg_info["processorId"])
+        rg_info["processor_id"] = str(processor_document["_id"])
+
+        ## add record group to db collection
+        db_response = self.db.record_groups.insert_one(rg_info)
+        new_rg_id = db_response.inserted_id
+
+        ## add record group to project's rg list:
+        project_query = {"_id": ObjectId(rg_info.get("project_id", None))}
+        _log.info(f"project_query: {project_query}")
+        project_update = {"$push": {"record_groups": str(new_rg_id)}}
+
+        _log.info(f"project_update: {project_update}")
+        self.db.new_projects.update_one(project_query, project_update)
+
+        self.recordHistory("createRecordGroup", user_email, str(new_rg_id))
+
+        return str(new_rg_id)
+
+    def createRecord(self, record, user_info={}):
+        user = user_info.get("email", None)
+        ## add timestamp to project
+        record["dateCreated"] = time.time()
+        ## add record to db collection
+        db_response = self.db.records.insert_one(record)
+        new_id = db_response.inserted_id
+        self.recordHistory("createRecord", user, record_id=str(new_id))
+        return str(new_id)
+
+    ## update functions
+    def updateProject(self, project_id, new_data, user_info={}):
+        user = user_info.get("email", None)
+        _id = ObjectId(project_id)
+        ## need to choose a subset of the data to update. can't update entire record because _id is immutable
+        myquery = {"_id": _id}
+        newvalues = {"$set": new_data}
+        self.db.new_projects.update_one(myquery, newvalues)
+        self.recordHistory("updateProject", user, project_id)
+        cursor = self.db.new_projects.find(myquery)
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def updateRecordGroup(self, rg_id, new_data, user_info={}):
+        user = user_info.get("email", None)
+        _id = ObjectId(rg_id)
+        ## need to choose a subset of the data to update. can't update entire record because _id is immutable
+        myquery = {"_id": _id}
+        newvalues = {"$set": new_data}
+        self.db.record_groups.update_one(myquery, newvalues)
+        self.recordHistory("updateRecordGroup", user, rg_id)
+        cursor = self.db.record_groups.find(myquery)
+        for document in cursor:
+            document["_id"] = str(document["_id"])
+            return document
+        return None
+
+    def updateUserProjects(self, email, new_data):
+        _log.info(f"updating {email} to be {new_data}")
+        ## need to choose a subset of the data to update. can't update entire record because _id is immutable
+        myquery = {"email": email}
+        newvalues = {"$set": new_data}
+        self.db.users.update_one(myquery, newvalues)
+        # _log.info(f"successfully updated project? cursor is : {cursor}")
+        return "success"
+
+    def updateRecordReviewStatus(self, record_id, review_status, user_info):
+        new_data = {"review_status": review_status}
+        self.updateRecord(record_id, new_data, "record", user_info)
+
+    def updateRecord(
+        self, record_id, new_data, update_type=None, user_info=None, forceUpdate=False
+    ):
+        # _log.info(f"updating {record_id} to be {new_data}")
+        attained_lock = False
+        user = None
+        if user_info is None and not forceUpdate:
+            return False
+        elif user_info is not None:
+            user = user_info.get("email", None)
+            attained_lock = self.tryLockingRecord(record_id, user)
+        if attained_lock or forceUpdate:
+            if update_type is None:
+                return False
+            _id = ObjectId(record_id)
+            search_query = {"_id": _id}
+            if update_type == "record":
+                data_update = new_data
+                update_query = {"$set": data_update}
+            else:
+                data_update = {update_type: new_data.get(update_type, None)}
+                if (
+                    update_type == "attributesList"
+                    and new_data.get("review_status", None) == "unreviewed"
+                ):
+                    ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
+                    data_update["review_status"] = "incomplete"
+                elif (
+                    update_type == "review_status"
+                    and new_data.get("review_status", None) == "unreviewed"
+                ):
+                    data_update = self.resetRecord(record_id, new_data, user)
+                update_query = {"$set": data_update}
+            self.db.records.update_one(search_query, update_query)
+            self.recordHistory("updateRecord", user, record_id=record_id)
+            return data_update
+        else:
+            return False
+
+    def resetRecord(self, record_id, record_data, user):
+        print(f"resetting record: {record_id}")
+        record_attributes = record_data["attributesList"]
+        for attribute in record_attributes:
+            attribute_name = attribute["key"]
+            if attribute["normalized_value"] != "":
+                original_value = attribute["normalized_value"]
+            else:
+                original_value = attribute["raw_text"]
+            attribute["value"] = original_value
+            attribute["confidence"] = attribute["ai_confidence"]
+            attribute["edited"] = False
+            ## check for subattributes and reset those
+            if attribute["subattributes"] is not None:
+                record_subattributes = attribute["subattributes"]
+                for subattribute in record_subattributes:
+                    if subattribute["normalized_value"] != "":
+                        original_value = subattribute["normalized_value"]
+                    else:
+                        original_value = subattribute["raw_text"]
+                    subattribute["value"] = original_value
+                    subattribute["confidence"] = subattribute.get("ai_confidence", None)
+                    subattribute["edited"] = False
+        update = {
+            "review_status": "unreviewed",
+            "attributesList": record_attributes,
+        }
+        self.recordHistory("resetRecord", user, record_id=record_id)
+        return update
+
+    ## delete functions
+    def deleteProject(self, project_id, background_tasks, user_info):
+        ## TODO: check if user is a part of the team who owns this project
+        _log.info(f"deleting project {project_id}")
+        _id = ObjectId(project_id)
+        myquery = {"_id": _id}
+
+        ## add to deleted projects collection first
+        project_cursor = self.db.new_projects.find(myquery)
+        project_document = project_cursor.next()
+        project_document["deleted_by"] = user_info
+        team = project_document.get("team", "")
+        self.db.deleted_projects.insert_one(project_document)
+
+        ## delete from projects collection
+        self.db.new_projects.delete_one(myquery)
+
+        ## delete record groups
+        record_groups = project_document.get("record_groups", [])
+        self.deleteRecordGroups(record_groups=record_groups, deletedBy=user_info)
+
+        ## add records to deleted records collection and remove from records collection
+        background_tasks.add_task(
+            self.deleteRecords,
+            query={"record_group_id": {"$in": record_groups}},
+            deletedBy=user_info,
+        )
+
+        self.recordHistory(
+            "deleteProject", user_info.get("email", None), project_id=project_id
+        )
+
+        self.removeProjectFromTeam(_id, team)
+        return "success"
+
+    def deleteRecordGroup(self, rg_id, background_tasks, user_info):
+        _log.info(f"deleting record group {rg_id}")
+        _id = ObjectId(rg_id)
+        myquery = {"_id": _id}
+
+        ## add to deleted record groups collection first
+        record_group_cursor = self.db.record_groups.find(myquery)
+        record_group_doc = record_group_cursor.next()
+        record_group_doc["deleted_by"] = user_info
+        team = record_group_doc.get("team", "")
+        self.db.deleted_record_groups.insert_one(record_group_doc)
+
+        ## delete from record groups collection
+        self.db.record_groups.delete_one(myquery)
+
+        ## add records to deleted records collection and remove from records collection
+        background_tasks.add_task(
+            self.deleteRecords,
+            query={"record_group": rg_id},
+            deletedBy=user_info,
+        )
+
+        self.recordHistory(
+            "deleteRecordGroup", user_info.get("email", None), rg_id=rg_id
+        )
+
+        ## remove from project list
+        self.removeRecordGroupFromProject(rg_id)
+
+        self.removeRecordGroupFromTeam(_id, team)
+        return "success"
+
+    def deleteRecord(self, record_id, user_info):
+        user = user_info.get("email", None)
+        ## TODO: check if user is a part of the team who owns the project that owns this record
+        _log.info(f"deleting {record_id}")
+        _id = ObjectId(record_id)
+        myquery = {"_id": _id}
+        self.db.records.delete_one(myquery)
+        self.recordHistory("deleteRecord", user=user, record_id=record_id)
+        return "success"
+
+    def deleteRecords(self, query, deletedBy):
+        user = deletedBy.get("email", None)
+        _log.info(f"deleting records with query: {query}")
+        ## add records to deleted records collection
+        record_cursor = self.db.records.find(query)
+        try:
+            for record_document in record_cursor:
+                record_document["deleted_by"] = deletedBy
+                self.db.deleted_records.insert_one(record_document)
+        except Exception as e:
+            _log.error(f"unable to move all deleted records: {e}")
+
+        ## Delete records associated with this project
+        self.db.records.delete_many(query)
+        # self.recordHistory("deleteRecords", user=user, notes=query)
+        return "success"
+
+    def deleteRecordGroups(self, record_groups, deletedBy):
+        user = deletedBy.get("email", None)
+        _log.info(f"deleting record groups: {record_groups}")
+        record_group_ids = []
+        for i in range(len(record_groups)):
+            record_group_ids.append(ObjectId(record_groups[i]))
+        ## add to deleted records collection
+        query = {"_id": {"$in": record_group_ids}}
+        cursor = self.db.record_groups.find(query)
+        try:
+            for document in cursor:
+                document["deleted_by"] = deletedBy
+                self.db.deleted_record_groups.insert_one(document)
+        except Exception as e:
+            _log.error(f"unable to move all deleted record groups: {e}")
+
+        ## Delete records associated with this project
+        self.db.record_groups.delete_many(query)
+        return "success"
+
+    def removeProjectFromTeam(self, project_id, team):
+        team_query = {"name": team}
+        update = {"$pull": {"projects": project_id}}
+        self.db.teams.update_many(team_query, update)
+
+    def removeRecordGroupFromProject(self, rg_id):
+        query = {"record_groups": rg_id}
+        update = {"$pull": {"record_groups": rg_id}}
+        self.db.new_projects.update_many(query, update)
+
+    def removeRecordGroupFromTeam(self, rg_id, team):
+        team_query = {"name": team}
+        update = {"$pull": {"record_groups": rg_id}}
+        self.db.teams.update_many(team_query, update)
+
+    ## miscellaneous functions
+    def downloadRecords(
+        self,
+        records,
+        exportType,
+        user_info,
+        _id,
+        location,
+        selectedColumns=[],
+        keep_all_columns=False,
+    ):
+        user = user_info.get("email", None)
+        ## TODO: check if user is a part of the team who owns this project
+        today = time.time()
+        output_dir = self.app_settings.export_dir
+        output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+        attributes = ["file"]
+        subattributes = []
+        record_attributes = []
+        if exportType == "csv":
+            for document in records:
+                current_attributes = set()
+                record_attribute = {}
+                for document_attribute in document["attributesList"]:
+                    attribute_name = document_attribute["key"].replace(" ", "")
+                    if attribute_name in selectedColumns or keep_all_columns:
+                        original_attribute_name = attribute_name
+                        i = 2
+                        while attribute_name in current_attributes:
+                            ## add a number to the end of the attribute so it (and its subattributes)
+                            ## is differentiable from other instances of the attribute
+                            attribute_name = f"{original_attribute_name}_{i}"
+                            i += 1
+                        current_attributes.add(attribute_name)
+                        if attribute_name not in attributes:
+                            attributes.append(attribute_name)
+                        record_attribute[attribute_name] = document_attribute["value"]
+                        ## add subattributes
+                        if document_attribute.get("subattributes", None):
+                            for document_subattribute in document_attribute[
+                                "subattributes"
+                            ]:
+                                subattribute_name = (
+                                    f"{attribute_name}[{document_subattribute['key']}]"
+                                )
+                                record_attribute[
+                                    subattribute_name
+                                ] = document_subattribute["value"]
+                                if subattribute_name not in subattributes:
+                                    subattributes.append(subattribute_name)
+                record_attribute["file"] = document.get("filename", "")
+                record_attributes.append(record_attribute)
+
+            # compute the output file directory and name
+            with open(output_file, "w", newline="") as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=attributes + subattributes)
+                writer.writeheader()
+                writer.writerows(record_attributes)
+        else:
+            for document in records:
+                record_attribute = {}
+                for document_attribute in document["attributesList"]:
+                    attribute_name = document_attribute["key"]
+                    if attribute_name in selectedColumns or keep_all_columns:
+                        record_attribute[attribute_name] = document_attribute
+                record_attribute["file"] = document.get("filename", "")
+                record_attributes.append(record_attribute)
+            with open(output_file, "w", newline="") as jsonfile:
+                json.dump(record_attributes, jsonfile)
+
+        if location == "project":
+            self.recordHistory("downloadRecords", user=user, project_id=_id)
+        elif location == "record_group":
+            self.recordHistory("downloadRecords", user=user, rg_id=_id)
+        return output_file
+
+    def deleteFiles(self, filepaths, sleep_time=5):
+        _log.info(f"deleting files: {filepaths} in {sleep_time} seconds")
+        time.sleep(sleep_time)
+        for filepath in filepaths:
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+                _log.info(f"deleted {filepath}")
+
     def checkProjectValidity(self, projectId):
         try:
             project_id = ObjectId(projectId)
@@ -852,14 +1104,36 @@ class DataManager:
         if project is not None:
             return True
 
+    def checkRecordGroupValidity(self, rg_id):
+        try:
+            rg_id = ObjectId(rg_id)
+        except:
+            return False
+        rg = self.getDocument("record_groups", {"_id": rg_id})
+        if rg is not None:
+            return True
+
+    def imageIsValid(self, image):
+        ## some broken records have letters saved where image names should be
+        ## for now, just ensure that the name is at least 3 characters long
+        try:
+            if len(image) > 2:
+                return True
+            else:
+                return False
+        except Exception as e:
+            _log.error(f"unable to check validity of image: {e}")
+            return False
+
     def recordHistory(
-        self, action, user=None, project_id=None, record_id=None, notes=None
+        self, action, user=None, project_id=None, rg_id=None, record_id=None, notes=None
     ):
         try:
             history_item = {
                 "action": action,
                 "user": user,
                 "project_id": project_id,
+                "record_group_id": rg_id,
                 "record_id": record_id,
                 "notes": notes,
                 "timestamp": time.time(),
