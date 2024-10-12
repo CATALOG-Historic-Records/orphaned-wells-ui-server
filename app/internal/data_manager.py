@@ -379,6 +379,19 @@ class DataManager:
             record_groups += project.get("record_groups", [])
         return record_groups
 
+    def getRecordGroupProgress(self, rg_id):
+        ## get total records count
+        query = {"record_group_id": rg_id}
+        total_amt = self.db.records.count_documents(query)
+
+        ## get count of reviewed and defective
+        query = {
+            "record_group_id": rg_id,
+            "review_status": {"$in": ["defective", "reviewed"]},
+        }
+        reviewed_amt = self.db.records.count_documents(query)
+        return total_amt, reviewed_amt
+
     def fetchProject(self, project_id):
         cursor = self.db.new_projects.find({"_id": ObjectId(project_id)})
         for document in cursor:
@@ -470,6 +483,10 @@ class DataManager:
         cursor = self.db.record_groups.find({"_id": {"$in": record_group_ids}})
         for document in cursor:
             document["_id"] = str(document["_id"])
+            (
+                document["total_amt"],
+                document["reviewed_amt"],
+            ) = self.getRecordGroupProgress(document["_id"])
             record_groups.append(document)
         return {"project": project, "record_groups": record_groups}
 
