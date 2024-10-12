@@ -16,15 +16,15 @@ STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 def upload_documents_from_directory(
     backend_url=None,
     user_email=None,
-    project_id=None,
+    rg_id=None,
     local_directory=None,
     cloud_bucket=None,
     cloud_directory="",
     delete_local_files=False,
     storage_service_key=None,
 ):
-    if project_id is None:
-        print("please provide a project id to upload documents to")
+    if rg_id is None:
+        print("please provide a record group id to upload documents to")
         return
     if user_email is None:
         print("please provide a contributor's email")
@@ -35,7 +35,7 @@ def upload_documents_from_directory(
     if backend_url is None:
         # backend_url = f"http://localhost:8001"
         backend_url = f"https://server.uow-carbon.org"
-    post_url = f"{backend_url}/upload_document/{project_id}/{user_email}"
+    post_url = f"{backend_url}/upload_document/{rg_id}/{user_email}"
     if local_directory is not None:
         files_to_delete = []
         print(f"uploading documents from {local_directory}")
