@@ -661,7 +661,11 @@ class DataManager:
         document["next_id"] = self.getNextRecordId(dateCreated, rg_id)
 
         ## sort record attributes
-        document["attributesList"] = self.sortRecordAttributes(document, rg)
+        try:
+            sorted_attributes = self.sortRecordAttributes(document, rg)
+            document["attributesList"] = sorted_attributes
+        except Exception as e:
+            _log.error(f"unable to sort attributes: {e}")
 
         return document, not attained_lock
 
