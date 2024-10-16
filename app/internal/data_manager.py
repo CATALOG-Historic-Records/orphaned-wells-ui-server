@@ -660,6 +660,9 @@ class DataManager:
         document["previous_id"] = self.getPreviousRecordId(dateCreated, rg_id)
         document["next_id"] = self.getNextRecordId(dateCreated, rg_id)
 
+        ## sort record attributes
+        document["attributesList"] = self.sortRecordAttributes(document, rg)
+
         return document, not attained_lock
 
     def getNextRecordId(self, dateCreated, rg_id):
@@ -1141,6 +1144,31 @@ class DataManager:
         except Exception as e:
             _log.error(f"unable to check validity of image: {e}")
             return False
+
+    def sortRecordAttributes(self, record, rg):
+        # start_time = time.time()
+
+        ## get processor attributes
+        google_id = rg["processorId"]
+        processor_doc = self.db.processors.find({"google_id": google_id}).next()
+        processor_attributes = processor_doc["attributes"]
+        attributes = record["attributesList"]
+
+        ## match record attribute to each processor attribute
+        sorted_attributes = []
+        for each in processor_attributes:
+            attribute_name = each["name"]
+            attribute = next(
+                (item for item in attributes if item["key"] == attribute_name), None
+            )
+            if attribute is None:
+                _log.info(f"{attribute_name} is None")
+            else:
+                sorted_attributes.append(attribute)
+
+        # end_time = time.time()
+        # _log.info(f"sorting process took {end_time-start_time} seconds")
+        return sorted_attributes
 
     def recordHistory(
         self, action, user=None, project_id=None, rg_id=None, record_id=None, notes=None
