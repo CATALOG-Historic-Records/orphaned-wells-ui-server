@@ -392,6 +392,20 @@ class DataManager:
         reviewed_amt = self.db.records.count_documents(query)
         return total_amt, reviewed_amt
 
+    def fetchTeamInfo(self, email):
+        user_doc = self.db.users.find({"email": email}).next()
+        team_name = user_doc["default_team"]
+        team_doc = self.db.teams.find({"name": team_name}).next()
+        if "projects" in team_doc:
+            del team_doc["projects"]
+        ## convert object ids to strings
+        team_doc["_id"] = str(team_doc["_id"])
+        for i in range(len(team_doc["project_list"])):
+            project_object_id = team_doc["project_list"][i]
+            team_doc["project_list"][i] = str(project_object_id)
+
+        return team_doc
+
     def fetchProject(self, project_id):
         cursor = self.db.new_projects.find({"_id": ObjectId(project_id)})
         for document in cursor:
@@ -413,6 +427,20 @@ class DataManager:
         cursor = self.db.new_projects.find(query)
         document = cursor.next()
         record_groups_list = document.get("record_groups", [])
+        return record_groups_list
+
+    def getTeamRecordGroupsList(self, team_name):
+        query = {"name": team_name}
+        cursor = self.db.teams.find(query)
+        document = cursor.next()
+        project_list = document.get("project_list", [])
+        record_groups_list = []
+        for project_id in project_list:
+            try:
+                rgs = self.getProjectRecordGroupsList(str(project_id))
+                record_groups_list += rgs
+            except Exception as e:
+                _log.error(f"unable to get record groups for project {project_id}: {e}")
         return record_groups_list
 
     def fetchRecords(
@@ -442,6 +470,19 @@ class DataManager:
             records.append(document)
         record_count = self.db.records.count_documents(filter_by)
         return records, record_count
+
+    def fetchRecordsByTeam(
+        self,
+        user,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by={},
+    ):
+        team_info = self.fetchTeamInfo(user["email"])
+        rg_list = self.getTeamRecordGroupsList(team_info["name"])
+        filter_by["record_group_id"] = {"$in": rg_list}
+        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
 
     def fetchRecordsByRecordGroup(
         self,
@@ -474,7 +515,7 @@ class DataManager:
         project = self.fetchProject(project_id)
         if project is None:
             _log.info(f"project {project_id} not found")
-            return []
+            return {}
         project_record_groups = project.get("record_groups", [])
         record_group_ids = []
         for i in range(len(project_record_groups)):
@@ -491,13 +532,21 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     def fetchColumnData(self, location, _id):
-        if location == "project":
-            # get project, set name and settings
-            project_document = self.db.new_projects.find({"_id": ObjectId(_id)}).next()
-            project_document["_id"] = _id
+        if location == "project" or location == "team":
             columns = set()
-            # get all record groups
-            record_groups = self.getProjectRecordGroupsList(_id)
+            if location == "project":
+                # get project, set name and settings
+                document = self.db.new_projects.find({"_id": ObjectId(_id)}).next()
+                document["_id"] = _id
+                # get all record groups
+                record_groups = self.getProjectRecordGroupsList(_id)
+            else:
+                document = self.db.teams.find({"name": _id}).next()
+                document["_id"] = str(document["_id"])
+                ##TODO: fix object ids in team project list?
+                for i in range(len(document["project_list"])):
+                    document["project_list"][i] = str(document["project_list"][i])
+                record_groups = self.getTeamRecordGroupsList(_id)
             for rg_id in record_groups:
                 rg_document = self.db.record_groups.find(
                     {"_id": ObjectId(rg_id)}
@@ -507,7 +556,8 @@ class DataManager:
                 for attr in processor["attributes"]:
                     columns.add(attr["name"])
             columns = list(columns)
-            return {"columns": columns, "obj": project_document}
+            return {"columns": columns, "obj": document}
+
         elif location == "record_group":
             columns = []
             rg_document = self.db.record_groups.find({"_id": ObjectId(_id)}).next()
@@ -871,7 +921,9 @@ class DataManager:
                     data_update = self.resetRecord(record_id, new_data, user)
                 update_query = {"$set": data_update}
             self.db.records.update_one(search_query, update_query)
-            self.recordHistory("updateRecord", user, record_id=record_id)
+            self.recordHistory(
+                "updateRecord", user, record_id=record_id, query=update_query
+            )
             return data_update
         else:
             return False
@@ -1022,7 +1074,7 @@ class DataManager:
 
     def removeProjectFromTeam(self, project_id, team):
         team_query = {"name": team}
-        update = {"$pull": {"projects": project_id}}
+        update = {"$pull": {"project_list": project_id}}
         self.db.teams.update_many(team_query, update)
 
     def removeRecordGroupFromProject(self, rg_id):
@@ -1109,6 +1161,10 @@ class DataManager:
             self.recordHistory("downloadRecords", user=user, project_id=_id)
         elif location == "record_group":
             self.recordHistory("downloadRecords", user=user, rg_id=_id)
+        elif location == "team":
+            self.recordHistory(
+                "downloadRecords", user=user, notes="downloaded team records"
+            )
         return output_file
 
     def deleteFiles(self, filepaths, sleep_time=5):
@@ -1175,7 +1231,14 @@ class DataManager:
         return sorted_attributes
 
     def recordHistory(
-        self, action, user=None, project_id=None, rg_id=None, record_id=None, notes=None
+        self,
+        action,
+        user=None,
+        project_id=None,
+        rg_id=None,
+        record_id=None,
+        notes=None,
+        query=None,
     ):
         try:
             history_item = {
@@ -1185,6 +1248,7 @@ class DataManager:
                 "record_group_id": rg_id,
                 "record_id": record_id,
                 "notes": notes,
+                "query": query,
                 "timestamp": time.time(),
             }
             self.db.history.insert_one(history_item)

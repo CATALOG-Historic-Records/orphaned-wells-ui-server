@@ -242,6 +242,22 @@ async def get_records(
                     user_info, rg_id, page, records_per_page, sort_by, filter_by
                 )
                 return {"records": records, "record_count": record_count}
+    elif get_by == "team":
+        sort_by = data.get(
+            "sort", ["dateCreated", 1]
+        )  ## 1 is ascending, -1 is descending`
+        if sort_by[1] != 1 and sort_by[1] != -1:
+            sort_by[1] = 1
+        filter_by = data.get("filter", {})
+        records, record_count = data_manager.fetchRecordsByTeam(
+            user_info,
+            page,
+            records_per_page,
+            sort_by,
+            filter_by,
+        )
+        return {"records": records, "record_count": record_count}
+
     _log.error(f"unable to process record query")
     raise HTTPException(400, detail=f"unable to process record query")
 
@@ -371,6 +387,17 @@ async def get_column_data(
         Dictionary containing processor data
     """
     resp = data_manager.fetchColumnData(location, _id)
+    return resp
+
+
+@router.get("/get_team_info")
+async def get_team_info(user_info: dict = Depends(authenticate)):
+    """Get user's team information
+
+    Returns:
+        Dictionary containing team information
+    """
+    resp = data_manager.fetchTeamInfo(user_info["email"])
     return resp
 
 
@@ -609,8 +636,12 @@ async def download_records(
         records, _ = data_manager.fetchRecordsByProject(user_info, _id)
     elif location == "record_group":
         records, _ = data_manager.fetchRecordsByRecordGroup(user_info, _id)
+    elif location == "team":
+        records, _ = data_manager.fetchRecordsByTeam(user_info)
     else:
-        return None
+        raise HTTPException(
+            status_code=400, detail=f"Location must be project, record_group, or team"
+        )
 
     export_file = data_manager.downloadRecords(
         records,
