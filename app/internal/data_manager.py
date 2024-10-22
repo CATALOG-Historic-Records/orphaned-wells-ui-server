@@ -351,7 +351,7 @@ class DataManager:
             return None
 
     def getProjectFromRecordGroup(self, rg_id):
-        project_cursor = self.db.new_projects.find({"record_groups": rg_id})
+        project_cursor = self.db.projects.find({"record_groups": rg_id})
         project_document = project_cursor.next()
         project_document["_id"] = str(project_document["_id"])
         return project_document
@@ -407,7 +407,7 @@ class DataManager:
         return team_doc
 
     def fetchProject(self, project_id):
-        cursor = self.db.new_projects.find({"_id": ObjectId(project_id)})
+        cursor = self.db.projects.find({"_id": ObjectId(project_id)})
         for document in cursor:
             document["_id"] = str(document["_id"])
             return document
@@ -416,7 +416,7 @@ class DataManager:
     def fetchProjects(self, user):
         user_projects = self.getUserProjectList(user)
         projects = []
-        cursor = self.db.new_projects.find({"_id": {"$in": user_projects}})
+        cursor = self.db.projects.find({"_id": {"$in": user_projects}})
         for document in cursor:
             document["_id"] = str(document["_id"])
             projects.append(document)
@@ -424,7 +424,7 @@ class DataManager:
 
     def getProjectRecordGroupsList(self, project_id):
         query = {"_id": ObjectId(project_id)}
-        cursor = self.db.new_projects.find(query)
+        cursor = self.db.projects.find(query)
         document = cursor.next()
         record_groups_list = document.get("record_groups", [])
         return record_groups_list
@@ -536,7 +536,7 @@ class DataManager:
             columns = set()
             if location == "project":
                 # get project, set name and settings
-                document = self.db.new_projects.find({"_id": ObjectId(_id)}).next()
+                document = self.db.projects.find({"_id": ObjectId(_id)}).next()
                 document["_id"] = _id
                 # get all record groups
                 record_groups = self.getProjectRecordGroupsList(_id)
@@ -785,7 +785,7 @@ class DataManager:
         project_info["settings"] = {}
 
         ## create new project entry
-        db_response = self.db.new_projects.insert_one(project_info)
+        db_response = self.db.projects.insert_one(project_info)
         new_project_id = db_response.inserted_id
 
         ## add project to team's project list:
@@ -829,7 +829,7 @@ class DataManager:
         project_update = {"$push": {"record_groups": str(new_rg_id)}}
 
         _log.info(f"project_update: {project_update}")
-        self.db.new_projects.update_one(project_query, project_update)
+        self.db.projects.update_one(project_query, project_update)
 
         self.recordHistory("createRecordGroup", user_email, str(new_rg_id))
 
@@ -852,9 +852,9 @@ class DataManager:
         ## need to choose a subset of the data to update. can't update entire record because _id is immutable
         myquery = {"_id": _id}
         newvalues = {"$set": new_data}
-        self.db.new_projects.update_one(myquery, newvalues)
+        self.db.projects.update_one(myquery, newvalues)
         self.recordHistory("updateProject", user, project_id)
-        cursor = self.db.new_projects.find(myquery)
+        cursor = self.db.projects.find(myquery)
         for document in cursor:
             document["_id"] = str(document["_id"])
             return document
@@ -966,14 +966,14 @@ class DataManager:
         myquery = {"_id": _id}
 
         ## add to deleted projects collection first
-        project_cursor = self.db.new_projects.find(myquery)
+        project_cursor = self.db.projects.find(myquery)
         project_document = project_cursor.next()
         project_document["deleted_by"] = user_info
         team = project_document.get("team", "")
         self.db.deleted_projects.insert_one(project_document)
 
         ## delete from projects collection
-        self.db.new_projects.delete_one(myquery)
+        self.db.projects.delete_one(myquery)
 
         ## delete record groups
         record_groups = project_document.get("record_groups", [])
@@ -1080,7 +1080,7 @@ class DataManager:
     def removeRecordGroupFromProject(self, rg_id):
         query = {"record_groups": rg_id}
         update = {"$pull": {"record_groups": rg_id}}
-        self.db.new_projects.update_many(query, update)
+        self.db.projects.update_many(query, update)
 
     def removeRecordGroupFromTeam(self, rg_id, team):
         team_query = {"name": team}
