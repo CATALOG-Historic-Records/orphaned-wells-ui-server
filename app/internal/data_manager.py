@@ -6,6 +6,7 @@ import csv
 import json
 from enum import Enum
 import threading
+import traceback
 
 from typing import Union, List
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ from app.internal.image_handling import (
     generate_download_signed_url_v4,
     delete_google_storage_directory,
 )
+import app.internal.util as util
 
 
 _log = logging.getLogger(__name__)
@@ -667,7 +669,7 @@ class DataManager:
             return None, None
         image_urls = []
         for image in document.get("image_files", []):
-            if self.imageIsValid(image):
+            if util.imageIsValid(image):
                 image_urls.append(
                     generate_download_signed_url_v4(
                         document["record_group_id"], document["_id"], image
@@ -712,10 +714,15 @@ class DataManager:
 
         ## sort record attributes
         try:
-            sorted_attributes = self.sortRecordAttributes(document, rg)
+            google_id = rg["processorId"]
+            processor_doc = self.db.processors.find({"google_id": google_id}).next()
+            sorted_attributes = util.sortRecordAttributes(
+                document["attributesList"], processor_doc
+            )
             document["attributesList"] = sorted_attributes
         except Exception as e:
             _log.error(f"unable to sort attributes: {e}")
+            _log.error(traceback.format_exc())
 
         return document, not attained_lock
 
@@ -1167,14 +1174,6 @@ class DataManager:
             )
         return output_file
 
-    def deleteFiles(self, filepaths, sleep_time=5):
-        _log.info(f"deleting files: {filepaths} in {sleep_time} seconds")
-        time.sleep(sleep_time)
-        for filepath in filepaths:
-            if os.path.isfile(filepath):
-                os.remove(filepath)
-                _log.info(f"deleted {filepath}")
-
     def checkProjectValidity(self, projectId):
         try:
             project_id = ObjectId(projectId)
@@ -1192,43 +1191,6 @@ class DataManager:
         rg = self.getDocument("record_groups", {"_id": rg_id})
         if rg is not None:
             return True
-
-    def imageIsValid(self, image):
-        ## some broken records have letters saved where image names should be
-        ## for now, just ensure that the name is at least 3 characters long
-        try:
-            if len(image) > 2:
-                return True
-            else:
-                return False
-        except Exception as e:
-            _log.error(f"unable to check validity of image: {e}")
-            return False
-
-    def sortRecordAttributes(self, record, rg):
-        # start_time = time.time()
-
-        ## get processor attributes
-        google_id = rg["processorId"]
-        processor_doc = self.db.processors.find({"google_id": google_id}).next()
-        processor_attributes = processor_doc["attributes"]
-        attributes = record["attributesList"]
-
-        ## match record attribute to each processor attribute
-        sorted_attributes = []
-        for each in processor_attributes:
-            attribute_name = each["name"]
-            attribute = next(
-                (item for item in attributes if item["key"] == attribute_name), None
-            )
-            if attribute is None:
-                _log.info(f"{attribute_name} is None")
-            else:
-                sorted_attributes.append(attribute)
-
-        # end_time = time.time()
-        # _log.info(f"sorting process took {end_time-start_time} seconds")
-        return sorted_attributes
 
     def recordHistory(
         self,

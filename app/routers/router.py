@@ -18,6 +18,7 @@ from fastapi.security import OAuth2PasswordBearer
 
 from app.internal.data_manager import data_manager, Roles
 from app.internal.image_handling import process_document, process_zip
+import app.internal.util as util
 import app.internal.auth as auth
 
 _log = logging.getLogger(__name__)
@@ -653,9 +654,7 @@ async def download_records(
         keep_all_columns=keep_all_columns,
     )
     ## remove file after 30 seconds to allow for the user download to finish
-    background_tasks.add_task(
-        data_manager.deleteFiles, filepaths=[export_file], sleep_time=30
-    )
+    background_tasks.add_task(util.deleteFiles, filepaths=[export_file], sleep_time=30)
     return export_file
 
 
