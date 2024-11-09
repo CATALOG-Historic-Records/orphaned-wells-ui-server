@@ -112,6 +112,7 @@ def process_document(
     data_manager,
     mime_type,
     content,
+    reprocessed=False,
 ):
     if file_ext == ".tif" or file_ext == ".tiff":
         output_paths = convert_tiff(
@@ -162,6 +163,7 @@ def process_document(
         processor_attributes=processor_attributes,
         data_manager=data_manager,
         image_content=content,
+        reprocessed=reprocessed,
     )
 
     ## remove file after 60 seconds to allow for the operations to finish
@@ -252,6 +254,7 @@ def process_image(
     processor_attributes,
     data_manager,
     image_content,
+    reprocessed=False,
 ):
     if processor_id is None:
         _log.info(
@@ -446,6 +449,8 @@ def process_image(
         "filename": f"{file_name}",
         "status": "digitized",
     }
+    if reprocessed:
+        record["status"] = "reprocessed"
     data_manager.updateRecord(record_id, record, update_type="record", forceUpdate=True)
 
     ## delete objects to free up memory

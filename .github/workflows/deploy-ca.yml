@@ -1,0 +1,45 @@
+
+name: Deploy CA Server
+
+on:
+  push:
+    branches: [ca]
+
+defaults:
+  run:
+    # -l: login shell, needed when using Conda
+    shell: bash -l {0}
+
+env:
+  PIP_PROGRESS_BAR: "off"
+
+jobs:
+
+  deploy_ca:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    name: Deploy to CA Compute Engine
+    runs-on: ubuntu-latest
+    steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: copy file via ssh key
+          uses: appleboy/scp-action@v0.1.4
+          with:
+            host: ${{ secrets.CA_BACKEND_IP }}
+            username: ${{ secrets.SSH_USERNAME }}
+            key: ${{ secrets.SSH_PRIVATE_KEY }}
+            source: "docker-compose.yml, nginx/ca/default.conf"
+            target: .
+
+        - name: run docker-compose
+          uses: appleboy/ssh-action@v1.0.0
+          with:
+            host: ${{ secrets.CA_BACKEND_IP }}
+            username: ${{ secrets.SSH_USERNAME }}
+            key: ${{ secrets.SSH_PRIVATE_KEY }}
+            script: |
+                sudo docker compose down
+                sudo docker rmi -f $(sudo docker images -q)
+                sudo docker compose pull
+                sudo docker compose up -d
