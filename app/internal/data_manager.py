@@ -927,10 +927,27 @@ class DataManager:
                 ):
                     data_update = self.resetRecord(record_id, new_data, user)
                 update_query = {"$set": data_update}
+            if not forceUpdate:
+                ## fetch record's current data so we know what changed in the future
+                try:
+                    record_doc = self.db.records.find(
+                        {"_id": ObjectId(record_id)}
+                    ).next()
+                    previous_state = {}
+                    for each in data_update:
+                        previous_state[each] = record_doc.get(each, None)
+                except Exception as e:
+                    _log.info(f"unable to get record's previous state: {e}")
+                    previous_state = None
+                self.recordHistory(
+                    "updateRecord",
+                    user,
+                    record_id=record_id,
+                    query=data_update,
+                    previous_state=previous_state,
+                )
             self.db.records.update_one(search_query, update_query)
-            self.recordHistory(
-                "updateRecord", user, record_id=record_id, query=update_query
-            )
+
             return data_update
         else:
             return False
@@ -962,7 +979,7 @@ class DataManager:
             "review_status": "unreviewed",
             "attributesList": record_attributes,
         }
-        self.recordHistory("resetRecord", user, record_id=record_id)
+        # history is recorded in the function that calls this
         return update
 
     ## delete functions
@@ -1201,6 +1218,7 @@ class DataManager:
         record_id=None,
         notes=None,
         query=None,
+        previous_state=None,
     ):
         try:
             history_item = {
@@ -1211,6 +1229,7 @@ class DataManager:
                 "record_id": record_id,
                 "notes": notes,
                 "query": query,
+                "previous_state": previous_state,
                 "timestamp": time.time(),
             }
             self.db.history.insert_one(history_item)
