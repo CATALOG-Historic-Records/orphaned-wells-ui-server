@@ -926,6 +926,13 @@ class DataManager:
                     and new_data.get("review_status", None) == "unreviewed"
                 ):
                     data_update = self.resetRecord(record_id, new_data, user)
+                elif (
+                    update_type == "review_status"
+                    and new_data.get("review_status", None) == "defective"
+                ):
+                    data_update["defective_categories"] = new_data.get(
+                        "defective_categories", []
+                    )
                 update_query = {"$set": data_update}
             if not forceUpdate:
                 ## fetch record's current data so we know what changed in the future
