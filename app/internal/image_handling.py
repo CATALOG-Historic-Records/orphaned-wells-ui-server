@@ -127,11 +127,19 @@ def process_document(
     else:
         output_paths = [original_output_path]
 
+    try:
+        # parse api number from filename
+        api_number = filename.split("_")[0]
+        api_number = int(api_number)
+    except Exception as e:
+        _log.info(f"unable to parse api number")
+        api_number = None
     ## add record to DB without attributes
     new_record = {
         "record_group_id": rg_id,
         "name": filename,
         "filename": f"{filename}{file_ext}",
+        "api_number": api_number,
         "contributor": user_info,
         "status": "processing",
         "review_status": "unreviewed",
