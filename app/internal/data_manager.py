@@ -933,6 +933,9 @@ class DataManager:
                     data_update["defective_categories"] = new_data.get(
                         "defective_categories", []
                     )
+                    data_update["defective_description"] = new_data.get(
+                        "defective_description", None
+                    )
                 update_query = {"$set": data_update}
             if not forceUpdate:
                 ## fetch record's current data so we know what changed in the future
