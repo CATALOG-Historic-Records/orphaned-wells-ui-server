@@ -25,17 +25,6 @@ import app.internal.util as util
 _log = logging.getLogger(__name__)
 
 
-class Roles(int, Enum):
-    """Roles for user accessibility.
-    Only approved users should be able to access the app.
-    Only special users (admins) should be capable of approving other users.
-    """
-
-    pending = -1
-    base_user = 1
-    admin = 10
-
-
 class DataManager:
     """Manage the active data."""
 
@@ -132,11 +121,12 @@ class DataManager:
     ## user functions
     def getUser(self, email):
         cursor = self.db.users.find({"email": email})
-        user = None
         for document in cursor:
             user = document
             user["_id"] = str(user["_id"])
-        return user
+            user["permissions"] = self.getUserPermissions(user)
+            return user
+        return None
 
     def updateUserObject(self, user_info):
         cursor = self.db.users.find({"email": user_info["email"]})
@@ -158,37 +148,40 @@ class DataManager:
         self.db.users.update_one(myquery, newvalues)
         return user
 
-    def addUser(self, user_info, default_team, role=Roles.base_user):
-        if default_team is None:
-            _log.error(f"failed to add user {user_info}. default team is required")
+    def updateDefaultTeam(self, email, new_team):
+        query = {"email": email}
+        update = {"$set": {"default_team": new_team}}
+        # _log.info(f"{query}, {update}")
+        self.db.users.update_one(query, update)
+
+    def addUser(self, user_info, team, team_lead=False, sys_admin=False):
+        if team is None:
+            _log.error(f"failed to add user {user_info}. team is required")
             return False
 
-        ## get team's projects
-        project_list = self.getTeamProjectList(default_team)
-        project_roles = {}
-        for project in project_list:
-            project_roles[str(project)] = role
+        ## assign roles
+        roles = {"team": {}, "projects": {}, "system": []}
+        if team_lead:
+            roles["team"][team] = ["team_lead"]
+        else:
+            roles["team"][team] = ["team_member"]
+
+        if sys_admin:
+            roles["system"].append("sys_admin")
         user = {
             "email": user_info.get("email", ""),
             "name": user_info.get("name", ""),
             "picture": user_info.get("picture", ""),
             "hd": user_info.get("hd", ""),
-            "default_team": default_team,
-            "role": role,
-            "roles": {
-                "teams": {
-                    default_team: role,
-                },
-                "projects": project_roles,
-                "system": 1,
-            },
+            "default_team": team,
+            "role": 1,
+            "roles": roles,
             "time_created": time.time(),
         }
-        user["default_team"] = default_team
         db_response = self.db.users.insert_one(user)
 
         ## add user to team's users
-        team_query = {"name": default_team}
+        team_query = {"name": team}
         team_document = self.getDocument("teams", team_query)
         team_users = team_document.get("users", [])
         team_users.append(user_info.get("email", ""))
@@ -197,7 +190,7 @@ class DataManager:
 
         return db_response
 
-    def addUserToTeam(self, email, team, role=Roles.base_user):
+    def addUserToTeam(self, email, team):
         ## CHECK IF USER IS NOT ALREADY ON THIS TEAM
         checkvalues = {"name": team, "users": email}
         found_user = self.db.teams.count_documents(checkvalues)
@@ -229,72 +222,64 @@ class DataManager:
         cursor = self.db.users.update_one(myquery, newvalues)
         return cursor
 
-    def approveUser(self, user_email):
-        user = {"role": Roles.base_user}
-        myquery = {"email": user_email}
-        newvalues = {"$set": user}
-        self.db.users.update_one(myquery, newvalues)
-        return "success"
-
-    def hasRole(self, user_info, role=Roles.admin):
-        email = user_info.get("email", "")
-        cursor = self.db.users.find({"email": email})
+    def updateUserRole(self, email, team, role_category, new_roles):
         try:
-            document = cursor.next()
-            if document.get("role", Roles.pending) == role:
-                return True
-            else:
-                return False
-        except:
+            myquery = {"email": email}
+            user_doc = self.db.users.find(myquery).next()
+            # team = user_doc["default_team"]
+
+            user_roles = user_doc.get("roles", {})
+            if role_category == "system":
+                if new_roles in user_roles.get("system", []):
+                    ## this shouldn't happen
+                    _log.info(f"user already has this role")
+                    return None
+                else:
+                    user_roles["system"].append(new_roles)
+            elif role_category == "team":
+                user_roles["team"][team] = new_roles
+
+            update = {"$set": {"roles": user_roles}}
+            cursor = self.db.users.update_one(myquery, update)
+            self.recordHistory("updateUser", query=update["$set"])
+            return cursor
+        except Exception as e:
+            _log.error(f"failed to update user role: {e}")
+            return e
+
+    def hasPermission(self, email, permission):
+        user_doc = self.getUser(email)
+        user_permissions = self.getUserPermissions(user_doc)
+        if permission in user_permissions:
+            return True
+        else:
             return False
 
     def getUserInfo(self, email):
         user_document = self.getDocument("users", {"email": email}, clean_id=True)
         return user_document
 
-    def getUsers(
-        self, role, user_info, project_id_exclude=None, includeLowerRoles=True
-    ):
-        ## TODO: accept team id as parameter and use that to determine which users to return
+    def getUsers(self, user_info):
         user = user_info.get("email", "")
         user_document = self.getDocument("users", {"email": user})
-        team_id = user_document.get("default_team", None)
-        team_document = self.getDocument("teams", {"name": team_id})
+        team_name = user_document.get("default_team", None)
+        team_document = self.getDocument("teams", {"name": team_name})
         team_users = team_document.get("users", [])
-        if includeLowerRoles:  # get all users with provided role or lower
-            query = {"role": {"$lte": role}}
-        else:  # get only users with provided role
-            query = {"role": role}
-        cursor = self.db.users.find(query)
+        cursor = self.db.users.find()
         users = []
-        if project_id_exclude is not None:
-            project_id = ObjectId(project_id_exclude)
-            for document in cursor:
-                if project_id not in document.get("projects", []):
-                    next_user = document.get("email", "")
-                    if next_user in team_users:
-                        users.append(
-                            {
-                                "email": document.get("email", ""),
-                                "name": document.get("name", ""),
-                                "hd": document.get("hd", ""),
-                                "picture": document.get("picture", ""),
-                                "role": document.get("role", -1),
-                            }
-                        )
-        else:
-            for document in cursor:
-                next_user = document.get("email", "")
-                if next_user in team_users:
-                    users.append(
-                        {
-                            "email": document.get("email", ""),
-                            "name": document.get("name", ""),
-                            "hd": document.get("hd", ""),
-                            "picture": document.get("picture", ""),
-                            "role": document.get("role", -1),
-                        }
-                    )
+        for document in cursor:
+            next_user = document.get("email", "")
+            if next_user in team_users:
+                users.append(
+                    {
+                        "email": document.get("email", ""),
+                        "name": document.get("name", ""),
+                        "hd": document.get("hd", ""),
+                        "picture": document.get("picture", ""),
+                        "role": document.get("role", -1),
+                        "roles": document.get("roles", {}),
+                    }
+                )
         return users
 
     def removeUserFromTeam(self, user, team):
@@ -306,7 +291,7 @@ class DataManager:
         admin_email = user_info.get("email", None)
         query = {"email": email}
         delete_response = self.db.users.delete_one(query)
-        ## TODO: remove user form all teams that include him/her
+        ## remove user form all teams that include him/her
         query = {"users": email}
         teams_cursor = self.db.teams.find(query)
         for document in teams_cursor:
@@ -405,8 +390,17 @@ class DataManager:
         for i in range(len(team_doc["project_list"])):
             project_object_id = team_doc["project_list"][i]
             team_doc["project_list"][i] = str(project_object_id)
-
         return team_doc
+
+    def fetchTeams(self, user_info):
+        email = user_info.get("email", None)
+        query = {"users": email}
+        teams = []
+        teams_cursor = self.db.teams.find(query)
+        for document in teams_cursor:
+            team_name = document["name"]
+            teams.append(team_name)
+        return teams
 
     def fetchProject(self, project_id):
         cursor = self.db.projects.find({"_id": ObjectId(project_id)})
@@ -593,6 +587,14 @@ class DataManager:
             processors.append(document)
         return processors
 
+    def fetchRoles(self, role_category):
+        roles = []
+        cursor = self.db.roles.find({"category": role_category})
+        for document in cursor:
+            del document["_id"]
+            roles.append(document)
+        return roles
+
     def fetchProjectData(
         self, project_id, user, page, records_per_page, sort_by, filter_by
     ):
@@ -762,9 +764,7 @@ class DataManager:
             cursor = self.db.record_groups.find({"_id": _id})
             document = cursor.next()
             google_id = document.get("processorId", None)
-            processor_id = document.get("processor_id", None)
-            _processor_id = ObjectId(processor_id)
-            processor_cursor = self.db.processors.find({"_id": _processor_id})
+            processor_cursor = self.db.processors.find({"google_id": google_id})
             processor_document = processor_cursor.next()
             processor_attributes = processor_document.get("attributes", None)
             return google_id, processor_attributes
@@ -1200,6 +1200,28 @@ class DataManager:
                 "downloadRecords", user=user, notes="downloaded team records"
             )
         return output_file
+
+    def getUserPermissions(self, user):
+        user_team = user["default_team"]
+        roles = user.get("roles", {})
+
+        user_roles = []
+        ## get system role
+        for role in roles.get("system", []):
+            user_roles.append(role)
+        ## get team roles
+        for role in roles.get("team", {}).get(user_team, []):
+            user_roles.append(role)
+
+        ## compile permissions from each role
+        query = {"id": {"$in": user_roles}}
+        role_cursor = self.db.roles.find(query)
+        user_permissions = set()
+        for each in role_cursor:
+            for perm in each["permissions"]:
+                user_permissions.add(perm)
+
+        return list(user_permissions)
 
     def checkProjectValidity(self, projectId):
         try:

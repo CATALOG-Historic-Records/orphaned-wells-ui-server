@@ -54,3 +54,14 @@ def deleteFiles(filepaths, sleep_time=5):
         if os.path.isfile(filepath):
             os.remove(filepath)
             _log.info(f"deleted {filepath}")
+
+
+def validateUser(user):
+    ## just make sure that this is a real user with roles
+    try:
+        if user.get("roles", None):
+            return True
+        else:
+            return False
+    except Exception as e:
+        _log.error(f"failed attempting to validate user {user}: {e}")
