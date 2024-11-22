@@ -16,7 +16,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 
-from app.internal.data_manager import data_manager, Roles
+from app.internal.data_manager import data_manager
 from app.internal.image_handling import process_document, process_zip
 import app.internal.util as util
 import app.internal.auth as auth
@@ -90,9 +90,9 @@ async def auth_login(request: Request):
         _log.info(f"user {email} is not found in database")
         data_manager.recordHistory("login", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
-    role = user.get("role", None)
-    _log.info(f"{email} has role {role}")
-    if role < Roles.base_user:
+
+    authorized = util.validateUser(user)
+    if not authorized:
         _log.info(f"user is not authorized")
         data_manager.recordHistory("login", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
@@ -133,9 +133,8 @@ async def auth_refresh(request: Request):
         _log.info(f"user {email} is not found in database")
         data_manager.recordHistory("refresh", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
-    role = user.get("role", None)
-    _log.info(f"{email} has role {role}")
-    if role < Roles.base_user:
+    authorized = util.validateUser(user)
+    if not authorized:
         _log.info(f"user is not authorized")
         data_manager.recordHistory("refresh", email, notes="denied access")
         raise HTTPException(status_code=403, detail=user_info)
@@ -215,7 +214,6 @@ async def get_records(
     Returns:
         List of records
     """
-    _log.info(f"inside get records")
     data = await request.json()
     if get_by == "project" or get_by == "record_group":
         sort_by = data.get(
@@ -413,9 +411,12 @@ async def add_project(request: Request, user_info: dict = Depends(authenticate))
     Returns:
         New project id
     """
+    if not data_manager.hasPermission(user_info["email"], "create_project"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to create projects for this team. Please contact a team lead.",
+        )
     data = await request.json()
-
-    # _log.info(f"adding project with data: {data}")
     new_id = data_manager.createProject(data, user_info)
     return new_id
 
@@ -431,8 +432,14 @@ async def add_record_group(request: Request, user_info: dict = Depends(authentic
     Returns:
         New project id
     """
+    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
+        )
     data = await request.json()
-    return data_manager.createRecordGroup(data, user_info)
+    new_id = data_manager.createRecordGroup(data, user_info)
+    return new_id
 
 
 @router.post("/upload_document/{rg_id}/{user_email}")
@@ -453,6 +460,11 @@ async def upload_document(
         New document record identifier.
     """
     user_email = user_email.lower()
+    if not data_manager.hasPermission(user_email, "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
     user_info = data_manager.getUserInfo(user_email)
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
@@ -508,6 +520,11 @@ async def update_project(
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "manage_project"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to update projects. Please contact a team lead or project manager.",
+        )
     data = await request.json()
     return data_manager.updateProject(project_id, data, user_info)
 
@@ -526,6 +543,11 @@ async def update_record_group(
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "manage_project"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to update projects. Please contact a team lead or project manager.",
+        )
     data = await request.json()
     return data_manager.updateRecordGroup(rg_id, data, user_info)
 
@@ -544,6 +566,11 @@ async def update_record(
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "review_record"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to review records. Please contact a team lead or project manager.",
+        )
     req = await request.json()
     data = req.get("data", None)
     update_type = req.get("type", None)
@@ -568,6 +595,11 @@ async def delete_project(
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete projects. Please contact a team lead or project manager.",
+        )
     data_manager.deleteProject(project_id, background_tasks, user_info)
 
     return {"response": "success"}
@@ -587,6 +619,11 @@ async def delete_record_group(
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete record groups. Please contact a team lead or project manager.",
+        )
     data_manager.deleteRecordGroup(rg_id, background_tasks, user_info)
     return {"response": "success"}
 
@@ -601,6 +638,11 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
     Returns:
         Success response
     """
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
+        )
     data_manager.deleteRecord(record_id, user_info)
 
     return {"response": "success"}
@@ -660,43 +702,22 @@ async def download_records(
     return export_file
 
 
-@router.post("/get_users/{role}")
-async def get_users(
-    role: str, request: Request, user_info: dict = Depends(authenticate)
-):
+@router.get("/get_users")
+async def get_users(user_info: dict = Depends(authenticate)):
     """Fetch all users from DB with role base_user or lower. Checks if user has proper role (admin)
 
     Returns:
         List of users, role types
     """
-    req = await request.json()
-    project_id = req.get("project_id", None)
-    users = data_manager.getUsers(Roles[role], user_info, project_id_exclude=project_id)
+    users = data_manager.getUsers(user_info)
     return users
 
 
 ## admin functions
-@router.post("/approve_user/{email}")
-async def approve_user(email: str, user_info: dict = Depends(authenticate)):
-    """Approve user for use of application by changing role from 'pending' to 'user'
-
-    Args:
-        email: User email address
-
-    Returns:
-        approved user information
-    """
-    email = email.lower()
-    if data_manager.hasRole(user_info, Roles.admin):
-        return data_manager.approveUser(email)
-    else:
-        raise HTTPException(
-            status_code=403, detail=f"User is not authorized to perform this operation"
-        )
-
-
 @router.post("/add_user/{email}")
-async def add_user(email: str, user_info: dict = Depends(authenticate)):
+async def add_user(
+    request: Request, email: str, user_info: dict = Depends(authenticate)
+):
     """Add user to application database with role 'pending'
 
     Args:
@@ -705,42 +726,136 @@ async def add_user(email: str, user_info: dict = Depends(authenticate)):
     Returns:
         user status
     """
+    req = await request.json()
+    team_lead = req.get("team_lead", False)
+    sys_admin = req.get("sys_admin", False)
     email = email.lower().replace(" ", "")
-    if data_manager.hasRole(user_info, Roles.admin):
+    if data_manager.hasPermission(user_info["email"], "add_user"):
         admin_document = data_manager.getDocument(
             "users", {"email": user_info.get("email", "")}
         )
         team = admin_document.get("default_team", None)
 
+        ## check if this user exists already. if not add to database
         new_user = data_manager.getUser(email)
         if new_user is None:
-            resp = data_manager.addUser({"email": email}, team, role=Roles.base_user)
-        else:
-            new_user_role = new_user.get("role", None)
-            if new_user_role is None:  ## this shouldnt be possible
-                resp = data_manager.addUser(
-                    {"email": email}, team, role=Roles.base_user
-                )
+            resp = data_manager.addUser({"email": email}, team, team_lead, sys_admin)
 
-            elif new_user_role > 0:
-                ## in this case, just add user to team without creating new user
-                resp = data_manager.addUserToTeam(email, team, role=Roles.base_user)
-                if resp == "already_exists":
-                    ## 406 Not acceptable: user provided an email that is already on this team
-                    raise HTTPException(
-                        status_code=406, detail=f"This user is already on this team."
-                    )
-                else:
-                    return {"base_user": email}
-            else:
-                ## TODO: user exists but is pending
+        else:
+            ## this user exists already. add them to this team
+            new_user_team = new_user["default_team"]
+            if new_user_team == team:
+                _log.info(f"{email} is already on team {team}")
                 raise HTTPException(
                     status_code=406, detail=f"This user is already on this team."
                 )
+            else:
+                ## in this case, just add user to team without creating new user
+                resp = data_manager.addUserToTeam(email, team)
+                return resp
     else:
         raise HTTPException(
             status_code=403, detail=f"User is not authorized to perform this operation"
         )
+
+
+@router.post("/update_user_roles")
+async def update_user_roles(request: Request, user_info: dict = Depends(authenticate)):
+    """Update roles for a user
+
+    Args:
+        role_category: category of role (team, project, system)
+        new_role: new list of roles
+        email: User email address
+
+    Returns:
+        result
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_team"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+    role_category = req.get("role_category", None)
+    new_role = req.get("new_roles", None)
+    email = req.get("email", None)
+    team = data_manager.getUserInfo(user_info["email"])["default_team"]
+    if new_role and role_category and email:
+        data_manager.updateUserRole(email, team, role_category, new_role)
+        return email
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide an update and an email in the request body",
+        )
+
+
+@router.post("/update_default_team")
+async def update_default_team(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    """Update user's default team
+
+    Args:
+        new_team: new default team
+
+    Returns:
+        result
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_system"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to perform this action. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+    new_team = req.get("new_team", None)
+
+    if new_team:
+        data_manager.updateDefaultTeam(user_info["email"], new_team)
+        return new_team
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new team in the request body",
+        )
+
+
+@router.get("/fetch_roles/{role_category}", response_model=list)
+async def fetch_roles(role_category: str, user_info: dict = Depends(authenticate)):
+    """Fetch all available roles for a certain category.
+
+    Args:
+        role_category: category of role (team, project, system)
+
+    Returns:
+        List containing available roles
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_team"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+        )
+    resp = data_manager.fetchRoles(role_category)
+    return resp
+
+
+@router.get("/fetch_teams", response_model=list)
+async def fetch_teams(user_info: dict = Depends(authenticate)):
+    """Fetch all teams that a user is on.
+
+    Returns:
+        List containing teams
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_system"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage system. Please contact a team lead or project manager.",
+        )
+    resp = data_manager.fetchTeams(user_info)
+    return resp
 
 
 @router.post("/delete_user/{email}")
@@ -754,7 +869,7 @@ async def delete_user(email: str, user_info: dict = Depends(authenticate)):
         result
     """
     email = email.lower()
-    if data_manager.hasRole(user_info, Roles.admin):
+    if data_manager.hasPermission(user_info["email"], "delete"):
         data_manager.deleteUser(email, user_info)
         return {"Deleted", email}
 
