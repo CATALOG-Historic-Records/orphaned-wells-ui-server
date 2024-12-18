@@ -135,6 +135,7 @@ def process_document(
         _log.info(f"unable to parse api number")
         api_number = None
     ## add record to DB without attributes
+    print(f"original outputpath: {original_output_path}")
     new_record = {
         "record_group_id": rg_id,
         "name": filename,
@@ -143,6 +144,7 @@ def process_document(
         "contributor": user_info,
         "status": "processing",
         "review_status": "unreviewed",
+        "original_filename": original_output_path.split("/")[-1],
         "image_files": [output_path.split("/")[-1] for output_path in output_paths],
     }
     new_record_id = data_manager.createRecord(new_record, user_info)
@@ -160,6 +162,11 @@ def process_document(
             folder=f"uploads/{rg_id}/{new_record_id}",
         )
 
+    ## if original file was pdf, make sure to delete both image and pdf files
+    files_to_delete = output_paths
+    if original_output_path not in output_path:
+        files_to_delete.append(original_output_path)
+
     ## send to google doc AI
     background_tasks.add_task(
         process_image,
@@ -172,15 +179,7 @@ def process_document(
         data_manager=data_manager,
         image_content=content,
         reprocessed=reprocessed,
-    )
-
-    ## remove file after 60 seconds to allow for the operations to finish
-    ## if file was converted to PNG, remove original file as well
-    files_to_delete = output_paths  # [output_path]
-    if original_output_path not in output_path:
-        files_to_delete.append(original_output_path)
-    background_tasks.add_task(
-        util.deleteFiles, filepaths=files_to_delete, sleep_time=60
+        files_to_delete=files_to_delete,
     )
     return {"record_id": new_record_id}
 
@@ -263,6 +262,7 @@ def process_image(
     data_manager,
     image_content,
     reprocessed=False,
+    files_to_delete=[],
 ):
     if processor_id is None:
         _log.info(
@@ -467,6 +467,9 @@ def process_image(
     del sortedAttributesList
     del document_object
     del found_attributes
+
+    ## delete local files
+    util.deleteFiles(filepaths=files_to_delete, sleep_time=0)
 
     _log.info(f"updated record in db: {record_id}")
 
