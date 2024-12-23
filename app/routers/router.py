@@ -353,6 +353,24 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
         List containing record data
     """
     record, is_locked = data_manager.fetchRecordData(record_id, user_info)
+    ## lock record if it is awaiting verification and user does not have permission to verify
+    verification_status = record.get("verification_status", None)
+    if (
+        verification_status == "required" or verification_status == "verified"
+    ) and not is_locked:
+        if not data_manager.hasPermission(user_info["email"], "verify_record"):
+            if verification_status == "required":
+                lockedMessage = "This record is awaiting verification by a team lead."
+            else:
+                lockedMessage = f"This record has been verified as {record.get('review_status')}, and can only be edited by a team lead."
+            return JSONResponse(
+                status_code=303,
+                content={
+                    "direction": "next",
+                    "recordData": record,
+                    "lockedMessage": lockedMessage,
+                },
+            )
     if record is None:
         raise HTTPException(
             403,
@@ -360,7 +378,12 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
         )
     elif is_locked:
         return JSONResponse(
-            status_code=303, content={"direction": "next", "recordData": record}
+            status_code=303,
+            content={
+                "direction": "next",
+                "recordData": record,
+                "lockedMessage": "This record is currently being reviewed by a team member.",
+            },
         )
     return {"recordData": record}
 
@@ -449,6 +472,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     reprocessed: bool = False,
+    preventDuplicates: bool = False,
 ):
     """Upload document for processing. Documents are processed asynchronously.
 
@@ -465,6 +489,14 @@ async def upload_document(
             403,
             detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
         )
+    if preventDuplicates:
+        record_exists = data_manager.checkIfRecordExists(file.filename, rg_id)
+        if record_exists:
+            return JSONResponse(
+                status_code=208,
+                content={"message": f"{file.filename} exists for {rg_id}, returning"},
+            )
+
     user_info = data_manager.getUserInfo(user_email)
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
@@ -648,6 +680,24 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
     return {"response": "success"}
 
 
+@router.post("/check_if_records_exist/{rg_id}")
+async def check_if_records_exist(
+    request: Request, rg_id: str, user_info: dict = Depends(authenticate)
+):
+    """Check if records exist.
+
+    Args:
+        file_list: List of file names
+        rg_id: record group id
+
+    Returns:
+        JSON with duplicate_records
+    """
+    req = await request.json()
+    file_list = req.get("file_list", [])
+    return data_manager.checkIfRecordsExist(file_list, rg_id)
+
+
 @router.post(
     "/download_records/{location}/{_id}/{export_type}", response_class=FileResponse
 )
@@ -673,16 +723,26 @@ async def download_records(
     req = await request.json()
     # _log.info(req)
     selectedColumns = req.get("columns", [])
+
+    filter_by = req.get("filter", {})
+    sort_by = req.get("sort", ["dateCreated", 1])
+
     keep_all_columns = False
     if len(selectedColumns) == 0:
         keep_all_columns = True
 
     if location == "project":
-        records, _ = data_manager.fetchRecordsByProject(user_info, _id)
+        records, _ = data_manager.fetchRecordsByProject(
+            user_info, _id, filter_by=filter_by, sort_by=sort_by
+        )
     elif location == "record_group":
-        records, _ = data_manager.fetchRecordsByRecordGroup(user_info, _id)
+        records, _ = data_manager.fetchRecordsByRecordGroup(
+            user_info, _id, filter_by=filter_by, sort_by=sort_by
+        )
     elif location == "team":
-        records, _ = data_manager.fetchRecordsByTeam(user_info)
+        records, _ = data_manager.fetchRecordsByTeam(
+            user_info, filter_by=filter_by, sort_by=sort_by
+        )
     else:
         raise HTTPException(
             status_code=400, detail=f"Location must be project, record_group, or team"

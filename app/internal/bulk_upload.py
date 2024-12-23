@@ -6,24 +6,23 @@ import time
 import shutil
 from google.cloud import storage
 from io import BytesIO
-from dotenv import load_dotenv
-
-load_dotenv()
-
-STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 
 
 def upload_documents_from_directory(
-    backend_url=None,
-    user_email=None,
-    rg_id=None,
+    user_email,
+    record_group_id,
     local_directory=None,
     cloud_bucket=None,
     cloud_directory="",
-    delete_local_files=False,
     storage_service_key=None,
+    amount=30,
+    preventDuplicates=True,
+    db=None,
+    reprocessed=False,
 ):
-    if rg_id is None:
+    print(f"amount to upload: {amount}")
+    count = 0
+    if record_group_id is None:
         print("please provide a record group id to upload documents to")
         return
     if user_email is None:
@@ -32,10 +31,16 @@ def upload_documents_from_directory(
     if local_directory is None and (cloud_directory is None or cloud_bucket is None):
         print("please provide either a local directory or a cloud directory")
         return
-    if backend_url is None:
-        # backend_url = f"http://localhost:8001"
-        backend_url = f"https://server.uow-carbon.org"
-    post_url = f"{backend_url}/upload_document/{rg_id}/{user_email}"
+    backend_url = os.getenv("BACKEND_URL")
+
+    dontAdd = set()
+    if preventDuplicates:
+        cursor = db["records"].find({"record_group_id": record_group_id})
+
+        for document in cursor:
+            dontAdd.add(document.get("filename"))
+
+    post_url = f"{backend_url}/upload_document/{record_group_id}/{user_email}?reprocessed={reprocessed}"
     if local_directory is not None:
         files_to_delete = []
         print(f"uploading documents from {local_directory}")
@@ -58,26 +63,24 @@ def upload_documents_from_directory(
                     mime_type = None
 
                 if mime_type is not None:
-                    print(f"uploading: {file_path} with mimetype {mime_type}")
+                    if file not in dontAdd:
+                        print(f"uploading: {file_path} with mimetype {mime_type}")
 
-                    opened_file = open(file_path, "rb")
-                    upload_files = {
-                        "file": (file, opened_file, mime_type),
-                        "Content-Disposition": 'form-data; name="file"; filename="'
-                        + file
-                        + '"',
-                        "Content-Type": mime_type,
-                    }
-                    requests.post(post_url, files=upload_files)
-        if delete_local_files:
-            time_to_wait = len(files_to_delete) + 120
-            print(f"removing {files_to_delete} in {time_to_wait} seconds")
-            time.sleep(time_to_wait)
-            try:
-                print(f"removing {files_to_delete}")
-                shutil.rmtree(local_directory)
-            except Exception as e:
-                print(f"unable to delete {files_to_delete}: {e}")
+                        opened_file = open(file_path, "rb")
+                        upload_files = {
+                            "file": (file, opened_file, mime_type),
+                            "Content-Disposition": 'form-data; name="file"; filename="'
+                            + file
+                            + '"',
+                            "Content-Type": mime_type,
+                        }
+                        requests.post(post_url, files=upload_files)
+                        count += 1
+                        if count == amount:
+                            print(f"reached upload amount, stopping.")
+                            return
+                    else:
+                        print(f"skipping duplicate {file}")
     if cloud_directory is not None and cloud_bucket is not None:
         if storage_service_key is None:
             print(
@@ -87,7 +90,7 @@ def upload_documents_from_directory(
         print(f"uploading documents from {cloud_bucket}/{cloud_directory}")
         try:
             client = storage.Client.from_service_account_json(
-                f"./{STORAGE_SERVICE_KEY}"
+                f"./{storage_service_key}"
             )
         except Exception as e:
             print(
@@ -112,13 +115,23 @@ def upload_documents_from_directory(
                 mime_type = None
 
             if mime_type is not None:
-                print(f"uploading {mime_type}: {file_name}")
-                doc = BytesIO(blob.download_as_bytes())
-                upload_files = {
-                    "file": (file_name, doc, mime_type),
-                    "Content-Disposition": 'form-data; name="file"; filename="'
-                    + file_name
-                    + '"',
-                    "Content-Type": mime_type,
-                }
-                requests.post(post_url, files=upload_files)
+                if file_name not in dontAdd:
+                    print(f"uploading {mime_type}: {file_name}")
+                    doc = BytesIO(blob.download_as_bytes())
+                    upload_files = {
+                        "file": (file_name, doc, mime_type),
+                        "Content-Disposition": 'form-data; name="file"; filename="'
+                        + file_name
+                        + '"',
+                        "Content-Type": mime_type,
+                    }
+                    requests.post(post_url, files=upload_files)
+                    count += 1
+                    if count == amount:
+                        print(f"reached upload amount, stopping")
+                        return
+                else:
+                    print(f"skipping duplicate {file}")
+
+    if preventDuplicates:
+        client.close()
