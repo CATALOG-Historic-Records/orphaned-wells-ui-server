@@ -647,7 +647,7 @@ class DataManager:
 
         return project_document, record_group
 
-    def fetchRecordData(self, record_id, user_info, direction="next"):
+    def fetchRecordData(self, record_id, user_info):
         user = user_info.get("email", "")
         _id = ObjectId(record_id)
         cursor = self.db.records.find({"_id": _id})
@@ -721,6 +721,13 @@ class DataManager:
             _log.error(traceback.format_exc())
 
         return document, not attained_lock
+
+    def fetchRecordNotes(self, record_id, user_info):
+        # user = user_info.get("email", "")
+        _id = ObjectId(record_id)
+        cursor = self.db.records.find({"_id": _id})
+        document = cursor.next()
+        return document.get("record_notes", [])
 
     def getNextRecordId(self, dateCreated, rg_id):
         # _log.info(f"fetching next record for {dateCreated} and {rg_id}")
@@ -964,6 +971,37 @@ class DataManager:
             return data_update
         else:
             return False
+
+    def updateRecordWithoutLock(
+        self, record_id, new_data, update_type=None, user_info=None
+    ):
+        # when updating the notes, we don't worry about the lock
+        # _log.info(f"updating {record_id} to be {new_data}")
+        if user_info is not None:
+            user = user_info.get("email", None)
+        _id = ObjectId(record_id)
+        search_query = {"_id": _id}
+        data_update = {update_type: new_data.get(update_type, None)}
+        update_query = {"$set": data_update}
+        ## fetch record's current data so we know what changed in the future
+        try:
+            record_doc = self.db.records.find({"_id": ObjectId(record_id)}).next()
+            previous_state = {}
+            for each in data_update:
+                previous_state[each] = record_doc.get(each, None)
+        except Exception as e:
+            _log.info(f"unable to get record's previous state: {e}")
+            previous_state = None
+        self.recordHistory(
+            "updateRecord",
+            user,
+            record_id=record_id,
+            query=data_update,
+            previous_state=previous_state,
+        )
+        self.db.records.update_one(search_query, update_query)
+
+        return data_update
 
     def resetRecord(self, record_id, record_data, user):
         print(f"resetting record: {record_id}")
