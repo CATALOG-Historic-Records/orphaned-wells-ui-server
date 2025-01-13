@@ -622,9 +622,7 @@ async def update_record(
     data = req.get("data", None)
     update_type = req.get("type", None)
     if update_type == "record_notes":
-        update = data_manager.updateRecordWithoutLock(
-            record_id, data, update_type, user_info
-        )
+        update = data_manager.updateRecordNotes(record_id, data, user_info)
     else:
         update = data_manager.updateRecord(record_id, data, update_type, user_info)
     if not update:
