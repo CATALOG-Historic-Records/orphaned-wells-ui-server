@@ -13,7 +13,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import OAuth2PasswordBearer
 
 from app.internal.data_manager import data_manager
@@ -263,7 +263,7 @@ async def get_records(
 
 @router.get("/get_processors/{state}", response_model=list)
 async def get_processors(state: str, user_info: dict = Depends(authenticate)):
-    """Fetch all projects that a user has access to.
+    """Fetch all processors for a given state/organization.
 
     Returns:
         List containing processors and metadata
@@ -353,6 +353,11 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
         List containing record data
     """
     record, is_locked = data_manager.fetchRecordData(record_id, user_info)
+    if record is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
+        )
     ## lock record if it is awaiting verification and user does not have permission to verify
     verification_status = record.get("verification_status", None)
     if (
@@ -371,12 +376,7 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
                     "lockedMessage": lockedMessage,
                 },
             )
-    if record is None:
-        raise HTTPException(
-            403,
-            detail=f"You do not have access to this record, please contact the project creator to gain access.",
-        )
-    elif is_locked:
+    if is_locked:
         return JSONResponse(
             status_code=303,
             content={
@@ -386,6 +386,21 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
             },
         )
     return {"recordData": record}
+
+
+@router.get("/get_record_notes/{record_id}")
+async def get_record_notes(record_id: str, user_info: dict = Depends(authenticate)):
+    """Fetch record notes.
+
+    Args:
+        record_id: Record identifier
+
+    Returns:
+        List containing record notes
+    """
+    record_notes = data_manager.fetchRecordNotes(record_id, user_info)
+
+    return record_notes
 
 
 @router.get("/get_processor_data/{google_id}", response_model=dict)
@@ -606,7 +621,10 @@ async def update_record(
     req = await request.json()
     data = req.get("data", None)
     update_type = req.get("type", None)
-    update = data_manager.updateRecord(record_id, data, update_type, user_info)
+    if update_type == "record_notes":
+        update = data_manager.updateRecordNotes(record_id, data, user_info)
+    else:
+        update = data_manager.updateRecord(record_id, data, update_type, user_info)
     if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
 
@@ -643,10 +661,10 @@ async def delete_record_group(
     background_tasks: BackgroundTasks,
     user_info: dict = Depends(authenticate),
 ):
-    """Delete Document group.
+    """Delete record group.
 
     Args:
-        rg_id: Document group identifier
+        rg_id: record group identifier
 
     Returns:
         Success response
@@ -684,7 +702,7 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
 async def check_if_records_exist(
     request: Request, rg_id: str, user_info: dict = Depends(authenticate)
 ):
-    """Check if records exist.
+    """Check if records exist for a given list of files.
 
     Args:
         file_list: List of file names
@@ -698,15 +716,16 @@ async def check_if_records_exist(
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
-@router.post(
-    "/download_records/{location}/{_id}/{export_type}", response_class=FileResponse
-)
+@router.post("/download_records/{location}/{_id}", response_class=Response)
 async def download_records(
     location: str,
     _id: str,
-    export_type: str,
     request: Request,
     background_tasks: BackgroundTasks,
+    export_csv: bool = True,
+    export_json: bool = False,
+    export_images: bool = False,
+    output_name: str = None,
     user_info: dict = Depends(authenticate),
 ):
     """Download records for given project ID.
@@ -747,24 +766,48 @@ async def download_records(
         raise HTTPException(
             status_code=400, detail=f"Location must be project, record_group, or team"
         )
+    try:
+        filepaths = []
+        if export_csv:
+            csv_file = data_manager.downloadRecords(
+                records,
+                "csv",
+                user_info,
+                _id,
+                location,
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=output_name,
+            )
+            filepaths.append(csv_file)
+        if export_json:
+            json_file = data_manager.downloadRecords(
+                records,
+                "json",
+                user_info,
+                _id,
+                location,
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=output_name,
+            )
+            filepaths.append(json_file)
 
-    export_file = data_manager.downloadRecords(
-        records,
-        export_type,
-        user_info,
-        _id,
-        location,
-        selectedColumns=selectedColumns,
-        keep_all_columns=keep_all_columns,
-    )
+        if export_images:
+            documents = util.compileDocumentImageList(records)
+        else:
+            documents = None
+        zipped_files = util.zip_files(filepaths, documents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
     ## remove file after 30 seconds to allow for the user download to finish
-    background_tasks.add_task(util.deleteFiles, filepaths=[export_file], sleep_time=30)
-    return export_file
+    background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=30)
+    return Response(content=zipped_files, media_type="application/zip")
 
 
 @router.get("/get_users")
 async def get_users(user_info: dict = Depends(authenticate)):
-    """Fetch all users from DB with role base_user or lower. Checks if user has proper role (admin)
+    """Fetch all users from DB for a given user's team.
 
     Returns:
         List of users, role types
@@ -778,7 +821,7 @@ async def get_users(user_info: dict = Depends(authenticate)):
 async def add_user(
     request: Request, email: str, user_info: dict = Depends(authenticate)
 ):
-    """Add user to application database with role 'pending'
+    """Add user to application database
 
     Args:
         email: User email address
