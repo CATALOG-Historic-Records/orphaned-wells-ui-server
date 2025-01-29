@@ -11,10 +11,7 @@ from pymongo import ASCENDING, DESCENDING
 
 from app.internal.mongodb_connection import connectToDatabase
 from app.internal.settings import AppSettings
-from app.internal.image_handling import (
-    generate_download_signed_url_v4,
-    delete_google_storage_directory,
-)
+from app.internal.util import generate_download_signed_url_v4
 import app.internal.util as util
 
 
@@ -647,22 +644,26 @@ class DataManager:
 
         return project_document, record_group
 
-    def fetchRecordData(self, record_id, user_info, direction="next"):
+    def fetchRecordData(self, record_id, user_info):
         user = user_info.get("email", "")
         _id = ObjectId(record_id)
         cursor = self.db.records.find({"_id": _id})
-        document = cursor.next()
+        try:
+            document = cursor.next()
+        except:
+            _log.error(f"record with id {record_id} does not exist")
+            return None, None
         document["_id"] = str(document["_id"])
         rg_id = document.get("record_group_id", "")
         # projectId = document.get("project_id", "")
         # project_id = ObjectId(projectId)
 
-        ## try to attain lock
-        attained_lock = self.tryLockingRecord(record_id, user)
-
         user_record_groups = self.getUserRecordGroups(user)
         if not rg_id in user_record_groups:
             return None, None
+
+        ## try to attain lock
+        attained_lock = self.tryLockingRecord(record_id, user)
         image_urls = []
         for image in document.get("image_files", []):
             if util.imageIsValid(image):
@@ -721,6 +722,13 @@ class DataManager:
             _log.error(traceback.format_exc())
 
         return document, not attained_lock
+
+    def fetchRecordNotes(self, record_id, user_info):
+        # user = user_info.get("email", "")
+        _id = ObjectId(record_id)
+        cursor = self.db.records.find({"_id": _id})
+        document = cursor.next()
+        return document.get("record_notes", [])
 
     def getNextRecordId(self, dateCreated, rg_id):
         # _log.info(f"fetching next record for {dateCreated} and {rg_id}")
@@ -965,6 +973,95 @@ class DataManager:
         else:
             return False
 
+    def updateRecordNotes(self, record_id, data, user_info=None):
+        # _log.info(f"updating {record_id} with {data}")
+        if user_info is not None:
+            user = user_info.get("email", None)
+        else:
+            user = None
+        _id = ObjectId(record_id)
+        search_query = {"_id": _id}
+        update_type = data["update_type"]
+        index = data.get("index", None)
+        updates = []
+        if update_type == "add":
+            ##TODO: check if new index is really new (ie, less than length of list).
+            ## in the case that two users simultaneously add notes, there could be a race here
+            newNoteText = data["text"]
+            isReply = data.get("isReply", False)
+            newNote = {
+                "text": newNoteText,
+                "record_id": record_id,
+                "timestamp": time.time(),
+                "creator": user,
+                "resolved": False,
+                "deleted": False,
+                "lastUpdated": time.time(),
+                "replies": [],
+                "isReply": isReply,
+                "lastUpdatedUser": user,
+            }
+            if isReply:
+                replyToIndex = data["replyToIndex"]
+                newNote["repliesTo"] = replyToIndex
+                update1 = {
+                    "$push": {
+                        "record_notes": newNote,  ## add new note
+                    }
+                }
+                update2 = {
+                    "$push": {
+                        f"record_notes.{replyToIndex}.replies": index,  ## add index to reply list
+                    }
+                }
+                updates.append(update1)
+                updates.append(update2)
+            else:
+                update = {"$push": {"record_notes": newNote}}
+                updates.append(update)
+        elif update_type == "edit":
+            updatedText = data["text"]
+            update = {
+                "$set": {
+                    f"record_notes.{index}.text": updatedText,
+                    f"record_notes.{index}.lastUpdated": time.time(),
+                    f"record_notes.{index}.lastUpdatedUser": user,
+                }
+            }
+            updates.append(update)
+        elif update_type == "delete":
+            update = {
+                "$set": {
+                    f"record_notes.{index}.deleted": True,
+                    f"record_notes.{index}.lastUpdated": time.time(),
+                    f"record_notes.{index}.lastUpdatedUser": user,
+                }
+            }
+            updates.append(update)
+        elif update_type == "resolve" or update_type == "unresolve":
+            new_resolve_value = False
+            if update_type == "resolve":
+                new_resolve_value = True
+            update = {
+                "$set": {
+                    f"record_notes.{index}.resolved": new_resolve_value,
+                    f"record_notes.{index}.lastUpdated": time.time(),
+                    f"record_notes.{index}.lastUpdatedUser": user,
+                }
+            }
+            updates.append(update)
+        else:
+            _log.error(f"invalid update type: {update_type}")
+            return None
+
+        for update in updates:
+            self.db.records.update_one(search_query, update)
+            self.recordHistory(
+                "updateRecordNotes", user, record_id=record_id, query=update
+            )
+        record_doc = self.db.records.find(search_query).next()
+        return record_doc.get("record_notes", [])
+
     def resetRecord(self, record_id, record_data, user):
         print(f"resetting record: {record_id}")
         record_attributes = record_data["attributesList"]
@@ -1135,48 +1232,56 @@ class DataManager:
         location,
         selectedColumns=[],
         keep_all_columns=False,
+        output_filename=None,
     ):
         user = user_info.get("email", None)
         ## TODO: check if user is a part of the team who owns this project
         today = time.time()
         output_dir = self.app_settings.export_dir
-        output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+        if output_filename is None:
+            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+        else:
+            output_file = f"{output_filename}.{exportType}"
         attributes = ["file"]
         subattributes = []
         record_attributes = []
         if exportType == "csv":
             for document in records:
-                current_attributes = set()
-                record_attribute = {}
-                for document_attribute in document["attributesList"]:
-                    attribute_name = document_attribute["key"].replace(" ", "")
-                    if attribute_name in selectedColumns or keep_all_columns:
-                        original_attribute_name = attribute_name
-                        i = 2
-                        while attribute_name in current_attributes:
-                            ## add a number to the end of the attribute so it (and its subattributes)
-                            ## is differentiable from other instances of the attribute
-                            attribute_name = f"{original_attribute_name}_{i}"
-                            i += 1
-                        current_attributes.add(attribute_name)
-                        if attribute_name not in attributes:
-                            attributes.append(attribute_name)
-                        record_attribute[attribute_name] = document_attribute["value"]
-                        ## add subattributes
-                        if document_attribute.get("subattributes", None):
-                            for document_subattribute in document_attribute[
-                                "subattributes"
-                            ]:
-                                subattribute_name = (
-                                    f"{attribute_name}[{document_subattribute['key']}]"
-                                )
-                                record_attribute[
-                                    subattribute_name
-                                ] = document_subattribute["value"]
-                                if subattribute_name not in subattributes:
-                                    subattributes.append(subattribute_name)
-                record_attribute["file"] = document.get("filename", "")
-                record_attributes.append(record_attribute)
+                document_id = str(document["_id"])
+                try:
+                    current_attributes = set()
+                    record_attribute = {}
+                    for document_attribute in document["attributesList"]:
+                        attribute_name = document_attribute["key"].replace(" ", "")
+                        if attribute_name in selectedColumns or keep_all_columns:
+                            original_attribute_name = attribute_name
+                            i = 2
+                            while attribute_name in current_attributes:
+                                ## add a number to the end of the attribute so it (and its subattributes)
+                                ## is differentiable from other instances of the attribute
+                                attribute_name = f"{original_attribute_name}_{i}"
+                                i += 1
+                            current_attributes.add(attribute_name)
+                            if attribute_name not in attributes:
+                                attributes.append(attribute_name)
+                            record_attribute[attribute_name] = document_attribute[
+                                "value"
+                            ]
+                            ## add subattributes
+                            if document_attribute.get("subattributes", None):
+                                for document_subattribute in document_attribute[
+                                    "subattributes"
+                                ]:
+                                    subattribute_name = f"{attribute_name}[{document_subattribute['key']}]"
+                                    record_attribute[
+                                        subattribute_name
+                                    ] = document_subattribute["value"]
+                                    if subattribute_name not in subattributes:
+                                        subattributes.append(subattribute_name)
+                    record_attribute["file"] = document.get("filename", "")
+                    record_attributes.append(record_attribute)
+                except Exception as e:
+                    _log.info(f"unable to add {document_id}: {e}")
 
             # compute the output file directory and name
             with open(output_file, "w", newline="") as csvfile:
@@ -1185,13 +1290,17 @@ class DataManager:
                 writer.writerows(record_attributes)
         else:
             for document in records:
-                record_attribute = {}
-                for document_attribute in document["attributesList"]:
-                    attribute_name = document_attribute["key"]
-                    if attribute_name in selectedColumns or keep_all_columns:
-                        record_attribute[attribute_name] = document_attribute
-                record_attribute["file"] = document.get("filename", "")
-                record_attributes.append(record_attribute)
+                document_id = str(document["_id"])
+                try:
+                    record_attribute = {}
+                    for document_attribute in document["attributesList"]:
+                        attribute_name = document_attribute["key"]
+                        if attribute_name in selectedColumns or keep_all_columns:
+                            record_attribute[attribute_name] = document_attribute
+                    record_attribute["file"] = document.get("filename", "")
+                    record_attributes.append(record_attribute)
+                except Exception as e:
+                    _log.info(f"unable to add {document_id}: {e}")
             with open(output_file, "w", newline="") as jsonfile:
                 json.dump(record_attributes, jsonfile)
 

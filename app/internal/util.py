@@ -1,8 +1,17 @@
 import time
 import os
 import logging
+import zipfile
+from io import BytesIO
+from google.cloud import storage
+import datetime
+import sys
+import requests
 
 _log = logging.getLogger(__name__)
+DIRNAME, FILENAME = os.path.split(os.path.abspath(sys.argv[0]))
+STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
+BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 
 
 def sortRecordAttributes(attributes, processor, keep_all_attributes=True):
@@ -65,3 +74,89 @@ def validateUser(user):
             return False
     except Exception as e:
         _log.error(f"failed attempting to validate user {user}: {e}")
+
+
+def generate_download_signed_url_v4(
+    rg_id, record_id, filename, bucket_name=BUCKET_NAME
+):
+    """Generates a v4 signed URL for downloading a blob.
+
+    Note that this method requires a service account key file. You can not use
+    this if you are using Application Default Credentials from Google Compute
+    Engine or from the Google Cloud SDK.
+    To generate STORAGE_SERVICE_KEY, follow steps here:
+    https://docs.gspread.org/en/latest/oauth2.html#for-bots-using-service-account
+    """
+
+    storage_client = storage.Client.from_service_account_json(
+        f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
+    )
+
+    # blob_name: path to file in google cloud bucket
+    blob_name = f"uploads/{rg_id}/{record_id}/{filename}"
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    url = blob.generate_signed_url(
+        version="v4",
+        # This URL is valid for 15 minutes
+        expiration=datetime.timedelta(minutes=15),
+        # Allow GET requests using this URL.
+        method="GET",
+    )
+
+    return url
+
+
+def compileDocumentImageList(records):
+    images = {}
+    for record in records:
+        rg_id = record.get("record_group_id", None)
+        record_id = str(record["_id"])
+        record_name = record.get("name", record_id)
+        image_files = record.get("image_files", [])
+        images[record_id] = {
+            "files": image_files,
+            "rg_id": rg_id,
+            "record_id": record_id,
+            "record_name": record_name,
+        }
+
+    return images
+
+
+def zip_files(file_paths, documents=None):
+    zip_buffer = BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path in file_paths:
+            zip_file.write(file_path, os.path.basename(file_path))
+        if documents is not None:
+            for record_id in documents:
+                document = documents[record_id]
+                rg_id = document["rg_id"]
+                image_files = document["files"]
+                record_name = document["record_name"]
+                for image_file in image_files:
+                    signed_url = generate_download_signed_url_v4(
+                        rg_id, record_id, image_file
+                    )
+                    response = requests.get(signed_url, stream=True)
+                    if response.status_code == 200:
+                        # Write file content directly into the ZIP archive
+                        file_name = os.path.basename(image_file)
+                        zip_file.writestr(
+                            f"documents/{record_name}/{file_name}", response.content
+                        )
+                    else:
+                        # Handle error and add a placeholder file in the ZIP archive
+                        error_message = f"Failed to fetch {signed_url}"
+                        zip_file.writestr(
+                            f"documents/error_{os.path.basename(image_file)}.txt",
+                            error_message,
+                        )
+
+    zip_bytes = zip_buffer.getvalue()
+    zip_buffer.close()
+
+    return zip_bytes
