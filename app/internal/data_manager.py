@@ -762,7 +762,7 @@ class DataManager:
             document["attributesList"] = sorted_attributes
         except Exception as e:
             _log.error(f"unable to sort attributes: {e}")
-            _log.error(traceback.format_exc())
+            # _log.error(traceback.format_exc())
 
         return document, not attained_lock
 
