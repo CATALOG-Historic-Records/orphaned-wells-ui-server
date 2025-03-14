@@ -358,6 +358,13 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
             403,
             detail=f"You do not have access to this record, please contact the project creator to gain access.",
         )
+
+    ## get record schema
+    _, processor_attributes = data_manager.getProcessorByRecordGroupID(record["rg_id"])
+    processor_attributes = util.convert_processor_attributes_to_dict(
+        processor_attributes
+    )
+
     ## lock record if it is awaiting verification and user does not have permission to verify
     verification_status = record.get("verification_status", None)
     if (
@@ -374,6 +381,7 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
                     "direction": "next",
                     "recordData": record,
                     "lockedMessage": lockedMessage,
+                    "recordSchema": processor_attributes,
                 },
             )
     if is_locked:
@@ -383,9 +391,10 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
                 "direction": "next",
                 "recordData": record,
                 "lockedMessage": "This record is currently being reviewed by a team member.",
+                "recordSchema": processor_attributes,
             },
         )
-    return {"recordData": record}
+    return {"recordData": record, "recordSchema": processor_attributes}
 
 
 @router.get("/get_record_notes/{record_id}")
@@ -517,6 +526,10 @@ async def upload_document(
     if not project_is_valid:
         raise HTTPException(404, detail=f"Project not found")
     filename, file_ext = os.path.splitext(file.filename)
+
+    ##TODO: provide boolean for run_cleaning_functions for frontend. for now, make this true
+    run_cleaning_functions = True
+
     if file_ext.lower() == ".zip":
         output_dir = f"{data_manager.app_settings.img_dir}"
         return process_zip(
@@ -547,6 +560,7 @@ async def upload_document(
                 mime_type,
                 content,
                 reprocessed=reprocessed,
+                run_cleaning_functions=run_cleaning_functions,
             )
         except Exception as e:
             _log.error(f"unable to read image file: {e}")
@@ -621,10 +635,13 @@ async def update_record(
     req = await request.json()
     data = req.get("data", None)
     update_type = req.get("type", None)
+    field_to_clean = req.get("fieldToClean", None)
     if update_type == "record_notes":
         update = data_manager.updateRecordNotes(record_id, data, user_info)
     else:
-        update = data_manager.updateRecord(record_id, data, update_type, user_info)
+        update = data_manager.updateRecord(
+            record_id, data, update_type, field_to_clean, user_info
+        )
     if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
 
@@ -792,11 +809,11 @@ async def download_records(
                 output_filename=output_name,
             )
             filepaths.append(json_file)
-
         if export_images:
             documents = util.compileDocumentImageList(records)
         else:
             documents = None
+
         zipped_files = util.zip_files(filepaths, documents)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
@@ -814,6 +831,28 @@ async def get_users(user_info: dict = Depends(authenticate)):
     """
     users = data_manager.getUsers(user_info)
     return users
+
+
+@router.post("/run_cleaning_functions/{location}/{_id}")
+async def run_cleaning_functions(
+    location: str, _id: str, user_info: dict = Depends(authenticate)
+):
+    """Run cleaning functions on project (not supported yet), record group, or recorde.
+
+    Args:
+        location: project (not supported yet), record_group, or record
+        _id: the _id of the collection to run the cleaning functions on
+
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_system"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to run cleaning functions. Please contact a team lead or project manager.",
+        )
+
+    data_manager.cleanCollection(location, _id)
+
+    return _id
 
 
 ## admin functions

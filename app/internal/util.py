@@ -8,6 +8,18 @@ import datetime
 import sys
 import requests
 
+import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
+
+CLEANING_FUNCTIONS = {
+    "clean_bool": OGRRE_cleaning_functions.clean_bool,
+    "string_to_int": OGRRE_cleaning_functions.string_to_int,
+    "string_to_float": OGRRE_cleaning_functions.string_to_float,
+    "string_to_date": OGRRE_cleaning_functions.string_to_date,
+    "clean_date": OGRRE_cleaning_functions.clean_date,
+    "convert_hole_size_to_decimal": OGRRE_cleaning_functions.convert_hole_size_to_decimal,
+    "llm_clean": OGRRE_cleaning_functions.llm_clean,
+}
+
 _log = logging.getLogger(__name__)
 DIRNAME, FILENAME = os.path.split(os.path.abspath(sys.argv[0]))
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
@@ -121,6 +133,7 @@ def compileDocumentImageList(records):
             "record_id": record_id,
             "record_name": record_name,
         }
+    _log.info(images)
 
     return images
 
@@ -160,3 +173,85 @@ def zip_files(file_paths, documents=None):
     zip_buffer.close()
 
     return zip_bytes
+
+
+def searchRecordForAttributeErrors(document):
+    attributes = document.get("attributesList", [])
+    for attribute in attributes:
+        if attribute.get("cleaning_error", False):
+            return True
+        subattributes = attribute.get("subattributes", None)
+        if subattributes:
+            for subattribute in subattributes:
+                if subattribute.get("cleaning_error", False):
+                    return True
+    return False
+
+
+def convert_processor_attributes_to_dict(attributes):
+    attributes_dict = {}
+    for attr in attributes:
+        key = attr["name"]
+        attributes_dict[key] = attr
+        subattributes = attr.get("subattributes", None)
+        if subattributes:
+            for subattribute in subattributes:
+                sub_key = subattribute["name"]
+                attributes_dict[f"{key}::{sub_key}"] = subattribute
+    return attributes_dict
+
+
+def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
+    if subattributeKey:
+        attribute_key = subattributeKey
+    else:
+        attribute_key = attribute["key"]
+    unclean_val = attribute["value"]
+
+    attribute_schema = processor_attributes.get(attribute_key)
+    if attribute_schema:
+        cleaning_function_name = attribute_schema.get("cleaning_function")
+        if cleaning_function_name == "" or cleaning_function_name is None:
+            _log.debug(f"cleaning_function for {attribute_key} is empty string or none")
+            attribute["cleaned"] = False
+            return False
+        cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
+        if cleaning_function:
+            try:
+                cleaned_val = cleaning_function(unclean_val)
+                _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
+                attribute["value"] = cleaned_val
+                attribute["normalized_value"] = cleaned_val
+                attribute["uncleaned_value"] = unclean_val
+                attribute["cleaned"] = True
+                attribute["cleaning_error"] = False
+                attribute["last_cleaned"] = time.time()
+                return True
+            except Exception as e:
+                _log.error(f"unable to clean {attribute_key}: {e}")
+                attribute["cleaning_error"] = f"{e}"
+                attribute["cleaned"] = False
+        else:
+            _log.info(f"no cleaning function with name: {cleaning_function_name}")
+
+    subattributes = attribute.get("subattributes", None)
+    if subattributes:
+        for subattribute in subattributes:
+            subattribute_key = f"{attribute_key}::{subattribute['key']}"
+            cleanRecordAttribute(
+                processor_attributes, subattribute, subattributeKey=subattribute_key
+            )
+
+    else:
+        _log.info(f"no schema found for {attribute_key}")
+    return False
+
+
+def cleanRecords(processor_attributes, documents):
+    for doc in documents:
+        attributes_list = doc["attributesList"]
+        for attr in attributes_list:
+            cleanRecordAttribute(
+                processor_attributes=processor_attributes, attribute=attr
+            )
+    return documents

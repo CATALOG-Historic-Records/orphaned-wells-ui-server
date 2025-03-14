@@ -7,7 +7,7 @@ import traceback
 import re
 
 from bson import ObjectId
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 from app.internal.mongodb_connection import connectToDatabase
 from app.internal.settings import AppSettings
@@ -357,7 +357,7 @@ class DataManager:
             record_groups += project.get("record_groups", [])
         return record_groups
 
-    def getRecordGroupProgress(self, rg_id):
+    def getRecordGroupProgress(self, rg_id, check_for_errors=True):
         ## get total records count
         query = {"record_group_id": rg_id}
         total_amt = self.db.records.count_documents(query)
@@ -368,7 +368,42 @@ class DataManager:
             "review_status": {"$in": ["defective", "reviewed"]},
         }
         reviewed_amt = self.db.records.count_documents(query)
-        return total_amt, reviewed_amt
+
+        if check_for_errors:
+            try:
+                query = {
+                    "record_group_id": rg_id,
+                    "$or": [
+                        {
+                            "attributesList": {
+                                "$elemMatch": {
+                                    "$and": [
+                                        {"cleaning_error": {"$ne": False}},
+                                        {"cleaning_error": {"$exists": True}},
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            "attributesList.subattributes": {
+                                "$elemMatch": {
+                                    "$and": [
+                                        {"cleaning_error": {"$ne": False}},
+                                        {"cleaning_error": {"$exists": True}},
+                                    ]
+                                }
+                            }
+                        },
+                    ],
+                }
+                error_amt = self.db.records.count_documents(query)
+            except Exception as e:
+                _log.info(f"unable to check for errors: {e}")
+                error_amt = 0
+        else:
+            error_amt = 0
+
+        return total_amt, reviewed_amt, error_amt
 
     def fetchTeamInfo(self, email):
         user_doc = self.db.users.find({"email": email}).next()
@@ -431,7 +466,12 @@ class DataManager:
         return record_groups_list
 
     def fetchRecords(
-        self, sort_by=["dateCreated", 1], filter_by={}, page=None, records_per_page=None
+        self,
+        sort_by=["dateCreated", 1],
+        filter_by={},
+        page=None,
+        records_per_page=None,
+        search_for_errors=True,
     ):
         records = []
         record_index = 1
@@ -453,6 +493,8 @@ class DataManager:
         for document in cursor:
             document["_id"] = str(document["_id"])
             document["recordIndex"] = record_index
+            if search_for_errors:
+                document["has_errors"] = util.searchRecordForAttributeErrors(document)
             record_index += 1
             records.append(document)
         record_count = self.db.records.count_documents(filter_by)
@@ -514,6 +556,7 @@ class DataManager:
             (
                 document["total_amt"],
                 document["reviewed_amt"],
+                document["error_amt"],
             ) = self.getRecordGroupProgress(document["_id"])
             record_groups.append(document)
         return {"project": project, "record_groups": record_groups}
@@ -719,7 +762,7 @@ class DataManager:
             document["attributesList"] = sorted_attributes
         except Exception as e:
             _log.error(f"unable to sort attributes: {e}")
-            _log.error(traceback.format_exc())
+            # _log.error(traceback.format_exc())
 
         return document, not attained_lock
 
@@ -770,6 +813,17 @@ class DataManager:
             processor_document = processor_cursor.next()
             processor_attributes = processor_document.get("attributes", None)
             return google_id, processor_attributes
+        except Exception as e:
+            _log.error(f"unable to find processor id: {e}")
+            return None
+
+    def getProcessorByRecordID(self, record_id):
+        _id = ObjectId(record_id)
+        try:
+            cursor = self.db.records.find({"_id": _id})
+            document = cursor.next()
+            rg_id = document["record_group_id"]
+            return self.getProcessorByRecordGroupID(rg_id)
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
             return None
@@ -897,7 +951,13 @@ class DataManager:
         self.updateRecord(record_id, new_data, "record", user_info)
 
     def updateRecord(
-        self, record_id, new_data, update_type=None, user_info=None, forceUpdate=False
+        self,
+        record_id,
+        new_data,
+        update_type=None,
+        field_to_clean=None,
+        user_info=None,
+        forceUpdate=False,
     ):
         # _log.info(f"updating {record_id} to be {new_data}")
         attained_lock = False
@@ -917,6 +977,21 @@ class DataManager:
                 update_query = {"$set": data_update}
             else:
                 data_update = {update_type: new_data.get(update_type, None)}
+
+                ## call cleaning functions
+                if field_to_clean:
+                    topLevelIndex = field_to_clean["topLevelIndex"]
+                    isSubattribute = field_to_clean.get("isSubattribute", False)
+                    if isSubattribute:
+                        subIndex = field_to_clean["subIndex"]
+                        attributeToClean = new_data["attributesList"][topLevelIndex][
+                            "subattributes"
+                        ][subIndex]
+                    else:
+                        attributeToClean = new_data["attributesList"][topLevelIndex]
+                    # print(attributeToClean)
+                    self.cleanAttribute(attributeToClean, record_id=record_id)
+
                 if (
                     update_type == "attributesList"
                     and new_data.get("review_status", None) == "unreviewed"
@@ -1067,24 +1142,26 @@ class DataManager:
         record_attributes = record_data["attributesList"]
         for attribute in record_attributes:
             attribute_name = attribute["key"]
-            if attribute["normalized_value"] != "":
-                original_value = attribute["normalized_value"]
-            else:
-                original_value = attribute["raw_text"]
+            original_value = attribute["raw_text"]
             attribute["value"] = original_value
             attribute["confidence"] = attribute["ai_confidence"]
             attribute["edited"] = False
+            attribute["cleaning_error"] = False
+            attribute["uncleaned_value"] = None
+            attribute["cleaned"] = False
+            attribute["last_cleaned"] = None
             ## check for subattributes and reset those
             if attribute["subattributes"] is not None:
                 record_subattributes = attribute["subattributes"]
                 for subattribute in record_subattributes:
-                    if subattribute["normalized_value"] != "":
-                        original_value = subattribute["normalized_value"]
-                    else:
-                        original_value = subattribute["raw_text"]
+                    original_value = subattribute["raw_text"]
                     subattribute["value"] = original_value
                     subattribute["confidence"] = subattribute.get("ai_confidence", None)
                     subattribute["edited"] = False
+                    subattribute["cleaning_error"] = False
+                    subattribute["uncleaned_value"] = None
+                    subattribute["cleaned"] = False
+                    subattribute["last_cleaned"] = None
         update = {
             "review_status": "unreviewed",
             "attributesList": record_attributes,
@@ -1410,6 +1487,69 @@ class DataManager:
             self.db.history.insert_one(history_item)
         except Exception as e:
             _log.error(f"unable to record history item: {e}")
+
+    def cleanAttribute(self, attribute, record_id=None, rg_id=None):
+        if record_id is None and rg_id is None:
+            return None
+        if rg_id is not None:
+            _, processor_attributes = self.getProcessorByRecordGroupID(rg_id)
+        else:
+            _, processor_attributes = self.getProcessorByRecordID(record_id)
+
+        ## convert processor attributes to dict
+        processor_attributes = util.convert_processor_attributes_to_dict(
+            processor_attributes
+        )
+
+        if attribute.get("isSubattribute", False):
+            parentAttribute = attribute.get("topLevelAttribute", "")
+            subattributeKey = attribute["key"]
+            subattribute_identifier = f"{parentAttribute}::{subattributeKey}"
+            util.cleanRecordAttribute(
+                processor_attributes=processor_attributes,
+                attribute=attribute,
+                subattributeKey=subattribute_identifier,
+            )
+        else:
+            util.cleanRecordAttribute(
+                processor_attributes=processor_attributes, attribute=attribute
+            )
+
+    def cleanCollection(self, location, _id):
+        documents = []
+        try:
+            if location == "record":
+                _log.info(f"cleaning record {_id}")
+                _, processor_attributes = self.getProcessorByRecordID(_id)
+                object_id = ObjectId(_id)
+                query = {"_id": object_id}
+                documents.append(self.db.records.find(query).next())
+            elif location == "record_group":
+                _log.info(f"cleaning record group {_id}")
+                _, processor_attributes = self.getProcessorByRecordGroupID(_id)
+                cursor = self.db.records.find({"record_group_id": _id})
+                for each in cursor:
+                    documents.append(each)
+            else:
+                _log.error(f"clean {location} is not supported")
+                return False
+
+            ## convert processor attributes to dict
+            processor_attributes = util.convert_processor_attributes_to_dict(
+                processor_attributes
+            )
+            util.cleanRecords(
+                processor_attributes=processor_attributes, documents=documents
+            )
+            update_ops = []
+            for document in documents:
+                update_ops.append(
+                    UpdateOne({"_id": document["_id"]}, {"$set": document})
+                )
+            _log.info(f"updateOps length {len(update_ops)}")
+            self.db.records.bulk_write(update_ops)
+        except Exception as e:
+            _log.error(f"error on cleaning {location}: {e}")
 
 
 data_manager = DataManager()
