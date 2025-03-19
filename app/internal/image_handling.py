@@ -27,6 +27,9 @@ STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 os.environ["GCLOUD_PROJECT"] = PROJECT_ID
 DIRNAME, FILENAME = os.path.split(os.path.abspath(sys.argv[0]))
+os.environ[
+    "GOOGLE_APPLICATION_CREDENTIALS"
+] = f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
 
 docai_client = documentai.DocumentProcessorServiceClient(
     client_options=ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com"),

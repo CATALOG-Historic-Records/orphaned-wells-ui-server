@@ -42,7 +42,7 @@ jobs:
         id: create-service-key-json
         uses: jsdaniell/create-json@v1.2.3
         with:
-            name: "app/internal/tidy-outlet-service-key.json"
+            name: "app/internal/michael2-service-key.json"
             json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
     
       - name: Extract metadata (labels, tags, etc.) for Docker
@@ -85,6 +85,7 @@ jobs:
             username: ${{ secrets.SSH_USERNAME }}
             key: ${{ secrets.SSH_PRIVATE_KEY }}
             script: |
+                echo ${{ secrets.DOCKERHUB_ACCESS_TOKEN }} | sudo docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
                 sudo docker compose down
                 sudo docker rmi -f $(sudo docker images -q)
                 sudo docker compose pull
