@@ -22,7 +22,6 @@ _log = logging.getLogger(__name__)
 
 LOCATION = os.getenv("LOCATION")
 PROJECT_ID = os.getenv("PROJECT_ID")
-PROCESSOR_ID = os.getenv("PROCESSOR_ID")
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 os.environ["GCLOUD_PROJECT"] = PROJECT_ID
@@ -274,11 +273,6 @@ def process_image(
         prcoessor_attributes_dictionary = util.convert_processor_attributes_to_dict(
             processor_attributes
         )
-    if processor_id is None:
-        _log.info(
-            f"processor id is none, rolling with default processor: {PROCESSOR_ID}"
-        )
-        processor_id = PROCESSOR_ID
 
     RESOURCE_NAME = docai_client.processor_path(PROJECT_ID, LOCATION, processor_id)
 

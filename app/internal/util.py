@@ -133,7 +133,6 @@ def compileDocumentImageList(records):
             "record_id": record_id,
             "record_name": record_name,
         }
-    _log.info(images)
 
     return images
 
@@ -199,6 +198,14 @@ def convert_processor_attributes_to_dict(attributes):
                 sub_key = subattribute["name"]
                 attributes_dict[f"{key}::{sub_key}"] = subattribute
     return attributes_dict
+
+
+def convert_processor_list_to_dict(processor_list):
+    processor_dict = {}
+    for each in processor_list:
+        key = each["Processor ID"]
+        processor_dict[key] = each
+    return processor_dict
 
 
 def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
