@@ -419,7 +419,7 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.fetchProcessor(google_id)
+    resp = data_manager.getProcessorByGoogleId(google_id)
     return resp
 
 

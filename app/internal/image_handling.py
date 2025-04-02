@@ -22,7 +22,6 @@ _log = logging.getLogger(__name__)
 
 LOCATION = os.getenv("LOCATION")
 PROJECT_ID = os.getenv("PROJECT_ID")
-PROCESSOR_ID = os.getenv("PROCESSOR_ID")
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 os.environ["GCLOUD_PROJECT"] = PROJECT_ID
@@ -274,11 +273,6 @@ def process_image(
         prcoessor_attributes_dictionary = util.convert_processor_attributes_to_dict(
             processor_attributes
         )
-    if processor_id is None:
-        _log.info(
-            f"processor id is none, rolling with default processor: {PROCESSOR_ID}"
-        )
-        processor_id = PROCESSOR_ID
 
     RESOURCE_NAME = docai_client.processor_path(PROJECT_ID, LOCATION, processor_id)
 
@@ -434,11 +428,11 @@ def process_image(
         processor_attributes_list.append(attr)
         if attr in found_attributes:
             indexes = found_attributes[attr]
-            # if len(indexes) > 1:
-            #     print(f"found multiple for {attr}")
             for idx in indexes:
                 sortedAttributesList.append(attributesList[idx])
-        else:
+        elif (
+            "::" not in attr
+        ):  ## :: indicates it is a subattribute. these are handled by parent attribut
             sortedAttributesList.append(
                 {
                     "key": attr,
