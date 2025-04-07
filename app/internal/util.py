@@ -133,7 +133,6 @@ def compileDocumentImageList(records):
             "record_id": record_id,
             "record_name": record_name,
         }
-    _log.info(images)
 
     return images
 
@@ -201,6 +200,14 @@ def convert_processor_attributes_to_dict(attributes):
     return attributes_dict
 
 
+def convert_processor_list_to_dict(processor_list):
+    processor_dict = {}
+    for each in processor_list:
+        key = each["Processor ID"]
+        processor_dict[key] = each
+    return processor_dict
+
+
 def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
     if subattributeKey:
         attribute_key = subattributeKey
@@ -234,13 +241,13 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
         else:
             _log.info(f"no cleaning function with name: {cleaning_function_name}")
 
-    subattributes = attribute.get("subattributes", None)
-    if subattributes:
-        for subattribute in subattributes:
-            subattribute_key = f"{attribute_key}::{subattribute['key']}"
-            cleanRecordAttribute(
-                processor_attributes, subattribute, subattributeKey=subattribute_key
-            )
+        subattributes = attribute.get("subattributes", None)
+        if subattributes:
+            for subattribute in subattributes:
+                subattribute_key = f"{attribute_key}::{subattribute['key']}"
+                cleanRecordAttribute(
+                    processor_attributes, subattribute, subattributeKey=subattribute_key
+                )
 
     else:
         _log.info(f"no schema found for {attribute_key}")

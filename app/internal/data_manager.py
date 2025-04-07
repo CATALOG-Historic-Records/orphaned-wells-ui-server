@@ -3,19 +3,20 @@ import time
 import os
 import csv
 import json
-import traceback
 import re
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
+import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
 from app.internal.mongodb_connection import connectToDatabase
 from app.internal.settings import AppSettings
 from app.internal.util import generate_download_signed_url_v4
 import app.internal.util as util
 
-
 _log = logging.getLogger(__name__)
+
+COLLABORATORS = ["isgs", "calgem"]
 
 
 class DataManager:
@@ -27,11 +28,21 @@ class DataManager:
         self.app_settings = AppSettings(**kwargs)
         self.db = connectToDatabase()
         self.environment = os.getenv("ENVIRONMENT")
+        self.collaborator = os.getenv("ENVIRONMENT")
+        if self.collaborator.lower() not in COLLABORATORS:
+            self.collaborator = "isgs"
         _log.info(f"working in environment: {self.environment}")
 
         self.LOCKED = False
         ## lock_duration: amount of seconds that records remain locked if no changes are made
         self.lock_duration = 120
+        self.processor_list = self.createProcessorsList()
+        self.processor_dict = util.convert_processor_list_to_dict(self.processor_list)
+
+    def createProcessorsList(self):
+        _log.info(f"creating processors list")
+        processor_list = processor_api.get_processor_list("isgs")
+        return processor_list
 
     ## lock functions
     def fetchLock(self, user):
@@ -202,7 +213,6 @@ class DataManager:
         return "success"
 
     def updateUser(self, user_info):
-        # _log.info(f"updating user {user_info}")
         email = user_info.get("email", "")
         user = {
             "name": user_info.get("name", ""),
@@ -218,7 +228,6 @@ class DataManager:
         try:
             myquery = {"email": email}
             user_doc = self.db.users.find(myquery).next()
-            # team = user_doc["default_team"]
 
             user_roles = user_doc.get("roles", {})
             if role_category == "system":
@@ -273,15 +282,10 @@ class DataManager:
                 )
         return users
 
-    def removeUserFromTeam(self, user, team):
-        query = {"email": user}
-        # delete_response = self.db.users.delete_one(query)
-        return user
-
     def deleteUser(self, email, user_info):
         admin_email = user_info.get("email", None)
         query = {"email": email}
-        delete_response = self.db.users.delete_one(query)
+        self.db.users.delete_one(query)
         ## remove user form all teams that include him/her
         query = {"users": email}
         teams_cursor = self.db.teams.find(query)
@@ -562,6 +566,7 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     def fetchColumnData(self, location, _id):
+        ##TEST: update to new processor schema
         if location == "project" or location == "team":
             columns = set()
             if location == "project":
@@ -600,26 +605,11 @@ class DataManager:
         return None
 
     def getProcessorByGoogleId(self, google_id):
-        cursor = self.db.processors.find({"processor_id": google_id})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            return document
-        return None
-
-    def fetchProcessor(self, google_id):
-        cursor = self.db.processors.find({"id": google_id})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            return document
-        return None
+        processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+        return processor
 
     def fetchProcessors(self, user, state):
-        processors = []
-        cursor = self.db.processors.find({"state": state})
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            processors.append(document)
-        return processors
+        return self.processor_list
 
     def fetchRoles(self, role_category):
         roles = []
@@ -755,14 +745,15 @@ class DataManager:
         ## sort record attributes
         try:
             google_id = rg["processorId"]
-            processor_doc = self.db.processors.find({"google_id": google_id}).next()
+            processor_doc = processor_api.get_processor_by_id(
+                self.collaborator, google_id
+            )
             sorted_attributes = util.sortRecordAttributes(
                 document["attributesList"], processor_doc
             )
             document["attributesList"] = sorted_attributes
         except Exception as e:
             _log.error(f"unable to sort attributes: {e}")
-            # _log.error(traceback.format_exc())
 
         return document, not attained_lock
 
@@ -809,8 +800,9 @@ class DataManager:
             cursor = self.db.record_groups.find({"_id": _id})
             document = cursor.next()
             google_id = document.get("processorId", None)
-            processor_cursor = self.db.processors.find({"google_id": google_id})
-            processor_document = processor_cursor.next()
+            processor_document = processor_api.get_processor_by_id(
+                self.collaborator, google_id
+            )
             processor_attributes = processor_document.get("attributes", None)
             return google_id, processor_attributes
         except Exception as e:
@@ -877,10 +869,6 @@ class DataManager:
         rg_info["team"] = default_team
         rg_info["dateCreated"] = time.time()
         rg_info["settings"] = {}
-
-        ## get processor id
-        processor_document = self.getProcessorByGoogleId(rg_info["processorId"])
-        rg_info["processor_id"] = str(processor_document["_id"])
 
         ## add record group to db collection
         db_response = self.db.record_groups.insert_one(rg_info)
