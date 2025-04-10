@@ -1,7 +1,7 @@
 import os
 import sys
 import logging
-import datetime
+import time
 import json
 import aiofiles
 import aiohttp
@@ -17,6 +17,10 @@ import mimetypes
 
 from app.internal.bulk_upload import upload_documents_from_directory
 import app.internal.util as util
+from app.internal.google_processor_manager import (
+    deploy_processor_version,
+    undeploy_processor_version,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -116,6 +120,7 @@ def process_document(
     content,
     reprocessed=False,
     run_cleaning_functions=True,
+    undeployProcessor=True,
 ):
     if file_ext == ".tif" or file_ext == ".tiff":
         output_paths = convert_tiff(
@@ -138,7 +143,6 @@ def process_document(
         _log.info(f"unable to parse api number")
         api_number = None
     ## add record to DB without attributes
-    print(f"original outputpath: {original_output_path}")
     new_record = {
         "record_group_id": rg_id,
         "name": filename,
@@ -153,7 +157,11 @@ def process_document(
     new_record_id = data_manager.createRecord(new_record, user_info)
 
     ## fetch processor id
-    processor_id, processor_attributes = data_manager.getProcessorByRecordGroupID(rg_id)
+    (
+        processor_id,
+        model_id,
+        processor_attributes,
+    ) = data_manager.getProcessorByRecordGroupID(rg_id)
 
     ## upload to cloud storage
     for output_path in output_paths:
@@ -178,12 +186,14 @@ def process_document(
         rg_id=rg_id,
         record_id=new_record_id,
         processor_id=processor_id,
+        model_id=model_id,
         processor_attributes=processor_attributes,
         data_manager=data_manager,
         image_content=content,
         reprocessed=reprocessed,
         files_to_delete=files_to_delete,
         run_cleaning_functions=run_cleaning_functions,
+        undeployProcessor=undeployProcessor,
     )
     return {"record_id": new_record_id}
 
@@ -223,7 +233,7 @@ def convert_tiff(filename, file_ext, output_directory, convert_to=".png"):
             im = Image.open(filepath)
             im.thumbnail(im.size)
             im.save(outfile, "PNG", quality=100)
-            return outfile
+            return [outfile]
         except Exception as e:
             print(f"unable to save {filename}: {e}")
             return [filepath]
@@ -262,19 +272,23 @@ def process_image(
     rg_id,
     record_id,
     processor_id,
+    model_id,
     processor_attributes,
     data_manager,
     image_content,
     reprocessed=False,
     files_to_delete=[],
     run_cleaning_functions=True,
+    undeployProcessor=True,
 ):
     if run_cleaning_functions:
         prcoessor_attributes_dictionary = util.convert_processor_attributes_to_dict(
             processor_attributes
         )
 
-    RESOURCE_NAME = docai_client.processor_path(PROJECT_ID, LOCATION, processor_id)
+    RESOURCE_NAME = docai_client.processor_version_path(
+        PROJECT_ID, LOCATION, processor_id, model_id
+    )
 
     raw_document = documentai.RawDocument(content=image_content, mime_type=mime_type)
     try:
@@ -481,9 +495,80 @@ def process_image(
     ## delete local files
     util.deleteFiles(filepaths=files_to_delete, sleep_time=0)
 
+    if undeployProcessor:
+        _log.info(f"attempting to undeploy")
+        start_time = time.time()
+        undeploy_processor_version(RESOURCE_NAME)
+        finish_time = time.time()
+        _log.info(f"took {finish_time-start_time} seconds to undeploy")
+
     _log.info(f"updated record in db: {record_id}")
 
     return record_id
+
+
+def deployProcessor(rg_id, data_manager):
+    ## fetch processor id
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+
+    RESOURCE_NAME = docai_client.processor_version_path(
+        PROJECT_ID, LOCATION, processor_id, model_id
+    )
+
+    _log.debug(f"attempting to deploy processor model: {model_id}")
+    start_time = time.time()
+    deployment = deploy_processor_version(RESOURCE_NAME)
+    if deployment != "DEPLOYED":
+        finish_time = time.time()
+        _log.error(
+            f"we have an issue, deployment failed. took {finish_time-start_time} seconds to fail deploy"
+        )
+        return False
+    finish_time = time.time()
+    _log.debug(f"took {finish_time-start_time} seconds to DEPLOY")
+    return True
+
+
+def undeployProcessor(rg_id, data_manager):
+    _log.debug(f"attempting to deploy processor for record group {rg_id}")
+    ## fetch processor id
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+
+    RESOURCE_NAME = docai_client.processor_version_path(
+        PROJECT_ID, LOCATION, processor_id, model_id
+    )
+    start_time = time.time()
+    undeploy_processor_version(RESOURCE_NAME)
+    finish_time = time.time()
+    _log.debug(f"took {finish_time-start_time} seconds to undeploy")
+    return True
+
+
+def check_if_processor_is_deployed(rg_id, data_manager):
+    try:
+        processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+
+        opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
+        client = documentai.DocumentProcessorServiceClient(client_options=opts)
+        parent = client.processor_path(PROJECT_ID, LOCATION, processor_id)
+
+        processor_versions = client.list_processor_versions(parent=parent)
+
+        # _log.info(f"processor_versions={processor_versions}")
+        for processor_version in processor_versions:
+            processor_version_id = client.parse_processor_version_path(
+                processor_version.name
+            )["processor_version"]
+            if (
+                processor_version_id == model_id
+            ):  ## processor states: 1=deployed, 2=deploying, 3=undeployed
+                _log.debug(f"processor state == {processor_version.state}")
+                return processor_version.state
+        _log.error(f"unable to find model id: {model_id}")
+        return 10
+    except Exception as e:
+        print(f"unable to check processor status: {e}")
+        return 10
 
 
 ## Google Cloud Storage Functions

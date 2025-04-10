@@ -804,7 +804,8 @@ class DataManager:
                 self.collaborator, google_id
             )
             processor_attributes = processor_document.get("attributes", None)
-            return google_id, processor_attributes
+            model_id = processor_document.get("Model ID", None)
+            return google_id, model_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
             return None
@@ -1480,9 +1481,9 @@ class DataManager:
         if record_id is None and rg_id is None:
             return None
         if rg_id is not None:
-            _, processor_attributes = self.getProcessorByRecordGroupID(rg_id)
+            _, _, processor_attributes = self.getProcessorByRecordGroupID(rg_id)
         else:
-            _, processor_attributes = self.getProcessorByRecordID(record_id)
+            _, _, processor_attributes = self.getProcessorByRecordID(record_id)
 
         ## convert processor attributes to dict
         processor_attributes = util.convert_processor_attributes_to_dict(
@@ -1508,13 +1509,13 @@ class DataManager:
         try:
             if location == "record":
                 _log.info(f"cleaning record {_id}")
-                _, processor_attributes = self.getProcessorByRecordID(_id)
+                _, _, processor_attributes = self.getProcessorByRecordID(_id)
                 object_id = ObjectId(_id)
                 query = {"_id": object_id}
                 documents.append(self.db.records.find(query).next())
             elif location == "record_group":
                 _log.info(f"cleaning record group {_id}")
-                _, processor_attributes = self.getProcessorByRecordGroupID(_id)
+                _, _, processor_attributes = self.getProcessorByRecordGroupID(_id)
                 cursor = self.db.records.find({"record_group_id": _id})
                 for each in cursor:
                     documents.append(each)
