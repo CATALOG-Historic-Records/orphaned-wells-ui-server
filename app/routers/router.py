@@ -348,8 +348,10 @@ async def get_record_group_data(
     }
 
 
-@router.get("/get_record/{record_id}")
-async def get_record_data(record_id: str, user_info: dict = Depends(authenticate)):
+@router.post("/get_record/{record_id}")
+async def get_record_data(
+    request: Request, record_id: str, user_info: dict = Depends(authenticate)
+):
     """Fetch document record data.
 
     Args:
@@ -358,7 +360,9 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
     Returns:
         List containing record data
     """
-    record, is_locked = data_manager.fetchRecordData(record_id, user_info)
+    filters = await request.json()
+
+    record, is_locked = data_manager.fetchRecordData(record_id, user_info, filters)
     if record is None:
         raise HTTPException(
             403,
