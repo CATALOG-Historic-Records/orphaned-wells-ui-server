@@ -969,16 +969,7 @@ class DataManager:
 
                 ## call cleaning functions
                 if field_to_clean:
-                    topLevelIndex = field_to_clean["topLevelIndex"]
-                    isSubattribute = field_to_clean.get("isSubattribute", False)
-                    if isSubattribute:
-                        subIndex = field_to_clean["subIndex"]
-                        attributeToClean = new_data["attributesList"][topLevelIndex][
-                            "subattributes"
-                        ][subIndex]
-                    else:
-                        attributeToClean = new_data["attributesList"][topLevelIndex]
-                    # print(attributeToClean)
+                    attributeToClean = new_data["v"]
                     self.cleanAttribute(attributeToClean, record_id=record_id)
 
                 if (
@@ -987,6 +978,20 @@ class DataManager:
                 ):
                     ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
                     data_update["review_status"] = "incomplete"
+                elif update_type == "attribute":
+                    is_subattribute = new_data.get("isSubattribute", False)
+                    idx = new_data.get("idx", None)
+                    v = new_data.get("v", None)
+                    subIndex = new_data.get("subIndex", None)
+                    if not is_subattribute:
+                        data_update = {
+                            f"attributesList.{idx}": v,
+                        }
+                    else:
+                        data_update = {
+                            f"attributesList.{idx}.subattributes.{subIndex}": v,
+                        }
+
                 elif update_type == "verification_status" and new_data.get(
                     "review_status", None
                 ):
