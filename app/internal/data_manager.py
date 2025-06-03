@@ -948,7 +948,6 @@ class DataManager:
         user_info=None,
         forceUpdate=False,
     ):
-        # _log.info(f"updating {record_id} to be {new_data}")
         attained_lock = False
         user = None
         if user_info is None and not forceUpdate:
@@ -966,27 +965,35 @@ class DataManager:
                 update_query = {"$set": data_update}
             else:
                 data_update = {update_type: new_data.get(update_type, None)}
-
                 ## call cleaning functions
                 if field_to_clean:
-                    topLevelIndex = field_to_clean["topLevelIndex"]
-                    isSubattribute = field_to_clean.get("isSubattribute", False)
-                    if isSubattribute:
-                        subIndex = field_to_clean["subIndex"]
-                        attributeToClean = new_data["attributesList"][topLevelIndex][
-                            "subattributes"
-                        ][subIndex]
-                    else:
-                        attributeToClean = new_data["attributesList"][topLevelIndex]
-                    # print(attributeToClean)
+                    attributeToClean = new_data["v"]
                     self.cleanAttribute(attributeToClean, record_id=record_id)
 
-                if (
-                    update_type == "attributesList"
-                    and new_data.get("review_status", None) == "unreviewed"
-                ):
+                if update_type == "attributesList":
                     ## if an attribute is updated and the record is unreviewed, automatically move review_status to incomplete
-                    data_update["review_status"] = "incomplete"
+                    new_review_status = new_data.get("review_status", None)
+                    if new_review_status == "unreviewed":
+                        data_update["review_status"] = "incomplete"
+                    elif new_review_status:
+                        data_update["review_status"] = new_review_status
+                elif update_type == "attribute":
+                    is_subattribute = new_data.get("isSubattribute", False)
+                    idx = new_data.get("idx", None)
+                    v = new_data.get("v", None)
+                    reviewStatus = new_data.get("review_status", None)
+                    subIndex = new_data.get("subIndex", None)
+                    if not is_subattribute:
+                        data_update = {
+                            f"attributesList.{idx}": v,
+                        }
+                    else:
+                        data_update = {
+                            f"attributesList.{idx}.subattributes.{subIndex}": v,
+                        }
+                    if reviewStatus == "unreviewed":
+                        data_update["review_status"] = "incomplete"
+
                 elif update_type == "verification_status" and new_data.get(
                     "review_status", None
                 ):
@@ -1127,9 +1134,15 @@ class DataManager:
         return record_doc.get("record_notes", [])
 
     def resetRecord(self, record_id, record_data, user):
-        print(f"resetting record: {record_id}")
+        # print(f"resetting record: {record_id}")
         record_attributes = record_data["attributesList"]
+        indexes_to_delete = []
+        idx = 0
         for attribute in record_attributes:
+            if attribute.get("user_added", False):
+                indexes_to_delete.append(idx)
+                idx += 1
+                continue
             attribute_name = attribute["key"]
             original_value = attribute["raw_text"]
             attribute["value"] = original_value
@@ -1142,7 +1155,13 @@ class DataManager:
             ## check for subattributes and reset those
             if attribute["subattributes"] is not None:
                 record_subattributes = attribute["subattributes"]
+                subindexes_to_delete = []
+                subidx = 0
                 for subattribute in record_subattributes:
+                    if subattribute.get("user_added", False):
+                        subindexes_to_delete.append(subidx)
+                        subidx += 1
+                        continue
                     original_value = subattribute["raw_text"]
                     subattribute["value"] = original_value
                     subattribute["confidence"] = subattribute.get("ai_confidence", None)
@@ -1151,6 +1170,16 @@ class DataManager:
                     subattribute["uncleaned_value"] = None
                     subattribute["cleaned"] = False
                     subattribute["last_cleaned"] = None
+                    subidx += 1
+                subindexes_to_delete.reverse()
+                for i in subindexes_to_delete:
+                    _log.info(f"deleting {i}th subfield: {record_subattributes[i]}")
+                    del record_subattributes[i]
+            idx += 1
+        indexes_to_delete.reverse()
+        for i in indexes_to_delete:
+            _log.info(f"deleting {i}th field: {record_attributes[i]}")
+            del record_attributes[i]
         update = {
             "review_status": "unreviewed",
             "attributesList": record_attributes,
