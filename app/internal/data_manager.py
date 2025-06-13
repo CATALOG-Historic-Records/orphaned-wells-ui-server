@@ -41,7 +41,7 @@ class DataManager:
 
     def createProcessorsList(self):
         _log.info(f"creating processors list")
-        processor_list = processor_api.get_processor_list("isgs")
+        processor_list = processor_api.get_processor_list(self.collaborator)
         return processor_list
 
     ## lock functions
