@@ -19,6 +19,7 @@ def upload_documents_from_directory(
     preventDuplicates=True,
     db=None,
     reprocessed=False,
+    backend_url=None,
 ):
     print(f"amount to upload: {amount}")
     count = 0
@@ -31,7 +32,8 @@ def upload_documents_from_directory(
     if local_directory is None and (cloud_directory is None or cloud_bucket is None):
         print("please provide either a local directory or a cloud directory")
         return
-    backend_url = os.getenv("BACKEND_URL")
+    if backend_url is None:
+        backend_url = os.getenv("BACKEND_URL")
 
     dontAdd = set()
     if preventDuplicates:

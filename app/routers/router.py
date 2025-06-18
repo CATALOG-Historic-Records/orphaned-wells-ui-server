@@ -267,14 +267,14 @@ async def get_records(
     raise HTTPException(400, detail=f"unable to process record query")
 
 
-@router.get("/get_processors/{state}", response_model=list)
-async def get_processors(state: str, user_info: dict = Depends(authenticate)):
+@router.get("/get_processors", response_model=list)
+async def get_processors(user_info: dict = Depends(authenticate)):
     """Fetch all processors for a given state/organization.
 
     Returns:
         List containing processors and metadata
     """
-    resp = data_manager.fetchProcessors(user_info.get("email", ""), state)
+    resp = data_manager.fetchProcessors(user_info.get("email", ""))
     return resp
 
 
@@ -501,6 +501,7 @@ async def add_record_group(request: Request, user_info: dict = Depends(authentic
 async def upload_document(
     rg_id: str,
     user_email: str,
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     reprocessed: bool = False,
@@ -538,14 +539,10 @@ async def upload_document(
     filename, file_ext = os.path.splitext(file.filename)
 
     if file_ext.lower() == ".zip":
+        backend_url = str(request.base_url)
         output_dir = f"{data_manager.app_settings.img_dir}"
         return process_zip(
-            rg_id,
-            user_info,
-            background_tasks,
-            file,
-            output_dir,
-            filename,
+            rg_id, user_info, background_tasks, file, output_dir, filename, backend_url
         )
 
     else:

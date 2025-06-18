@@ -47,6 +47,7 @@ def process_zip(
     zip_file,
     image_dir,
     zip_filename,
+    backend_url,
 ):
     ## read document file
     _log.info(f"processing a zip: {zip_filename}")
@@ -63,7 +64,6 @@ def process_zip(
             # if it is not a document file, remove it
             if mime_type is None:
                 os.remove(unzipped_img_filepath)
-    backend_url = os.getenv("BACKEND_URL")
     background_tasks.add_task(
         upload_documents_from_directory,
         backend_url=backend_url,
