@@ -189,22 +189,24 @@ def searchRecordForAttributeErrors(document):
 
 def convert_processor_attributes_to_dict(attributes):
     attributes_dict = {}
-    for attr in attributes:
-        key = attr["name"]
-        attributes_dict[key] = attr
-        subattributes = attr.get("subattributes", None)
-        if subattributes:
-            for subattribute in subattributes:
-                sub_key = subattribute["name"]
-                attributes_dict[f"{key}::{sub_key}"] = subattribute
+    if attributes:
+        for attr in attributes:
+            key = attr["name"]
+            attributes_dict[key] = attr
+            subattributes = attr.get("subattributes", None)
+            if subattributes:
+                for subattribute in subattributes:
+                    sub_key = subattribute["name"]
+                    attributes_dict[f"{key}::{sub_key}"] = subattribute
     return attributes_dict
 
 
 def convert_processor_list_to_dict(processor_list):
     processor_dict = {}
-    for each in processor_list:
-        key = each["Processor ID"]
-        processor_dict[key] = each
+    if processor_list:
+        for each in processor_list:
+            key = each["Processor ID"]
+            processor_dict[key] = each
     return processor_dict
 
 

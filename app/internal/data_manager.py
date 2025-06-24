@@ -18,6 +18,15 @@ _log = logging.getLogger(__name__)
 
 COLLABORATORS = ["isgs", "calgem"]
 
+DEFAULT_PROCESSORS = [
+    {
+        "Processor Type": "Extractor",
+        "Processor Name": "Default Extractor",
+        "Processor ID": "171289310a83c48b",
+        "Model ID": "pretrained-form-parser-v2.1-2023-06-26",
+    },
+]
+
 
 class DataManager:
     """Manage the active data."""
@@ -29,8 +38,8 @@ class DataManager:
         self.db = connectToDatabase()
         self.environment = os.getenv("ENVIRONMENT")
         self.collaborator = os.getenv("ENVIRONMENT")
-        if self.collaborator.lower() not in COLLABORATORS:
-            self.collaborator = "isgs"
+        # if self.collaborator.lower() not in COLLABORATORS:
+        #     self.collaborator = "isgs"
         _log.info(f"working in environment: {self.environment}")
 
         self.LOCKED = False
@@ -42,6 +51,12 @@ class DataManager:
     def createProcessorsList(self):
         _log.info(f"creating processors list")
         processor_list = processor_api.get_processor_list(self.collaborator)
+        if not processor_list:
+            _log.info(f"no processors found, using default extractor")
+            processor_list = DEFAULT_PROCESSORS
+            self.using_default_processor = True
+        else:
+            self.using_default_processor = True
         return processor_list
 
     ## lock functions
@@ -803,11 +818,13 @@ class DataManager:
             processor_document = processor_api.get_processor_by_id(
                 self.collaborator, google_id
             )
+            if not processor_document:
+                processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
             model_id = processor_document.get("Model ID", None)
             return google_id, model_id, processor_attributes
         except Exception as e:
-            _log.error(f"unable to find processor id: {e}")
+            _log.error(f"unable to find processor: {e}")
             return None
 
     def getProcessorByRecordID(self, record_id):

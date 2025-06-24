@@ -281,6 +281,9 @@ def process_image(
     run_cleaning_functions=True,
     undeployProcessor=True,
 ):
+    if not processor_attributes:
+        _log.info(f"no processor attributes found")
+        processor_attributes = []
     if run_cleaning_functions:
         prcoessor_attributes_dictionary = util.convert_processor_attributes_to_dict(
             processor_attributes
@@ -351,11 +354,16 @@ def process_image(
     """
     attributesList = []
     found_attributes = {}
+
+    # check if using generic extractor. if so, dive into generic_entities
+    if data_manager.using_default_processor:
+        _log.info(f"generic processor, diving into properties")
+        document_entities = document_entities[0].properties
+
     for entity in document_entities:
+        attribute = entity.type_
         text_value = entity.text_anchor.content
         normalized_value = entity.normalized_value.text
-
-        attribute = entity.type_
         confidence = entity.confidence
         raw_text = entity.mention_text
         if normalized_value:
