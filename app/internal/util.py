@@ -29,12 +29,17 @@ BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 def sortRecordAttributes(attributes, processor, keep_all_attributes=True):
     processor_attributes = processor["attributes"]
 
+    ## we want to make sure that the frontend and backend are always in sync.
+    ## for now, update the db with this sorted list every time before returning
+    requires_db_update = True
+
     ## match record attribute to each processor attribute
     sorted_attributes = []
-    processor_attributes_list = []
+    processor_attributes_dict = convert_processor_attributes_to_dict(
+        processor_attributes
+    )
     for each in processor_attributes:
         attribute_name = each["name"]
-        processor_attributes_list.append(attribute_name)
 
         found_ = [item for item in attributes if item["key"] == attribute_name]
         for attribute in found_:
@@ -42,17 +47,24 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=True):
                 _log.info(f"{attribute_name} is None")
             else:
                 sorted_attributes.append(attribute)
+        if len(found_) == 0 and "::" not in attribute_name:
+            _log.info(
+                f"{attribute_name} was not in record's attributes. adding this to the sorted attributes"
+            )
+            new_attr = createNewAttribute(key=attribute_name)
+            sorted_attributes.append(new_attr)
+            requires_db_update = True
 
     if keep_all_attributes:
         for attr in attributes:
             attribute_name = attr["key"]
-            if attribute_name not in processor_attributes_list:
-                _log.debug(
+            if attribute_name not in processor_attributes_dict:
+                _log.info(
                     f"{attribute_name} was not in processor's attributes. adding this to the end of the sorted attributes list"
                 )
                 sorted_attributes.append(attr)
 
-    return sorted_attributes
+    return sorted_attributes, requires_db_update
 
 
 def imageIsValid(image):
@@ -175,36 +187,54 @@ def zip_files(file_paths, documents=None):
 
 
 def searchRecordForAttributeErrors(document):
-    attributes = document.get("attributesList", [])
-    for attribute in attributes:
-        if attribute.get("cleaning_error", False):
-            return True
-        subattributes = attribute.get("subattributes", None)
-        if subattributes:
-            for subattribute in subattributes:
-                if subattribute.get("cleaning_error", False):
+    try:
+        attributes = document.get("attributesList", [])
+        i = 0
+        for attribute in attributes:
+            if attribute is not None:
+                if attribute.get("cleaning_error", False):
                     return True
+                subattributes = attribute.get("subattributes", None)
+                if subattributes:
+                    for subattribute in subattributes:
+                        if subattribute is not None and subattribute.get(
+                            "cleaning_error", False
+                        ):
+                            return True
+            else:
+                _log.info(
+                    f"found none attribute for document {document.get('_id')} at index {i}"
+                )
+                ##TODO: clean this document of null fields. need to write a function for this
+            i += 1
+    except Exception as e:
+        _log.info(
+            f"unable to searchRecordForAttributeErrors for document: {document.get('_id')}"
+        )
+        _log.info(f"e: {e}")
     return False
 
 
 def convert_processor_attributes_to_dict(attributes):
     attributes_dict = {}
-    for attr in attributes:
-        key = attr["name"]
-        attributes_dict[key] = attr
-        subattributes = attr.get("subattributes", None)
-        if subattributes:
-            for subattribute in subattributes:
-                sub_key = subattribute["name"]
-                attributes_dict[f"{key}::{sub_key}"] = subattribute
+    if attributes:
+        for attr in attributes:
+            key = attr["name"]
+            attributes_dict[key] = attr
+            subattributes = attr.get("subattributes", None)
+            if subattributes:
+                for subattribute in subattributes:
+                    sub_key = subattribute["name"]
+                    attributes_dict[f"{key}::{sub_key}"] = subattribute
     return attributes_dict
 
 
 def convert_processor_list_to_dict(processor_list):
     processor_dict = {}
-    for each in processor_list:
-        key = each["Processor ID"]
-        processor_dict[key] = each
+    if processor_list:
+        for each in processor_list:
+            key = each["Processor ID"]
+            processor_dict[key] = each
     return processor_dict
 
 
@@ -262,3 +292,31 @@ def cleanRecords(processor_attributes, documents):
                 processor_attributes=processor_attributes, attribute=attr
             )
     return documents
+
+
+def createNewAttribute(
+    key,
+    value=None,
+    confidence=None,
+    subattributes=None,
+    page=None,
+    coordinates=None,
+    normalized_value=None,
+    raw_text=None,
+    text_value=None,
+):
+    new_attribute = {
+        "key": key,
+        "ai_confidence": confidence,
+        "confidence": confidence,
+        "raw_text": raw_text,
+        "text_value": text_value,
+        "value": value,
+        "normalized_vertices": coordinates,
+        "normalized_value": normalized_value,
+        "subattributes": subattributes,
+        "isSubattribute": False,
+        "edited": False,
+        "page": page,
+    }
+    return new_attribute

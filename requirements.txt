@@ -69,4 +69,4 @@ uvicorn==0.27.0
 wheel==0.42.0
 yarl==1.9.4
 # install ogrre_data_cleaning @ commit from 03/20/25
-ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@9d3a20b31f34f3937ed3cf74aa3a41aa69c22342
+ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@2eb0120f0e719b1c1a93069f6477939835eda561

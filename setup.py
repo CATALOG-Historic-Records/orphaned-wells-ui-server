@@ -27,17 +27,11 @@ setup(
     #
     # For a list of valid classifiers, see https://pypi.org/classifiers/
     classifiers=[
-        #   3 - Alpha
-        #   4 - Beta
-        #   5 - Production/Stable
         "Natural Language :: English",
         "Operating System :: MacOS",
         "Operating System :: Microsoft :: Windows",
         "Operating System :: Unix",
         "Programming Language :: Python",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3 :: Only",
     ],
     keywords="orphaned wells",
     packages=find_packages(
@@ -73,14 +67,7 @@ setup(
     ],
     extras_require={
         "dev": [
-            #     "Sphinx==7.1.*",  # docs
-            #     "sphinx_rtd_theme",  # docs
-            #     "json-schema-for-humans",  # pretty JSON schema in HTML
-            #     "black",  # code formatting
-            #     # other requirements
-            "pytest",  # test framework
-            #     "pytest-cov",  # code coverage
-            #     "mongomock",  # mongodb mocking for testing
+            "pytest",
         ],
     },
 )

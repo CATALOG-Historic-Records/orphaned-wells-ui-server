@@ -18,6 +18,15 @@ _log = logging.getLogger(__name__)
 
 COLLABORATORS = ["isgs", "calgem"]
 
+DEFAULT_PROCESSORS = [
+    {
+        "Processor Type": "Extractor",
+        "Processor Name": "Default Extractor",
+        "Processor ID": "171289310a83c48b",
+        "Model ID": "pretrained-form-parser-v2.1-2023-06-26",
+    },
+]
+
 
 class DataManager:
     """Manage the active data."""
@@ -28,10 +37,12 @@ class DataManager:
         self.app_settings = AppSettings(**kwargs)
         self.db = connectToDatabase()
         self.environment = os.getenv("ENVIRONMENT")
-        self.collaborator = os.getenv("ENVIRONMENT")
-        if self.collaborator.lower() not in COLLABORATORS:
+        self.collaborator = os.getenv("COLLABORATOR")
+        if not self.collaborator or self.collaborator.lower() not in COLLABORATORS:
+            # fallback to to using isgs
             self.collaborator = "isgs"
         _log.info(f"working in environment: {self.environment}")
+        _log.info(f"collaborator is: {self.collaborator}")
 
         self.LOCKED = False
         ## lock_duration: amount of seconds that records remain locked if no changes are made
@@ -40,8 +51,13 @@ class DataManager:
         self.processor_dict = util.convert_processor_list_to_dict(self.processor_list)
 
     def createProcessorsList(self):
-        _log.info(f"creating processors list")
         processor_list = processor_api.get_processor_list(self.collaborator)
+        if not processor_list:
+            _log.info(f"no processors found, using default extractor")
+            processor_list = DEFAULT_PROCESSORS
+            self.using_default_processor = True
+        else:
+            self.using_default_processor = False
         return processor_list
 
     ## lock functions
@@ -748,10 +764,21 @@ class DataManager:
             processor_doc = processor_api.get_processor_by_id(
                 self.collaborator, google_id
             )
-            sorted_attributes = util.sortRecordAttributes(
+            sorted_attributes, update_db = util.sortRecordAttributes(
                 document["attributesList"], processor_doc
             )
             document["attributesList"] = sorted_attributes
+
+            if update_db:
+                ## after sorting, update the record list so frontend and backend are in sync
+                ## this shouldnt always be necessary, but for now do it every time
+                self.updateRecord(
+                    record_id=document["_id"],
+                    new_data={"attributesList": document["attributesList"]},
+                    update_type="attributesList",
+                    user_info=user_info,
+                )
+
         except Exception as e:
             _log.error(f"unable to sort attributes: {e}")
 
@@ -803,11 +830,13 @@ class DataManager:
             processor_document = processor_api.get_processor_by_id(
                 self.collaborator, google_id
             )
+            if not processor_document:
+                processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
             model_id = processor_document.get("Model ID", None)
             return google_id, model_id, processor_attributes
         except Exception as e:
-            _log.error(f"unable to find processor id: {e}")
+            _log.error(f"unable to find processor: {e}")
             return None
 
     def getProcessorByRecordID(self, record_id):
@@ -964,7 +993,10 @@ class DataManager:
                 data_update = new_data
                 update_query = {"$set": data_update}
             else:
+                # this is a little outdated. sometimes we provide update type as its own parameter,
+                # sometimes (when updating review status?) we pass it as part of the new data. TODO: clean this up
                 data_update = {update_type: new_data.get(update_type, None)}
+                # print(f"initially making data_update: {data_update}")
                 ## call cleaning functions
                 if field_to_clean:
                     attributeToClean = new_data["v"]
@@ -977,6 +1009,7 @@ class DataManager:
                         data_update["review_status"] = "incomplete"
                     elif new_review_status:
                         data_update["review_status"] = new_review_status
+                    data_update["attributesList"] = new_data.get("attributesList")
                 elif update_type == "attribute":
                     is_subattribute = new_data.get("isSubattribute", False)
                     idx = new_data.get("idx", None)
