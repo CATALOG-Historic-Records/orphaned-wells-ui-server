@@ -434,7 +434,6 @@ def process_image(
             "page": page,
         }
         if run_cleaning_functions:
-            _log.info(f"running cleaning functions")
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=new_attribute,
