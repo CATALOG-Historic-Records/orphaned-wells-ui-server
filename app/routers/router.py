@@ -1000,11 +1000,11 @@ async def update_user_roles(request: Request, user_info: dict = Depends(authenti
 
     req = await request.json()
     role_category = req.get("role_category", None)
-    new_role = req.get("new_roles", None)
+    new_roles = req.get("new_roles", None)
     email = req.get("email", None)
     team = data_manager.getUserInfo(user_info["email"])["default_team"]
-    if new_role and role_category and email:
-        data_manager.updateUserRole(email, team, role_category, new_role)
+    if new_roles is not None and role_category and email:
+        data_manager.updateUserRole(email, team, role_category, new_roles)
         return email
     else:
         raise HTTPException(
@@ -1044,8 +1044,8 @@ async def update_default_team(
         )
 
 
-@router.get("/fetch_roles/{role_category}", response_model=list)
-async def fetch_roles(role_category: str, user_info: dict = Depends(authenticate)):
+@router.post("/fetch_roles", response_model=list)
+async def fetch_roles(request: Request, user_info: dict = Depends(authenticate)):
     """Fetch all available roles for a certain category.
 
     Args:
@@ -1059,7 +1059,8 @@ async def fetch_roles(role_category: str, user_info: dict = Depends(authenticate
             403,
             detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
         )
-    resp = data_manager.fetchRoles(role_category)
+    role_categories = await request.json()
+    resp = data_manager.fetchRoles(role_categories)
     return resp
 
 

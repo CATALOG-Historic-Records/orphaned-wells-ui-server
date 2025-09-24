@@ -26,7 +26,7 @@ STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 
 
-def sortRecordAttributes(attributes, processor, keep_all_attributes=True):
+def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     processor_attributes = processor["attributes"]
 
     ## we want to make sure that the frontend and backend are always in sync.
@@ -56,6 +56,7 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=True):
             requires_db_update = True
 
     if keep_all_attributes:
+        ## obsolete fields will get removed automatically.
         for attr in attributes:
             attribute_name = attr["key"]
             if attribute_name not in processor_attributes_dict:
@@ -320,3 +321,15 @@ def createNewAttribute(
         "page": page,
     }
     return new_attribute
+
+
+def defaultJSONDumpHandler(obj):
+    if isinstance(obj, datetime.datetime):
+        date_string = obj.date().isoformat()
+        _log.info(
+            f"JSON Dump found datetime object, returning iso format: {date_string}"
+        )
+        return date_string
+    else:
+        _log.info(f"JSON Dump found Type {type(obj)}. returning string")
+        return str(obj)

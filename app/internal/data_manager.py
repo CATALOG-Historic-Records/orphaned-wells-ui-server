@@ -247,12 +247,7 @@ class DataManager:
 
             user_roles = user_doc.get("roles", {})
             if role_category == "system":
-                if new_roles in user_roles.get("system", []):
-                    ## this shouldn't happen
-                    _log.info(f"user already has this role")
-                    return None
-                else:
-                    user_roles["system"].append(new_roles)
+                user_roles["system"] = new_roles
             elif role_category == "team":
                 user_roles["team"][team] = new_roles
 
@@ -496,6 +491,13 @@ class DataManager:
         records = []
         record_index = 1
         if page is not None and records_per_page is not None and records_per_page != -1:
+            # pipeline = [
+            #     {"$match": filter_by},
+            #     {"$sort": {sort_by[0]: sort_by[1]}},
+            #     {"$skip": records_per_page * page},
+            #     {"$limit": records_per_page}
+            # ]
+            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
             cursor = (
                 self.db.records.find(filter_by)
                 .sort(
@@ -508,6 +510,12 @@ class DataManager:
             )
             record_index += page * records_per_page
         else:
+            # print(f"aggregating with match, sort")
+            # pipeline = [
+            #     {"$match": filter_by},  # same as find(filter_by)
+            #     {"$sort": {sort_by[0]: sort_by[1]}}  # same as sort(field, direction)
+            # ]
+            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
             cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
 
         for document in cursor:
@@ -582,7 +590,6 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     def fetchColumnData(self, location, _id):
-        ##TEST: update to new processor schema
         if location == "project" or location == "team":
             columns = set()
             if location == "project":
@@ -607,6 +614,8 @@ class DataManager:
                 for attr in processor["attributes"]:
                     columns.add(attr["name"])
             columns = list(columns)
+            if "projects" in document:
+                del document["projects"]
             return {"columns": columns, "obj": document}
 
         elif location == "record_group":
@@ -627,9 +636,9 @@ class DataManager:
     def fetchProcessors(self, user):
         return self.processor_list
 
-    def fetchRoles(self, role_category):
+    def fetchRoles(self, role_categories):
         roles = []
-        cursor = self.db.roles.find({"category": role_category})
+        cursor = self.db.roles.find({"category": {"$in": role_categories}})
         for document in cursor:
             del document["_id"]
             roles.append(document)
@@ -1379,7 +1388,7 @@ class DataManager:
                 try:
                     current_attributes = set()
                     record_attribute = {}
-                    for document_attribute in document["attributesList"]:
+                    for document_attribute in document.get("attributesList", []):
                         attribute_name = document_attribute["key"].replace(" ", "")
                         if attribute_name in selectedColumns or keep_all_columns:
                             original_attribute_name = attribute_name
@@ -1421,7 +1430,7 @@ class DataManager:
                 document_id = str(document["_id"])
                 try:
                     record_attribute = {}
-                    for document_attribute in document["attributesList"]:
+                    for document_attribute in document.get("attributesList", []):
                         attribute_name = document_attribute["key"]
                         if attribute_name in selectedColumns or keep_all_columns:
                             record_attribute[attribute_name] = document_attribute
@@ -1430,7 +1439,9 @@ class DataManager:
                 except Exception as e:
                     _log.info(f"unable to add {document_id}: {e}")
             with open(output_file, "w", newline="") as jsonfile:
-                json.dump(record_attributes, jsonfile)
+                json.dump(
+                    record_attributes, jsonfile, default=util.defaultJSONDumpHandler
+                )
 
         if location == "project":
             self.recordHistory("downloadRecords", user=user, project_id=_id)
