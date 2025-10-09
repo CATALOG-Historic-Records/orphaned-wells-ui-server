@@ -702,7 +702,7 @@ class DataManager:
 
         return project_document, record_group
 
-    def fetchRecordData(self, record_id, user_info):
+    def fetchRecordData(self, record_id, user_info, page_state=None):
         user = user_info.get("email", "")
         _id = ObjectId(record_id)
         cursor = self.db.records.find({"_id": _id})
@@ -754,18 +754,32 @@ class DataManager:
         document["project_name"] = project_name
         document["project_id"] = project_id
 
-        ## get record index
-        dateCreated = document.get("dateCreated", 0)
-        record_index_query = {
-            "dateCreated": {"$lte": dateCreated},
-            "record_group_id": rg_id,
-        }
-        record_index = self.db.records.count_documents(record_index_query)
-        document["recordIndex"] = record_index
+        ## For the frontend, we want to know the record index, the next record id, and the previous record id
+        ## This^ helps for navigation between records.
+        ## Users typically arrive at a record by clicking on one in a table.
+        ## This table can be a record group, a project, or a table of all the records a team owns.
+        ## We want to allow for the location of the record in the table to persist when navigating to the record.
+        ## This means that we must incldue the filters and sorting that that table had when
+        ## checking the index, next, and previous IDs
 
-        ## get previous and next IDs
-        document["previous_id"] = self.getPreviousRecordId(dateCreated, rg_id)
-        document["next_id"] = self.getNextRecordId(dateCreated, rg_id)
+        ## need to get that list depending on location and group id
+        if page_state:
+            location = page_state.get("location")
+            group_id = page_state.get("group_id")
+            filterBy = page_state.get("filterBy")
+            sortBy = page_state.get("sortBy")
+            if not filterBy:
+                filterBy = {}
+            if not sortBy:
+                sortBy = ["dateCreated", 1]
+            group_record_group_ids = self.getRecordGroupIdsByGroup(location, group_id)
+            filterBy["record_group_id"] = {"$in": group_record_group_ids}
+        else:
+            filterBy = {"record_group_id": rg_id}
+            sortBy = ["dateCreated", 1]
+
+        ## Get Record index, next id, and previous id
+        self.getRecordIndexes(document, filterBy, sortBy)
 
         ## sort record attributes
         try:
@@ -793,6 +807,15 @@ class DataManager:
 
         return document, not attained_lock
 
+    def getRecordGroupIdsByGroup(self, location, group_id):
+        ## Get the list of record group ids
+        if location == "team":
+            return self.getTeamRecordGroupsList(team_name=group_id)
+        elif location == "project":
+            return self.getProjectRecordGroupsList(group_id)
+        elif location == "record_group":
+            return [group_id]
+
     def fetchRecordNotes(self, record_id, user_info):
         # user = user_info.get("email", "")
         _id = ObjectId(record_id)
@@ -800,35 +823,56 @@ class DataManager:
         document = cursor.next()
         return document.get("record_notes", [])
 
-    def getNextRecordId(self, dateCreated, rg_id):
-        # _log.info(f"fetching next record for {dateCreated} and {rg_id}")
-        cursor = self.db.records.find(
-            {"dateCreated": {"$gt": dateCreated}, "record_group_id": rg_id}
-        ).sort("dateCreated", ASCENDING)
-        for document in cursor:
-            record_id = str(document.get("_id", ""))
-            return record_id
-        cursor = self.db.records.find({"record_group_id": rg_id}).sort(
-            "dateCreated", ASCENDING
-        )
-        document = cursor.next()
-        record_id = str(document.get("_id", ""))
-        return record_id
+    def getRecordIndexes(self, document, filterBy, sortBy):
+        pipeline = [
+            {"$match": filterBy},  # Apply filters
+            {"$sort": {sortBy[0]: sortBy[1]}},  # Sort documents
+        ]
 
-    def getPreviousRecordId(self, dateCreated, rg_id):
-        # _log.info(f"fetching previous record for {dateCreated} and {rg_id}")
-        cursor = self.db.records.find(
-            {"dateCreated": {"$lt": dateCreated}, "record_group_id": rg_id}
-        ).sort("dateCreated", DESCENDING)
-        for document in cursor:
-            record_id = str(document.get("_id", ""))
-            return record_id
-        cursor = self.db.records.find({"record_group_id": rg_id}).sort(
-            "dateCreated", DESCENDING
-        )
-        document = cursor.next()
-        record_id = str(document.get("_id", ""))
-        return record_id
+        # Execute the pipeline
+        result = list(self.db.records.aggregate(pipeline))
+
+        record_amt = len(result)
+        record_index = -1
+        next_id = None
+        previous_id = None
+        current_record = None
+
+        # Find the document with the matching _id and store the index
+        for i, doc in enumerate(result):
+            doc["_id"] = str(doc["_id"])
+            if doc["_id"] == document["_id"]:
+
+                record_index = i
+                current_record = doc
+                break
+        if not current_record:
+            _log.error(f"we couldnt get record indexes. record_amt: {record_amt}")
+            return
+
+        if record_amt == 1:
+            next_id = current_record["_id"]
+            previous_id = current_record["_id"]
+        elif record_index == 0:
+            next_record = result[record_index + 1]
+            previous_record = result[record_amt - 1]
+            next_id = next_record["_id"]
+            previous_id = previous_record["_id"]
+        elif record_index == record_amt - 1:
+            next_record = result[0]
+            previous_record = result[record_index - 1]
+            next_id = next_record["_id"]
+            previous_id = previous_record["_id"]
+        else:
+            next_record = result[record_index + 1]
+            previous_record = result[record_index - 1]
+            next_id = next_record["_id"]
+            previous_id = previous_record["_id"]
+
+        ## for frontend purposes, indexes should start at 1
+        document["recordIndex"] = record_index + 1
+        document["next_id"] = str(next_id)
+        document["previous_id"] = str(previous_id)
 
     def getProcessorByRecordGroupID(self, rg_id):
         _id = ObjectId(rg_id)

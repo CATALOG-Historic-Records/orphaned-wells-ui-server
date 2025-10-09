@@ -348,8 +348,10 @@ async def get_record_group_data(
     }
 
 
-@router.get("/get_record/{record_id}")
-async def get_record_data(record_id: str, user_info: dict = Depends(authenticate)):
+@router.post("/get_record/{record_id}")
+async def get_record_data(
+    request: Request, record_id: str, user_info: dict = Depends(authenticate)
+):
     """Fetch document record data.
 
     Args:
@@ -358,7 +360,27 @@ async def get_record_data(record_id: str, user_info: dict = Depends(authenticate
     Returns:
         List containing record data
     """
-    record, is_locked = data_manager.fetchRecordData(record_id, user_info)
+    try:
+        data = await request.json()
+        location = data.get("location")
+        group_id = data.get("group_id")
+        filterBy = data.get("filterBy")
+        sortBy = data.get("sortBy")
+        if location and group_id:
+            page_state = {
+                "location": location,
+                "group_id": group_id,
+                "filterBy": filterBy,
+                "sortBy": sortBy,
+            }
+        else:
+            page_state = None
+    except Exception as e:
+        _log.info(f"unable to get page state: {e}")
+        page_state = None
+    record, is_locked = data_manager.fetchRecordData(
+        record_id, user_info, page_state=page_state
+    )
     if record is None:
         raise HTTPException(
             403,
