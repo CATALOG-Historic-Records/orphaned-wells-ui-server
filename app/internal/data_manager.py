@@ -800,6 +800,8 @@ class DataManager:
                     new_data={"attributesList": document["attributesList"]},
                     update_type="attributesList",
                     user_info=user_info,
+                    notes="Auto updating record while fetching record.",
+                    calling_function="fetchRecordData",
                 )
 
         except Exception as e:
@@ -1019,7 +1021,13 @@ class DataManager:
 
     def updateRecordReviewStatus(self, record_id, review_status, user_info):
         new_data = {"review_status": review_status}
-        self.updateRecord(record_id, new_data, "record", user_info)
+        self.updateRecord(
+            record_id,
+            new_data,
+            "record",
+            user_info,
+            calling_function="updateRecordReviewStatus",
+        )
 
     def updateRecord(
         self,
@@ -1029,6 +1037,8 @@ class DataManager:
         field_to_clean=None,
         user_info=None,
         forceUpdate=False,
+        notes=None,
+        calling_function=None,
     ):
         attained_lock = False
         user = None
@@ -1123,6 +1133,8 @@ class DataManager:
                     record_id=record_id,
                     query=data_update,
                     previous_state=previous_state,
+                    notes=notes,
+                    calling_function=calling_function,
                 )
             self.db.records.update_one(search_query, update_query)
 
@@ -1214,7 +1226,12 @@ class DataManager:
         for update in updates:
             self.db.records.update_one(search_query, update)
             self.recordHistory(
-                "updateRecordNotes", user, record_id=record_id, query=update
+                "updateRecordNotes",
+                user,
+                record_id=record_id,
+                query=update,
+                notes="updateRecordNotes",
+                calling_function="updateRecordNotes",
             )
         record_doc = self.db.records.find(search_query).next()
         return record_doc.get("record_notes", [])
@@ -1577,6 +1594,7 @@ class DataManager:
         notes=None,
         query=None,
         previous_state=None,
+        calling_function=None,
     ):
         try:
             history_item = {
@@ -1588,6 +1606,7 @@ class DataManager:
                 "notes": notes,
                 "query": query,
                 "previous_state": previous_state,
+                "calling_function": calling_function,
                 "timestamp": time.time(),
             }
             self.db.history.insert_one(history_item)

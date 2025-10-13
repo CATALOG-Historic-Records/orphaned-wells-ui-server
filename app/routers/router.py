@@ -741,7 +741,12 @@ async def update_record(
         update = data_manager.updateRecordNotes(record_id, data, user_info)
     else:
         update = data_manager.updateRecord(
-            record_id, data, update_type, field_to_clean, user_info
+            record_id,
+            data,
+            update_type,
+            field_to_clean,
+            user_info,
+            calling_function="update_record",
         )
     if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")

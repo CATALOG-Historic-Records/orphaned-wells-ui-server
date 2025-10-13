@@ -31,7 +31,7 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
 
     ## we want to make sure that the frontend and backend are always in sync.
     ## for now, update the db with this sorted list every time before returning
-    requires_db_update = True
+    requires_db_update = len(processor_attributes) > 0
 
     ## match record attribute to each processor attribute
     sorted_attributes = []
@@ -40,20 +40,20 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     )
     for each in processor_attributes:
         attribute_name = each["name"]
-
-        found_ = [item for item in attributes if item["key"] == attribute_name]
-        for attribute in found_:
-            if attribute is None:
-                _log.info(f"{attribute_name} is None")
-            else:
-                sorted_attributes.append(attribute)
-        if len(found_) == 0 and "::" not in attribute_name:
-            _log.info(
-                f"{attribute_name} was not in record's attributes. adding this to the sorted attributes"
-            )
-            new_attr = createNewAttribute(key=attribute_name)
-            sorted_attributes.append(new_attr)
-            requires_db_update = True
+        if "::" not in attribute_name:
+            found_ = [item for item in attributes if item["key"] == attribute_name]
+            for attribute in found_:
+                if attribute is None:
+                    _log.debug(f"{attribute_name} is None")
+                else:
+                    sorted_attributes.append(attribute)
+            if len(found_) == 0:
+                _log.debug(
+                    f"{attribute_name} was not in record's attributes. adding this to the sorted attributes"
+                )
+                new_attr = createNewAttribute(key=attribute_name)
+                sorted_attributes.append(new_attr)
+                requires_db_update = True
 
     if keep_all_attributes:
         ## obsolete fields will get removed automatically.

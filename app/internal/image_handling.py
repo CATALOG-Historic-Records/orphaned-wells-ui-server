@@ -307,7 +307,11 @@ def process_image(
             "error_message": str(e),
         }
         data_manager.updateRecord(
-            record_id, record, update_type="record", forceUpdate=True
+            record_id,
+            record,
+            update_type="record",
+            forceUpdate=True,
+            calling_function="process_image",
         )
         return
 
@@ -327,7 +331,11 @@ def process_image(
             "error_message": str(e),
         }
         data_manager.updateRecord(
-            record_id, record, update_type="record", forceUpdate=True
+            record_id,
+            record,
+            update_type="record",
+            forceUpdate=True,
+            calling_function="process_image",
         )
         return
 
@@ -495,7 +503,13 @@ def process_image(
     }
     if reprocessed:
         record["status"] = "reprocessed"
-    data_manager.updateRecord(record_id, record, update_type="record", forceUpdate=True)
+    data_manager.updateRecord(
+        record_id,
+        record,
+        update_type="record",
+        forceUpdate=True,
+        calling_function="process_image",
+    )
 
     ## delete objects to free up memory
     del record
