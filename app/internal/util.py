@@ -28,6 +28,7 @@ BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 
 def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     processor_attributes = processor["attributes"]
+    processor_attributes.sort(key=lambda x: x.get("page_order_sort", float("inf")))
 
     ## we want to make sure that the frontend and backend are always in sync.
     ## for now, update the db with this sorted list every time before returning
