@@ -38,6 +38,7 @@ class DataManager:
         self.db = connectToDatabase()
         self.environment = os.getenv("ENVIRONMENT")
         self.collaborator = os.getenv("COLLABORATOR")
+        _log.info(f"os env collaborator: {self.collaborator}")
         if not self.collaborator or self.collaborator.lower() not in COLLABORATORS:
             # fallback to to using isgs
             self.collaborator = "isgs"
