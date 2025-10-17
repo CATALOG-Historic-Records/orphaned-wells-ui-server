@@ -16,7 +16,7 @@ import app.internal.util as util
 
 _log = logging.getLogger(__name__)
 
-COLLABORATORS = ["isgs", "calgem"]
+COLLABORATORS = ["isgs", "calgem", "osage"]
 
 DEFAULT_PROCESSORS = [
     {
