@@ -3,6 +3,7 @@ services:
     image: michaelpescelbl/fastapiwithnginx:latest
     environment:
       - ENVIRONMENT=${ENVIRONMENT}
+      - COLLABORATOR=${COLLABORATOR}
       - BACKEND_URL=${BACKEND_URL}
       - LOCATION=${LOCATION}
       - DB_USERNAME=${DB_USERNAME}
