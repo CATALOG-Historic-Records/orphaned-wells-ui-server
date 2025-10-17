@@ -30,12 +30,14 @@ services:
     image: nginx
     container_name: nginx
     ports:
+      - "80:80"
       - "443:443"
-    environment:
-      - CERTBOT_EMAIL=mpesce@lbl.gov
     volumes:
       - ./nginx/${ENVIRONMENT}:/etc/nginx/conf.d:ro
-      - /etc/letsencrypt/:/etc/letsencrypt
+      - /etc/letsencrypt:/etc/letsencrypt
+      - ./certbot-webroot:/var/www/certbot
+    environment:
+      - CERTBOT_EMAIL=mpesce@lbl.gov
     depends_on:
       - web
     logging:
@@ -43,3 +45,11 @@ services:
       options:
         max-size: "100k"
         max-file: "1"
+  
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - ./certbot-webroot:/var/www/certbot
+    entrypoint: certbot
