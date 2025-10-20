@@ -13,6 +13,7 @@ from app.internal.mongodb_connection import connectToDatabase
 from app.internal.settings import AppSettings
 from app.internal.util import generate_download_signed_url_v4
 import app.internal.util as util
+from app.internal.util import time_it
 
 _log = logging.getLogger(__name__)
 
@@ -780,7 +781,7 @@ class DataManager:
             sortBy = ["dateCreated", 1]
 
         ## Get Record index, next id, and previous id
-        self.getRecordIndexes(document, filterBy, sortBy)
+        self.getRecordIndexes(document, filterBy, tuple(sortBy))
 
         ## sort record attributes
         try:
@@ -826,56 +827,81 @@ class DataManager:
         document = cursor.next()
         return document.get("record_notes", [])
 
+    @time_it
     def getRecordIndexes(self, document, filterBy, sortBy):
+        """
+        document   - dict with at least '_id'
+        filterBy   - MongoDB filter dict
+        sortBy     - tuple like ('dateCreated', 1) or [('dateCreated', 1), ('name', 1)]
+        """
+
+        target_id = (
+            ObjectId(document["_id"])
+            if not isinstance(document["_id"], ObjectId)
+            else document["_id"]
+        )
+
+        # Normalize sortBy to dict for $setWindowFields, and to list for .find/.aggregate sort
+        if isinstance(sortBy, tuple):
+            sort_dict = {sortBy[0]: sortBy[1]}
+            sort_list = [sortBy]
+        elif isinstance(sortBy, list):
+            sort_dict = dict(sortBy)
+            sort_list = sortBy
+        else:
+            raise ValueError("sortBy must be tuple or list of tuples")
+
         pipeline = [
-            {"$match": filterBy},  # Apply filters
-            {"$sort": {sortBy[0]: sortBy[1]}},  # Sort documents
+            {"$match": filterBy},
+            {
+                "$setWindowFields": {
+                    "sortBy": sort_dict,
+                    "output": {
+                        "rank": {"$rank": {}},
+                        "prevId": {"$shift": {"by": -1, "output": "$_id"}},
+                        "nextId": {"$shift": {"by": 1, "output": "$_id"}},
+                    },
+                }
+            },
+            {"$match": {"_id": target_id}},
         ]
 
-        # Execute the pipeline
         result = list(self.db.records.aggregate(pipeline))
+        if not result:
+            _log.error("Could not get record indexes via $setWindowFields.")
+            return None
 
-        record_amt = len(result)
-        record_index = -1
-        next_id = None
-        previous_id = None
-        current_record = None
+        record = result[0]
 
-        # Find the document with the matching _id and store the index
-        for i, doc in enumerate(result):
-            doc["_id"] = str(doc["_id"])
-            if doc["_id"] == document["_id"]:
+        recordIndex = record["rank"]
 
-                record_index = i
-                current_record = doc
-                break
-        if not current_record:
-            _log.error(f"we couldnt get record indexes. record_amt: {record_amt}")
-            return
+        prev_id = record.get("prevId")
+        next_id = record.get("nextId")
 
-        if record_amt == 1:
-            next_id = current_record["_id"]
-            previous_id = current_record["_id"]
-        elif record_index == 0:
-            next_record = result[record_index + 1]
-            previous_record = result[record_amt - 1]
-            next_id = next_record["_id"]
-            previous_id = previous_record["_id"]
-        elif record_index == record_amt - 1:
-            next_record = result[0]
-            previous_record = result[record_index - 1]
-            next_id = next_record["_id"]
-            previous_id = previous_record["_id"]
-        else:
-            next_record = result[record_index + 1]
-            previous_record = result[record_index - 1]
-            next_id = next_record["_id"]
-            previous_id = previous_record["_id"]
+        # Handle wrap-around for prevId (if prev_id is None, we have the first record)
+        if prev_id is None:
+            last_doc = (
+                self.db.records.find(filterBy, sort=sort_list)
+                .sort(sort_list[0][0], -sort_list[0][1])
+                .limit(1)
+            )
+            last_doc = list(last_doc)
+            prev_id = last_doc[0]["_id"] if last_doc else target_id
 
-        ## for frontend purposes, indexes should start at 1
-        document["recordIndex"] = record_index + 1
+        # Handle wrap-around for nextId (if next_id is None, we have the last record)
+        if next_id is None:
+            first_doc = self.db.records.find(filterBy, sort=sort_list).limit(1)
+            first_doc = list(first_doc)
+            next_id = first_doc[0]["_id"] if first_doc else target_id
+
+        # For frontend: indexes should start at 1
+        document["recordIndex"] = str(recordIndex)
+        document["previous_id"] = str(prev_id)
         document["next_id"] = str(next_id)
-        document["previous_id"] = str(previous_id)
+
+        # _log.info(f"new method\nrecord_index: {recordIndex}; next_id: {next_id}; previous_id: {prev_id}")
+
+        return document
 
     def getProcessorByRecordGroupID(self, rg_id):
         _id = ObjectId(rg_id)

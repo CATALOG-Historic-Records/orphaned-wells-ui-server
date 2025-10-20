@@ -7,6 +7,7 @@ from google.cloud import storage
 import datetime
 import sys
 import requests
+import functools
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
 
@@ -334,3 +335,16 @@ def defaultJSONDumpHandler(obj):
     else:
         _log.info(f"JSON Dump found Type {type(obj)}. returning string")
         return str(obj)
+
+
+def time_it(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        _log.info(f"Function '{func.__name__}' executed in {elapsed_time:.2f} seconds")
+        return result
+
+    return wrapper
