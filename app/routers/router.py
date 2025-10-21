@@ -839,7 +839,7 @@ async def check_if_records_exist(
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
-@router.post("/download_records/{location}/{_id}", response_class=Response)
+@router.post("/download_records/{location}/{_id}", response_class=FileResponse)
 async def download_records(
     location: str,
     _id: str,
@@ -919,13 +919,15 @@ async def download_records(
             documents = util.compileDocumentImageList(records)
         else:
             documents = None
-
-        zipped_files = util.zip_files(filepaths, documents)
+        _log.info(f"zipping files: {filepaths}")
+        zip_path = util.zip_files_streaming(filepaths, documents)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
-    ## remove file after 30 seconds to allow for the user download to finish
-    background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=30)
-    return Response(content=zipped_files, media_type="application/zip")
+    ## remove file after 60 seconds to allow for the user download to finish
+    background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
+    return FileResponse(
+        zip_path, filename="documents.zip", media_type="application/zip"
+    )
 
 
 @router.get("/get_users")
