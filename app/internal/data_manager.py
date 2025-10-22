@@ -374,53 +374,120 @@ class DataManager:
             record_groups += project.get("record_groups", [])
         return record_groups
 
-    def getRecordGroupProgress(self, rg_id, check_for_errors=True):
-        ## get total records count
-        query = {"record_group_id": rg_id}
-        total_amt = self.db.records.count_documents(query)
-
-        ## get count of reviewed and defective
-        query = {
-            "record_group_id": rg_id,
-            "review_status": {"$in": ["defective", "reviewed"]},
-        }
-        reviewed_amt = self.db.records.count_documents(query)
-
-        if check_for_errors:
-            try:
-                query = {
-                    "record_group_id": rg_id,
-                    "$or": [
-                        {
-                            "attributesList": {
-                                "$elemMatch": {
-                                    "$and": [
-                                        {"cleaning_error": {"$ne": False}},
-                                        {"cleaning_error": {"$exists": True}},
+    def getRecordGroupProgress(self, rg_ids):
+        ## pipeline for getting the following record group stats:
+        ## total amount, amount reviewed (reviewed or defected), amount containing cleaning errors
+        pipeline = [
+            {"$match": {"record_group_id": {"$in": rg_ids}}},
+            {
+                "$group": {
+                    "_id": "$record_group_id",
+                    "total_amt": {"$sum": 1},
+                    "reviewed_amt": {
+                        "$sum": {
+                            "$cond": [
+                                {"$in": ["$review_status", ["defective", "reviewed"]]},
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                    "error_amt": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$or": [
+                                        {
+                                            "$anyElementTrue": {
+                                                "$map": {
+                                                    "input": {
+                                                        "$ifNull": [
+                                                            "$attributesList",
+                                                            [],
+                                                        ]
+                                                    },
+                                                    "as": "attr",
+                                                    "in": {
+                                                        "$and": [
+                                                            {
+                                                                "$ne": [
+                                                                    "$$attr.cleaning_error",
+                                                                    False,
+                                                                ]
+                                                            },
+                                                            {
+                                                                "$ne": [
+                                                                    {
+                                                                        "$type": "$$attr.cleaning_error"
+                                                                    },
+                                                                    "missing",
+                                                                ]
+                                                            },
+                                                        ]
+                                                    },
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "$anyElementTrue": {
+                                                "$map": {
+                                                    "input": {
+                                                        "$reduce": {
+                                                            "input": {
+                                                                "$ifNull": [
+                                                                    "$attributesList",
+                                                                    [],
+                                                                ]
+                                                            },
+                                                            "initialValue": [],
+                                                            "in": {
+                                                                "$concatArrays": [
+                                                                    "$$value",
+                                                                    {
+                                                                        "$ifNull": [
+                                                                            "$$this.subattributes",
+                                                                            [],
+                                                                        ]
+                                                                    },
+                                                                ]
+                                                            },
+                                                        }
+                                                    },
+                                                    "as": "sub",
+                                                    "in": {
+                                                        "$and": [
+                                                            {
+                                                                "$ne": [
+                                                                    "$$sub.cleaning_error",
+                                                                    False,
+                                                                ]
+                                                            },
+                                                            {
+                                                                "$ne": [
+                                                                    {
+                                                                        "$type": "$$sub.cleaning_error"
+                                                                    },
+                                                                    "missing",
+                                                                ]
+                                                            },
+                                                        ]
+                                                    },
+                                                }
+                                            }
+                                        },
                                     ]
-                                }
-                            }
-                        },
-                        {
-                            "attributesList.subattributes": {
-                                "$elemMatch": {
-                                    "$and": [
-                                        {"cleaning_error": {"$ne": False}},
-                                        {"cleaning_error": {"$exists": True}},
-                                    ]
-                                }
-                            }
-                        },
-                    ],
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
                 }
-                error_amt = self.db.records.count_documents(query)
-            except Exception as e:
-                _log.info(f"unable to check for errors: {e}")
-                error_amt = 0
-        else:
-            error_amt = 0
+            },
+        ]
 
-        return total_amt, reviewed_amt, error_amt
+        stats = {str(s["_id"]): s for s in self.db.records.aggregate(pipeline)}
+        return stats
 
     def fetchTeamInfo(self, email):
         user_doc = self.db.users.find({"email": email}).next()
@@ -452,6 +519,7 @@ class DataManager:
             return document
         return None
 
+    @time_it
     def fetchProjects(self, user):
         user_projects = self.getUserProjectList(user)
         projects = []
@@ -482,6 +550,7 @@ class DataManager:
                 _log.error(f"unable to get record groups for project {project_id}: {e}")
         return record_groups_list
 
+    @time_it
     def fetchRecords(
         self,
         sort_by=["dateCreated", 1],
@@ -570,27 +639,32 @@ class DataManager:
             filter_by["record_group_id"] = {"$in": record_group_ids}
         return self.fetchRecords(sort_by, filter_by, page, records_per_page)
 
+    @time_it
     def fetchRecordGroups(self, project_id, user):
         project = self.fetchProject(project_id)
         if project is None:
             _log.info(f"project {project_id} not found")
             return {}
+
         project_record_groups = project.get("record_groups", [])
-        record_group_ids = []
-        for i in range(len(project_record_groups)):
-            record_group_ids.append(ObjectId(project_record_groups[i]))
+
+        all_stats = self.getRecordGroupProgress(project_record_groups)
+
+        record_group_ids = [ObjectId(rg) for rg in project_record_groups]
+
         record_groups = []
         cursor = self.db.record_groups.find({"_id": {"$in": record_group_ids}})
         for document in cursor:
             document["_id"] = str(document["_id"])
-            (
-                document["total_amt"],
-                document["reviewed_amt"],
-                document["error_amt"],
-            ) = self.getRecordGroupProgress(document["_id"])
+            stats = all_stats.get(
+                document["_id"], {"total_amt": 0, "reviewed_amt": 0, "error_amt": 0}
+            )
+            document.update(stats)
             record_groups.append(document)
+
         return {"project": project, "record_groups": record_groups}
 
+    @time_it
     def fetchColumnData(self, location, _id):
         if location == "project" or location == "team":
             columns = set()
@@ -608,13 +682,16 @@ class DataManager:
                     document["project_list"][i] = str(document["project_list"][i])
                 record_groups = self.getTeamRecordGroupsList(_id)
             for rg_id in record_groups:
-                rg_document = self.db.record_groups.find(
-                    {"_id": ObjectId(rg_id)}
-                ).next()
-                google_id = rg_document["processorId"]
-                processor = self.getProcessorByGoogleId(google_id)
-                for attr in processor["attributes"]:
-                    columns.add(attr["name"])
+                try:
+                    rg_document = self.db.record_groups.find(
+                        {"_id": ObjectId(rg_id)}
+                    ).next()
+                    google_id = rg_document["processorId"]
+                    processor = self.getProcessorByGoogleId(google_id)
+                    for attr in processor["attributes"]:
+                        columns.add(attr["name"])
+                except Exception as e:
+                    _log.error(f"unable to get {rg_id}: {e}")
             columns = list(columns)
             if "projects" in document:
                 del document["projects"]
@@ -645,48 +722,6 @@ class DataManager:
             del document["_id"]
             roles.append(document)
         return roles
-
-    def fetchProjectData(
-        self, project_id, user, page, records_per_page, sort_by, filter_by
-    ):
-        ## get user's projects, check if user has access to this project
-        user_projects = self.getUserProjectList(user)
-        _id = ObjectId(project_id)
-        if not _id in user_projects:
-            return None, None
-
-        ## get project data
-        cursor = self.db.projects.find({"_id": _id})
-        project_data = cursor.next()
-        project_data["_id"] = str(project_data["_id"])
-
-        ## get project's records
-        records = []
-        filter_by["project_id"] = project_id
-        record_index = 1
-        if page is not None and records_per_page is not None and records_per_page != -1:
-            cursor = (
-                self.db.records.find(filter_by)
-                .sort(
-                    sort_by[0],
-                    sort_by[1]
-                    # )
-                )
-                .skip(records_per_page * page)
-                .limit(records_per_page)
-            )
-            record_index += page * records_per_page
-        else:
-            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
-
-        for document in cursor:
-            document["_id"] = str(document["_id"])
-            document["recordIndex"] = record_index
-            record_index += 1
-            records.append(document)
-
-        record_count = self.db.records.count_documents(filter_by)
-        return project_data, records, record_count
 
     def fetchRecordGroupData(self, rg_id, user):
         ## get user's projects, check if user has access to this project

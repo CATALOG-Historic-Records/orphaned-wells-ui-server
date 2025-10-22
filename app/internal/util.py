@@ -247,30 +247,30 @@ def zip_files_stream(local_file_paths, documents=None):
 
 def searchRecordForAttributeErrors(document):
     try:
-        attributes = document.get("attributesList", [])
-        i = 0
-        for attribute in attributes:
-            if attribute is not None:
-                if attribute.get("cleaning_error", False):
-                    return True
-                subattributes = attribute.get("subattributes", None)
-                if subattributes:
-                    for subattribute in subattributes:
-                        if subattribute is not None and subattribute.get(
-                            "cleaning_error", False
-                        ):
-                            return True
-            else:
-                _log.info(
-                    f"found none attribute for document {document.get('_id')} at index {i}"
-                )
-                ##TODO: clean this document of null fields. need to write a function for this
-            i += 1
+        attributes = document.get("attributesList") or []
+
+        # Check attributes for errors
+        if any(
+            attr is not None and attr.get("cleaning_error", False)
+            for attr in attributes
+        ):
+            return True
+
+        # Check subattributes for errors
+        if any(
+            sub is not None and sub.get("cleaning_error", False)
+            for attr in attributes
+            if attr is not None
+            for sub in (attr.get("subattributes") or [])
+        ):
+            return True
+
     except Exception as e:
         _log.info(
             f"unable to searchRecordForAttributeErrors for document: {document.get('_id')}"
         )
         _log.info(f"e: {e}")
+
     return False
 
 
