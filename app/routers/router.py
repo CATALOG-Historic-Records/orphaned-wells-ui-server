@@ -13,7 +13,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 
 from app.internal.data_manager import data_manager
@@ -839,7 +839,7 @@ async def check_if_records_exist(
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
-@router.post("/download_records/{location}/{_id}", response_class=FileResponse)
+@router.post("/download_records/{location}/{_id}", response_class=StreamingResponse)
 async def download_records(
     location: str,
     _id: str,
@@ -854,13 +854,17 @@ async def download_records(
     """Download records for given project ID.
 
     Args:
-        project_id: Project identifier
+        location: one of: team, project, record_group
+        _id: id of team, project or record group
         request body:
             exportType: type of export (csv or json)
             columns: list attributes to export
 
     Returns:
-        CSV or JSON file containing all record data for provided project
+        Some combination of
+            JSON file containing all or subset of record data for provided location
+            CSV file containing all or subset of record data for provided location
+            All document images for provided location
     """
     req = await request.json()
     # _log.info(req)
@@ -919,15 +923,15 @@ async def download_records(
             documents = util.compileDocumentImageList(records)
         else:
             documents = None
-        _log.info(f"zipping files: {filepaths}")
-        zip_path = util.zip_files_streaming(filepaths, documents)
+        z = util.zip_files_stream(filepaths, documents)
+
+        ## remove file after 60 seconds to allow for the user download to finish
+        background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
+        headers = {"Content-Disposition": "attachment; filename=records.zip"}
+        _log.info(f"returning streaming response")
+        return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
-    ## remove file after 60 seconds to allow for the user download to finish
-    background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
-    return FileResponse(
-        zip_path, filename="documents.zip", media_type="application/zip"
-    )
 
 
 @router.get("/get_users")

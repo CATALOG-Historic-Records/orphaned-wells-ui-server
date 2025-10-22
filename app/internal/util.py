@@ -9,7 +9,9 @@ import sys
 import requests
 import functools
 import tempfile
+import zipstream
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from google.cloud import storage
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
 
@@ -118,6 +120,21 @@ def validateUser(user):
         _log.error(f"failed attempting to validate user {user}: {e}")
 
 
+def generate_gcs_paths(documents):
+    if not documents or len(documents) == 0:
+        return []
+    gcs_paths = {}
+    for record_id, document in documents.items():
+        # print(f"{record_id}")
+        rg_id = document["rg_id"]
+        record_name = document["record_name"]
+        for image_file in document.get("files", []):
+            blob_path = f"uploads/{rg_id}/{record_id}/{image_file}"
+            arcname = f"documents/{record_name}/{os.path.basename(image_file)}"
+            gcs_paths[blob_path] = arcname
+    return gcs_paths
+
+
 def generate_download_signed_url_v4(
     rg_id, record_id, filename, bucket_name=BUCKET_NAME
 ):
@@ -167,115 +184,65 @@ def compileDocumentImageList(records):
     return images
 
 
-def zip_files(file_paths, documents=None):
-    zip_buffer = BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path in file_paths:
-            zip_file.write(file_path, os.path.basename(file_path))
-        if documents is not None:
-            for record_id in documents:
-                document = documents[record_id]
-                rg_id = document["rg_id"]
-                image_files = document["files"]
-                record_name = document["record_name"]
-                for image_file in image_files:
-                    signed_url = generate_download_signed_url_v4(
-                        rg_id, record_id, image_file
-                    )
-                    response = requests.get(signed_url, stream=True)
-                    if response.status_code == 200:
-                        # Write file content directly into the ZIP archive
-                        file_name = os.path.basename(image_file)
-                        zip_file.writestr(
-                            f"documents/{record_name}/{file_name}", response.content
-                        )
-                    else:
-                        # Handle error and add a placeholder file in the ZIP archive
-                        error_message = f"Failed to fetch {signed_url}"
-                        zip_file.writestr(
-                            f"documents/error_{os.path.basename(image_file)}.txt",
-                            error_message,
-                        )
-
-    zip_bytes = zip_buffer.getvalue()
-    zip_buffer.close()
-
-    return zip_bytes
-
-
 @time_it
-def zip_files_streaming(file_paths, documents=None, max_workers=10):
+def zip_files_stream(local_file_paths, documents=None):
     """
-    Download document files concurrently from Cloud Storage,
-    then write to zip sequentially along with CSV and JSON (if included).
+    Streams a ZIP file directly without writing to temp files.
+    Includes optional local files
     """
+    start_total = time.time()
+    _log.info(
+        f"downloading and zipping {len(documents)} images along with {local_file_paths}"
+    )
 
-    temp_zip = tempfile.NamedTemporaryFile(delete=False)
-    temp_zip_path = temp_zip.name
-    temp_zip.close()
+    zs = zipstream.ZipFile(mode="w", compression=zipstream.ZIP_STORED)
 
-    downloaded_files = []
+    # Add CSV and JSON first
+    if local_file_paths:
+        for file_path in local_file_paths:
+            if os.path.isfile(file_path):
+                zs.write(file_path, os.path.basename(file_path))
 
-    def download_image(record_id, record_name, rg_id, image_file):
-        signed_url = generate_download_signed_url_v4(rg_id, record_id, image_file)
-        try:
-            with requests.get(signed_url, stream=True, timeout=30) as response:
-                if response.status_code == 200:
-                    file_name = os.path.basename(image_file)
-                    arcname = f"documents/{record_name}/{file_name}"
-                    temp_file = tempfile.NamedTemporaryFile(delete=False)
-                    for chunk in response.iter_content(chunk_size=8192):
-                        temp_file.write(chunk)
-                    temp_file.close()
-                    return (arcname, temp_file.name)
-                else:
-                    arcname = f"documents/error_{os.path.basename(image_file)}.txt"
-                    temp_file = tempfile.NamedTemporaryFile("w", delete=False)
-                    temp_file.write(
-                        f"Failed to fetch {signed_url} - status {response.status_code}"
-                    )
-                    temp_file.close()
-                    return (arcname, temp_file.name)
-        except Exception as e:
-            arcname = f"documents/error_{os.path.basename(image_file)}.txt"
-            temp_file = tempfile.NamedTemporaryFile("w", delete=False)
-            temp_file.write(f"Exception: {str(e)}")
-            temp_file.close()
-            return (arcname, temp_file.name)
+    client = storage.Client.from_service_account_json(
+        f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
+    )
+    bucket = client.bucket(BUCKET_NAME)
 
-    # Queue all downloads
-    tasks = []
-    if documents:
-        for record_id, document in documents.items():
-            rg_id = document["rg_id"]
-            record_name = document["record_name"]
-            for image_file in document["files"]:
-                tasks.append((record_id, record_name, rg_id, image_file))
+    gcs_paths = generate_gcs_paths(documents)
 
-    _log.info(f"downloading images. {len(tasks)} image tasks")
-    # Run concurrent downloads
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(download_image, *task) for task in tasks]
-        for future in as_completed(futures):
-            downloaded_files.append(future.result())
+    for gcs_path in gcs_paths:
+        blob = bucket.blob(gcs_path)
+        arcname = gcs_paths[gcs_path]
 
-    _log.info(f"zipping files")
-    # Write local + downloaded files into ZIP sequentially
-    with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Add CSV and JSON first, if included
-        if file_paths:
-            for file_path in file_paths:
-                if os.path.isfile(file_path):
-                    zip_file.write(file_path, arcname=os.path.basename(file_path))
+        def gcs_yield_chunks():
+            _log.debug(f"Starting download: {gcs_path} -> {arcname}")
+            start_file = time.time()
+            bytes_read = 0
 
-        # Add downloaded files
-        for arcname, tmp_path in downloaded_files:
-            zip_file.write(tmp_path, arcname)
-            os.remove(tmp_path)  # cleanup temp file
+            with blob.open("rb") as f:
+                while True:
+                    chunk = f.read(65536)  # 64KB chunks
+                    if not chunk:
+                        break
+                    bytes_read += len(chunk)
+                    yield chunk
 
-    _log.info(f"finished zipping, returning")
-    return temp_zip_path
+            elapsed_file = time.time() - start_file
+            mb_size = bytes_read / (1024 * 1024)
+            speed = (mb_size / elapsed_file) if elapsed_file > 0 else 0
+            _log.debug(
+                f"Finished {arcname}: {mb_size:.2f} MB in {elapsed_file:.2f} s ({speed:.2f} MB/s)"
+            )
+
+        zs.write_iter(arcname, gcs_yield_chunks())
+
+    def streaming_generator():
+        for chunk in zs:
+            yield chunk
+        elapsed_total = time.time() - start_total
+        _log.info(f"{len(documents)} files streamed in {elapsed_total:.2f} seconds")
+
+    return streaming_generator()
 
 
 def searchRecordForAttributeErrors(document):
