@@ -185,12 +185,14 @@ def compileDocumentImageList(records):
 
 
 @time_it
-def zip_files_stream(local_file_paths, documents=None):
+def zip_files_stream(local_file_paths, documents=[]):
     """
     Streams a ZIP file directly without writing to temp files.
     Includes optional local files
     """
     start_total = time.time()
+    if documents is None:
+        documents = []
     _log.info(
         f"downloading and zipping {len(documents)} images along with {local_file_paths}"
     )

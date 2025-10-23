@@ -166,6 +166,8 @@ class DataManager:
 
         email = user_info.get("email", "")
         myquery = {"email": email}
+        if "_id" in user:
+            del user["_id"]
         newvalues = {"$set": user}
         self.db.users.update_one(myquery, newvalues)
         return user

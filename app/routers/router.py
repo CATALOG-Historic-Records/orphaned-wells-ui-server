@@ -879,7 +879,7 @@ async def download_records(
         if export_images:
             documents = util.compileDocumentImageList(records)
         else:
-            documents = None
+            documents = []
         z = util.zip_files_stream(filepaths, documents)
 
         ## remove file after 60 seconds to allow for the user download to finish
