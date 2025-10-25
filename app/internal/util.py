@@ -247,33 +247,60 @@ def zip_files_stream(local_file_paths, documents=[]):
     return streaming_generator()
 
 
-def searchRecordForAttributeErrors(document):
+def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
+    """
+    Checks if any attributes or subattributes have cleaning errors.
+    Also retrieves values for attributes whose 'key' is in target_keys.
+
+    Args:
+        document (dict): The document to inspect.
+        target_keys (list[str], optional): List of attribute keys to locate values for.
+
+    Returns:
+        tuple: (hasError, found_values)
+            - hasError (bool): True if cleaning errors found.
+            - found_values (dict): Mapping of target_keys to their located values.
+    """
+    if target_keys is None:
+        target_keys = ["T", "Sec"]
+
+    hasError = False
+    found_values = {}
+
     try:
         attributes = document.get("attributesList") or []
 
-        # Check attributes for errors
-        if any(
-            attr is not None and attr.get("cleaning_error", False)
-            for attr in attributes
-        ):
-            return True
+        # Check attributes for errors & locate target key values
+        for attr in attributes:
+            if attr is None:
+                continue
 
-        # Check subattributes for errors
-        if any(
-            sub is not None and sub.get("cleaning_error", False)
-            for attr in attributes
-            if attr is not None
-            for sub in (attr.get("subattributes") or [])
-        ):
-            return True
+            if attr.get("cleaning_error", False):
+                hasError = True
+
+            key_name = attr.get("key")
+            if key_name in target_keys:
+                found_values[key_name] = attr.get("value")
+
+            # Check subattributes for errors & locate target key values
+            for sub in attr.get("subattributes") or []:
+                if sub is None:
+                    continue
+
+                if sub.get("cleaning_error", False):
+                    hasError = True
+
+                sub_key = sub.get("key")
+                if sub_key in target_keys:
+                    found_values[sub_key] = sub.get("value")
 
     except Exception as e:
         _log.info(
-            f"unable to searchRecordForAttributeErrors for document: {document.get('_id')}"
+            f"unable to searchRecordForErrorsAndTargetKeys for document: {document.get('_id')}"
         )
         _log.info(f"e: {e}")
 
-    return False
+    return hasError, found_values
 
 
 def convert_processor_attributes_to_dict(attributes):
@@ -393,3 +420,167 @@ def defaultJSONDumpHandler(obj):
     else:
         _log.info(f"JSON Dump found Type {type(obj)}. returning string")
         return str(obj)
+
+
+def normalize_sort_direction(direction):
+    """
+    Ensures sort direction is an integer 1 or -1.
+    Accepts 'asc', 'desc', 'ascending', 'descending', etc.
+    """
+    if isinstance(direction, int):
+        if direction in (1, -1):
+            return direction
+        raise ValueError("Sort direction integer must be 1 or -1")
+    if isinstance(direction, str):
+        dir_lower = direction.lower()
+        if dir_lower in ("asc", "ascending"):
+            return 1
+        elif dir_lower in ("desc", "descending"):
+            return -1
+    raise ValueError(f"Invalid sort direction value: {direction}")
+
+
+def generate_sort_filter_pipeline(
+    filter_by,
+    primary_sort,
+    records_per_page=None,
+    page=None,
+    for_ranking=False,
+    secondary_sort=None,
+):
+    """
+    Generates the part of the pipeline that applies filtering, extraction of sort values,
+    and sorting (including secondary keys when desired) in a consistent way.
+
+    filter_by : dictionary in mongo filters format
+    primary_sort : list [field, direction]
+    secondary_sort : list [field, direction]
+    for_ranking : If True, will produce a 'sortComposite' field and $sort/$setWindowFields with a single top-level sort key.
+    """
+    if records_per_page is not None and page is not None:
+        include_paging = True
+    else:
+        include_paging = False
+
+    pipeline = [{"$match": filter_by}]
+
+    primary_sort_key = primary_sort[0]
+    primary_sort_dir = primary_sort[1]
+
+    if secondary_sort is None:
+        secondary_sort_key = None
+        secondary_sort_dir = None
+    else:
+        secondary_sort_key = secondary_sort[0]
+        secondary_sort_dir = secondary_sort[1]
+
+    # Handle attributesList.* case
+    if primary_sort_key.startswith("attributesList."):
+        attr_key_name = primary_sort_key.split(".", 1)[1]
+
+        ## If we are sorting by an attribute, we need a secondary sort
+        if secondary_sort_key is None:
+            secondary_sort_key, secondary_sort_dir = "dateCreated", -1
+
+        pipeline.append(
+            {
+                "$addFields": {
+                    "targetValue": {
+                        "$first": {
+                            "$map": {
+                                "input": {
+                                    "$filter": {
+                                        "input": "$attributesList",
+                                        "as": "attr",
+                                        "cond": {"$eq": ["$$attr.key", attr_key_name]},
+                                    }
+                                },
+                                "as": "targetAttr",
+                                "in": "$$targetAttr.value",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        if secondary_sort_key:
+            # Create a composite field to sort by
+            pipeline.append(
+                {
+                    "$addFields": {
+                        "sortComposite": ["$targetValue", f"${secondary_sort_key}"]
+                    }
+                }
+            )
+            pipeline.append({"$sort": {"sortComposite": primary_sort_dir}})
+        else:
+            pipeline.append({"$sort": {"targetValue": primary_sort_dir}})
+            pipeline.append({"$project": {"targetValue": 0}})
+
+    else:  # Sorting by top level field
+        if secondary_sort_key:
+            pipeline.append(
+                {
+                    "$addFields": {
+                        "sortComposite": [
+                            f"${primary_sort_key}",
+                            f"${secondary_sort_key}",
+                        ]
+                    }
+                }
+            )
+            pipeline.append({"$sort": {"sortComposite": primary_sort_dir}})
+        else:
+            sort_stage = {primary_sort_key: primary_sort_dir}
+            pipeline.append({"$sort": sort_stage})
+
+    if for_ranking:
+        ## TODO: we're ignoring secondary sort key in here.
+        # if secondary_sort_key:
+        if "attributesList." in primary_sort_key:
+            # Ranking with composite field
+            pipeline.append(
+                {
+                    "$setWindowFields": {
+                        "sortBy": {
+                            "targetValue": primary_sort_dir,
+                            # "sortComposite": primary_sort_dir,
+                        },
+                        "output": {
+                            "rank": {"$documentNumber": {}},
+                            "prevId": {"$shift": {
+                                "by": -1,
+                                "output": { "$toString": "$_id" }
+                            }},
+                            "nextId": {"$shift": {
+                                "by": 1,
+                                "output": { "$toString": "$_id" }
+                            }},
+                        },
+                    }
+                }
+            )
+        else:
+            # primary-only sort
+            pipeline.append(
+                {
+                    "$setWindowFields": {
+                        "sortBy": {
+                            primary_sort_key: primary_sort_dir,
+                        },
+                        "output": {
+                            "rank": {"$documentNumber": {}},
+                            "prevId": {"$shift": {"by": -1, "output": "$_id"}},
+                            "nextId": {"$shift": {"by": 1, "output": "$_id"}},
+                        },
+                    }
+                }
+            )
+
+    # Optional paging
+    if include_paging and records_per_page is not None and page is not None:
+        pipeline.append({"$skip": records_per_page * page})
+        pipeline.append({"$limit": records_per_page})
+
+    return pipeline

@@ -552,6 +552,25 @@ class DataManager:
                 _log.error(f"unable to get record groups for project {project_id}: {e}")
         return record_groups_list
 
+    def build_pipeline(
+        self,
+        filter_by,
+        primary_sort,
+        records_per_page,
+        page,
+        secondary_sort=None,
+    ):
+        pipeline = util.generate_sort_filter_pipeline(
+            filter_by=filter_by,
+            primary_sort=primary_sort,
+            records_per_page=records_per_page,
+            page=page,
+            for_ranking=True,
+            secondary_sort=secondary_sort,
+        )
+
+        return pipeline
+
     @time_it
     def fetchRecords(
         self,
@@ -563,41 +582,31 @@ class DataManager:
     ):
         records = []
         record_index = 1
-        if page is not None and records_per_page is not None and records_per_page != -1:
-            # pipeline = [
-            #     {"$match": filter_by},
-            #     {"$sort": {sort_by[0]: sort_by[1]}},
-            #     {"$skip": records_per_page * page},
-            #     {"$limit": records_per_page}
-            # ]
-            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
-            cursor = (
-                self.db.records.find(filter_by)
-                .sort(
-                    sort_by[0],
-                    sort_by[1]
-                    # )
-                )
-                .skip(records_per_page * page)
-                .limit(records_per_page)
-            )
-            record_index += page * records_per_page
-        else:
-            # print(f"aggregating with match, sort")
-            # pipeline = [
-            #     {"$match": filter_by},  # same as find(filter_by)
-            #     {"$sort": {sort_by[0]: sort_by[1]}}  # same as sort(field, direction)
-            # ]
-            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
-            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
+
+        pipeline = self.build_pipeline(
+            filter_by=filter_by,
+            primary_sort=sort_by,
+            records_per_page=records_per_page,
+            page=page,
+        )
+
+        _log.info(f"fetchRecords pipeline: {pipeline}")
+        cursor = self.db.records.aggregate(pipeline)
 
         for document in cursor:
             document["_id"] = str(document["_id"])
             document["recordIndex"] = record_index
             if search_for_errors:
-                document["has_errors"] = util.searchRecordForAttributeErrors(document)
+                [hasErrors, found_values] = util.searchRecordForErrorsAndTargetKeys(
+                    document
+                )
+                document["has_errors"] = hasErrors
+                for each in found_values:
+                    document[each] = found_values[each]
+            # document["attributesList"] = None ## this takes up a lot of data, no need to keep it here
             record_index += 1
             records.append(document)
+        # _log.info(records)
         record_count = self.db.records.count_documents(filter_by)
         return records, record_count
 
@@ -866,77 +875,27 @@ class DataManager:
 
     @time_it
     def getRecordIndexes(self, document, filterBy, sortBy):
-        """
-        document   - dict with at least '_id'
-        filterBy   - MongoDB filter dict
-        sortBy     - tuple like ('dateCreated', 1) or [('dateCreated', 1), ('name', 1)]
-        """
-
         target_id = (
             ObjectId(document["_id"])
             if not isinstance(document["_id"], ObjectId)
             else document["_id"]
         )
 
-        # Normalize sortBy to dict for $setWindowFields, and to list for .find/.aggregate sort
-        if isinstance(sortBy, tuple):
-            sort_dict = {sortBy[0]: sortBy[1]}
-            sort_list = [sortBy]
-        elif isinstance(sortBy, list):
-            sort_dict = dict(sortBy)
-            sort_list = sortBy
-        else:
-            raise ValueError("sortBy must be tuple or list of tuples")
+        pipeline = util.generate_sort_filter_pipeline(
+            filter_by=filterBy, primary_sort=sortBy, for_ranking=True
+        )
 
-        pipeline = [
-            {"$match": filterBy},
-            {
-                "$setWindowFields": {
-                    "sortBy": sort_dict,
-                    "output": {
-                        "rank": {"$rank": {}},
-                        "prevId": {"$shift": {"by": -1, "output": "$_id"}},
-                        "nextId": {"$shift": {"by": 1, "output": "$_id"}},
-                    },
-                }
-            },
-            {"$match": {"_id": target_id}},
-        ]
+        pipeline.append({"$match": {"_id": target_id}})
+        _log.info(f"getrecordindexes pipeline: {pipeline}")
 
         result = list(self.db.records.aggregate(pipeline))
         if not result:
-            _log.error("Could not get record indexes via $setWindowFields.")
             return None
 
         record = result[0]
-
-        recordIndex = record["rank"]
-
-        prev_id = record.get("prevId")
-        next_id = record.get("nextId")
-
-        # Handle wrap-around for prevId (if prev_id is None, we have the first record)
-        if prev_id is None:
-            last_doc = (
-                self.db.records.find(filterBy, sort=sort_list)
-                .sort(sort_list[0][0], -sort_list[0][1])
-                .limit(1)
-            )
-            last_doc = list(last_doc)
-            prev_id = last_doc[0]["_id"] if last_doc else target_id
-
-        # Handle wrap-around for nextId (if next_id is None, we have the last record)
-        if next_id is None:
-            first_doc = self.db.records.find(filterBy, sort=sort_list).limit(1)
-            first_doc = list(first_doc)
-            next_id = first_doc[0]["_id"] if first_doc else target_id
-
-        # For frontend: indexes should start at 1
-        document["recordIndex"] = str(recordIndex)
-        document["previous_id"] = str(prev_id)
-        document["next_id"] = str(next_id)
-
-        # _log.info(f"new method\nrecord_index: {recordIndex}; next_id: {next_id}; previous_id: {prev_id}")
+        document["recordIndex"] = str(record["rank"])
+        document["previous_id"] = str(record.get("prevId", target_id))
+        document["next_id"] = str(record.get("nextId", target_id))
 
         return document
 
