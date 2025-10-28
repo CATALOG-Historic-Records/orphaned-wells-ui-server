@@ -76,6 +76,7 @@ class DataManager:
         _log.info(f"{user} releasing lock")
         self.LOCKED = False
 
+    @time_it
     def lockRecord(self, record_id, user, release_previous_record=True):
         _log.info(f"{user} locking {record_id}")
         if release_previous_record:
@@ -96,6 +97,7 @@ class DataManager:
         elif user:
             self.db.locked_records.delete_many({"user": user})
 
+    @time_it
     def tryLockingRecord(self, record_id, user):
         try:
             # self.fetchLock(user)
@@ -369,6 +371,7 @@ class DataManager:
         default_team = user_document.get("default_team", None)
         return self.getTeamProjectList(default_team)
 
+    @time_it
     def getUserRecordGroups(self, user):
         projects = self.fetchProjects(user)
         record_groups = []
@@ -562,42 +565,30 @@ class DataManager:
         search_for_errors=True,
     ):
         records = []
-        record_index = 1
-        if page is not None and records_per_page is not None and records_per_page != -1:
-            # pipeline = [
-            #     {"$match": filter_by},
-            #     {"$sort": {sort_by[0]: sort_by[1]}},
-            #     {"$skip": records_per_page * page},
-            #     {"$limit": records_per_page}
-            # ]
-            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
-            cursor = (
-                self.db.records.find(filter_by)
-                .sort(
-                    sort_by[0],
-                    sort_by[1]
-                    # )
-                )
-                .skip(records_per_page * page)
-                .limit(records_per_page)
-            )
-            record_index += page * records_per_page
-        else:
-            # print(f"aggregating with match, sort")
-            # pipeline = [
-            #     {"$match": filter_by},  # same as find(filter_by)
-            #     {"$sort": {sort_by[0]: sort_by[1]}}  # same as sort(field, direction)
-            # ]
-            # cursor = self.db.records.aggregate(pipeline, allowDiskUse=True)
-            cursor = self.db.records.find(filter_by).sort(sort_by[0], sort_by[1])
+
+        pipeline = util.generate_mongo_pipeline(
+            filter_by=filter_by,
+            primary_sort=sort_by,
+            records_per_page=records_per_page,
+            page=page,
+            for_ranking=True,
+            secondary_sort=None,
+            convert_target_value_to_number=True,
+        )
+
+        cursor = self.db.records.aggregate(pipeline)
 
         for document in cursor:
             document["_id"] = str(document["_id"])
-            document["recordIndex"] = record_index
             if search_for_errors:
-                document["has_errors"] = util.searchRecordForAttributeErrors(document)
-            record_index += 1
+                [hasErrors, found_values] = util.searchRecordForErrorsAndTargetKeys(
+                    document
+                )
+                document["has_errors"] = hasErrors
+                for each in found_values:
+                    document[each] = found_values[each]
             records.append(document)
+        # _log.info(records)
         record_count = self.db.records.count_documents(filter_by)
         return records, record_count
 
@@ -741,7 +732,10 @@ class DataManager:
 
         return project_document, record_group
 
-    def fetchRecordData(self, record_id, user_info, page_state=None):
+    @time_it
+    def fetchRecordData(
+        self, record_id, user_info, page_state=None, background_tasks=None
+    ):
         user = user_info.get("email", "")
         _id = ObjectId(record_id)
         cursor = self.db.records.find({"_id": _id})
@@ -831,10 +825,11 @@ class DataManager:
             )
             document["attributesList"] = sorted_attributes
 
-            if update_db:
+            if update_db and background_tasks:
                 ## after sorting, update the record list so frontend and backend are in sync
                 ## this shouldnt always be necessary, but for now do it every time
-                self.updateRecord(
+                background_tasks.add_task(
+                    self.updateRecord,
                     record_id=document["_id"],
                     new_data={"attributesList": document["attributesList"]},
                     update_type="attributesList",
@@ -866,80 +861,35 @@ class DataManager:
 
     @time_it
     def getRecordIndexes(self, document, filterBy, sortBy):
-        """
-        document   - dict with at least '_id'
-        filterBy   - MongoDB filter dict
-        sortBy     - tuple like ('dateCreated', 1) or [('dateCreated', 1), ('name', 1)]
-        """
-
         target_id = (
             ObjectId(document["_id"])
             if not isinstance(document["_id"], ObjectId)
             else document["_id"]
         )
 
-        # Normalize sortBy to dict for $setWindowFields, and to list for .find/.aggregate sort
-        if isinstance(sortBy, tuple):
-            sort_dict = {sortBy[0]: sortBy[1]}
-            sort_list = [sortBy]
-        elif isinstance(sortBy, list):
-            sort_dict = dict(sortBy)
-            sort_list = sortBy
-        else:
-            raise ValueError("sortBy must be tuple or list of tuples")
-
-        pipeline = [
-            {"$match": filterBy},
-            {
-                "$setWindowFields": {
-                    "sortBy": sort_dict,
-                    "output": {
-                        "rank": {"$rank": {}},
-                        "prevId": {"$shift": {"by": -1, "output": "$_id"}},
-                        "nextId": {"$shift": {"by": 1, "output": "$_id"}},
-                    },
-                }
-            },
-            {"$match": {"_id": target_id}},
-        ]
+        pipeline = util.generate_mongo_pipeline(
+            filter_by=filterBy,
+            primary_sort=sortBy,
+            for_ranking=True,
+            convert_target_value_to_number=True,
+            match_record_id=target_id,
+        )
 
         result = list(self.db.records.aggregate(pipeline))
         if not result:
-            _log.error("Could not get record indexes via $setWindowFields.")
             return None
 
         record = result[0]
+        prevId = record.get("prevId", target_id)
+        nextId = record.get("nextId", target_id)
 
-        recordIndex = record["rank"]
-
-        prev_id = record.get("prevId")
-        next_id = record.get("nextId")
-
-        # Handle wrap-around for prevId (if prev_id is None, we have the first record)
-        if prev_id is None:
-            last_doc = (
-                self.db.records.find(filterBy, sort=sort_list)
-                .sort(sort_list[0][0], -sort_list[0][1])
-                .limit(1)
-            )
-            last_doc = list(last_doc)
-            prev_id = last_doc[0]["_id"] if last_doc else target_id
-
-        # Handle wrap-around for nextId (if next_id is None, we have the last record)
-        if next_id is None:
-            first_doc = self.db.records.find(filterBy, sort=sort_list).limit(1)
-            first_doc = list(first_doc)
-            next_id = first_doc[0]["_id"] if first_doc else target_id
-
-        # For frontend: indexes should start at 1
-        document["recordIndex"] = str(recordIndex)
-        document["previous_id"] = str(prev_id)
-        document["next_id"] = str(next_id)
-
-        # _log.info(f"new method\nrecord_index: {recordIndex}; next_id: {next_id}; previous_id: {prev_id}")
+        document["rank"] = record["rank"]
+        document["previous_id"] = prevId
+        document["next_id"] = nextId
 
         return document
 
+    @time_it
     def getProcessorByRecordGroupID(self, rg_id):
         _id = ObjectId(rg_id)
         try:
@@ -1093,6 +1043,7 @@ class DataManager:
             calling_function="updateRecordReviewStatus",
         )
 
+    @time_it
     def updateRecord(
         self,
         record_id,

@@ -307,7 +307,10 @@ async def get_record_group_data(
 
 @router.post("/get_record/{record_id}")
 async def get_record_data(
-    request: Request, record_id: str, user_info: dict = Depends(authenticate)
+    request: Request,
+    record_id: str,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
 ):
     """Fetch document record data.
 
@@ -336,7 +339,7 @@ async def get_record_data(
         _log.info(f"unable to get page state: {e}")
         page_state = None
     record, is_locked = data_manager.fetchRecordData(
-        record_id, user_info, page_state=page_state
+        record_id, user_info, page_state=page_state, background_tasks=background_tasks
     )
     if record is None:
         raise HTTPException(
