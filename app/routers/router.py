@@ -833,21 +833,37 @@ async def download_records(
     filter_by = req.get("filter", {})
     sort_by = req.get("sort", ["dateCreated", 1])
 
+    json_fields_to_include = {
+        "topLevelFields": ["name", "filename"],
+        "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
+    }
+
     keep_all_columns = False
     if len(selectedColumns) == 0:
         keep_all_columns = True
 
     if location == "project":
         records, _ = data_manager.fetchRecordsByProject(
-            user_info, _id, filter_by=filter_by, sort_by=sort_by
+            user_info,
+            _id,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
         )
     elif location == "record_group":
         records, _ = data_manager.fetchRecordsByRecordGroup(
-            user_info, _id, filter_by=filter_by, sort_by=sort_by
+            user_info,
+            _id,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
         )
     elif location == "team":
         records, _ = data_manager.fetchRecordsByTeam(
-            user_info, filter_by=filter_by, sort_by=sort_by
+            user_info,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
         )
     else:
         raise HTTPException(

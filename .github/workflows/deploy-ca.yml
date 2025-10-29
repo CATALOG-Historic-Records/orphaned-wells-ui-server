@@ -29,7 +29,7 @@ jobs:
             host: ${{ secrets.CA_BACKEND_IP }}
             username: ${{ secrets.SSH_USERNAME }}
             key: ${{ secrets.SSH_PRIVATE_KEY }}
-            source: "docker-compose.yml, nginx/ca/default.conf"
+            source: "deployment/docker-compose.yml, deployment/nginx/ca/default.conf"
             target: .
 
         - name: run docker-compose
