@@ -563,6 +563,8 @@ class DataManager:
         page=None,
         records_per_page=None,
         search_for_errors=True,
+        include_attribute_fields=None,  ## use this to include ONLY specific fields
+        exclude_attribute_fields=None,  ## use this to exclude specific fields
     ):
         records = []
 
@@ -574,6 +576,8 @@ class DataManager:
             for_ranking=True,
             secondary_sort=None,
             convert_target_value_to_number=True,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
         )
 
         cursor = self.db.records.aggregate(pipeline)
@@ -599,11 +603,20 @@ class DataManager:
         records_per_page=None,
         sort_by=["dateCreated", 1],
         filter_by={},
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
     ):
         team_info = self.fetchTeamInfo(user["email"])
         rg_list = self.getTeamRecordGroupsList(team_info["name"])
         filter_by["record_group_id"] = {"$in": rg_list}
-        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
+        return self.fetchRecords(
+            sort_by,
+            filter_by,
+            page,
+            records_per_page,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
+        )
 
     def fetchRecordsByRecordGroup(
         self,
@@ -613,9 +626,18 @@ class DataManager:
         records_per_page=None,
         sort_by=["dateCreated", 1],
         filter_by={},
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
     ):
         filter_by["record_group_id"] = rg_id
-        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
+        return self.fetchRecords(
+            sort_by,
+            filter_by,
+            page,
+            records_per_page,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
+        )
 
     def fetchRecordsByProject(
         self,
@@ -625,12 +647,21 @@ class DataManager:
         records_per_page=None,
         sort_by=["dateCreated", 1],
         filter_by={},
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
     ):
         ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
         if "record_group_id" not in filter_by:
             record_group_ids = self.getProjectRecordGroupsList(project_id)
             filter_by["record_group_id"] = {"$in": record_group_ids}
-        return self.fetchRecords(sort_by, filter_by, page, records_per_page)
+        return self.fetchRecords(
+            sort_by,
+            filter_by,
+            page,
+            records_per_page,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
+        )
 
     @time_it
     def fetchRecordGroups(self, project_id, user):

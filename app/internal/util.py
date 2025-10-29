@@ -426,6 +426,8 @@ def generate_mongo_pipeline(
     secondary_sort=None,
     convert_target_value_to_number=False,
     match_record_id=None,
+    include_attribute_fields: dict = None,
+    exclude_attribute_fields: dict = None,  ##TODO: add functionality for this
 ):
     """
     Generates pipeline that applies filtering, complex sorting, paging.
@@ -440,8 +442,36 @@ def generate_mongo_pipeline(
     convert_target_value_to_number : for sorting attributesList field.
         if true, will attempt to use regex to convert field to number before applying sort
     match_record_id : ObjectID for record that we want to find
+    include_attribute_fields : dict
+        {
+            topLevelFields: [],
+            attributesList: [],
+        }
+    exclude_attribute_fields : dict
     """
     pipeline = [{"$match": filter_by}]
+
+    if include_attribute_fields:
+        project = {"$project": {}}
+        topLevelFields = include_attribute_fields.get("topLevelFields", [])
+        attributesListFields = include_attribute_fields.get("attributesList", [])
+        for topLevelField in topLevelFields:
+            project["$project"][topLevelField] = 1
+
+        if len(attributesListFields) > 0:
+            attributesList_include = {}
+            for attributesListField in attributesListFields:
+                attributesList_include[
+                    attributesListField
+                ] = f"$$attr.{attributesListField}"
+            project["$project"]["attributesList"] = {
+                "$map": {
+                    "input": "$attributesList",
+                    "as": "attr",
+                    "in": attributesList_include,
+                }
+            }
+        pipeline.append(project)
 
     primary_sort_key = primary_sort[0]
     primary_sort_dir = primary_sort[1]
