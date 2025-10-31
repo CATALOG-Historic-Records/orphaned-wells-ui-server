@@ -14,6 +14,7 @@ from app.internal.settings import AppSettings
 from app.internal.util import generate_download_signed_url_v4
 import app.internal.util as util
 from app.internal.util import time_it
+from app.internal import airtable_api
 
 _log = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ DEFAULT_PROCESSORS = [
         "Model ID": "pretrained-form-parser-v2.1-2023-06-26",
     },
 ]
+
+USE_AIRTABLE = True
 
 
 class DataManager:
@@ -49,17 +52,63 @@ class DataManager:
         self.LOCKED = False
         ## lock_duration: amount of seconds that records remain locked if no changes are made
         self.lock_duration = 120
-        self.processor_list = self.createProcessorsList()
-        self.processor_dict = util.convert_processor_list_to_dict(self.processor_list)
+        self.createProcessorsList()
 
-    def createProcessorsList(self):
-        processor_list = processor_api.get_processor_list(self.collaborator)
-        if not processor_list:
-            _log.info(f"no processors found, using default extractor")
-            processor_list = DEFAULT_PROCESSORS
-            self.using_default_processor = True
+    @time_it
+    def getProcessorById(self, google_id=None):
+        if USE_AIRTABLE:
+            _log.info(f"getting processor using airtable")
+            processor = airtable_api.get_processor_by_id(self.airtable_base, google_id)
+        elif google_id is not None:
+            _log.info(f"getting processor using processor_api")
+            processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+        return processor
+
+    def getAirtableIds(self):
+        ## TODO:
+        _log.info(f"getting airtable ids for {self.collaborator}")
+        query = {"collaborator": self.collaborator}
+        airtable_data = list(self.db.airtable_data.find(query))
+        if len(airtable_data) == 1:
+            airtable_keys = airtable_data[0]
+        elif len(airtable_data) > 0:
+            _log.info(f"found MULTIPLE ENTRIES OF airtable data")
+            airtable_keys = airtable_data[0]
         else:
-            self.using_default_processor = False
+            _log.info(f"did not find airtable data")
+            airtable_keys = None
+            ## TODO: make call to get default?
+
+        return airtable_keys
+
+    def createAirtableProcessorsList(self):
+        airtable_keys = self.getAirtableIds()
+        if airtable_keys is None:
+            _log.info(f"airtable_keys is none")
+            return []
+        AIRTABLE_API_TOKEN = airtable_keys.get("AIRTABLE_API_TOKEN")
+        AIRTABLE_BASE_ID = airtable_keys.get("AIRTABLE_BASE_ID")
+        airtable_base = airtable_api.get_airtable_base(
+            AIRTABLE_API_TOKEN, AIRTABLE_BASE_ID
+        )
+        self.airtable_base = airtable_base
+        return airtable_api.get_processor_list(airtable_base)
+        # AIRTABLE_PROCESSORS_TABLE_ID = airtable_keys.get("AIRTABLE_PROCESSORS_TABLE_ID")
+
+    @time_it
+    def createProcessorsList(self):
+        if USE_AIRTABLE:
+            processor_list = self.createAirtableProcessorsList()
+        else:
+            processor_list = processor_api.get_processor_list(self.collaborator)
+            if not processor_list:
+                _log.info(f"no processors found, using default extractor")
+                processor_list = DEFAULT_PROCESSORS
+                self.using_default_processor = True
+            else:
+                self.using_default_processor = False
+            self.processor_list = processor_list
+        # _log.info(f"returning processor list: {processor_list}")
         return processor_list
 
     ## lock functions
@@ -733,11 +782,12 @@ class DataManager:
         return None
 
     def getProcessorByGoogleId(self, google_id):
-        processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+        processor = self.getProcessorById(google_id)
         return processor
 
     def fetchProcessors(self, user):
-        return self.processor_list
+        _log.info("fetching processors")
+        return self.createProcessorsList()
 
     def fetchRoles(self, role_categories):
         roles = []
@@ -848,9 +898,7 @@ class DataManager:
         ## sort record attributes
         try:
             google_id = rg["processorId"]
-            processor_doc = processor_api.get_processor_by_id(
-                self.collaborator, google_id
-            )
+            processor_doc = self.getProcessorById(google_id)
             sorted_attributes, update_db = util.sortRecordAttributes(
                 document["attributesList"], processor_doc
             )
@@ -927,9 +975,7 @@ class DataManager:
             cursor = self.db.record_groups.find({"_id": _id})
             document = cursor.next()
             google_id = document.get("processorId", None)
-            processor_document = processor_api.get_processor_by_id(
-                self.collaborator, google_id
-            )
+            processor_document = self.getProcessorById(google_id)
             if not processor_document:
                 processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
@@ -937,7 +983,7 @@ class DataManager:
             return google_id, model_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor: {e}")
-            return None
+            return None, None, None
 
     def getProcessorByRecordID(self, record_id):
         _id = ObjectId(record_id)
@@ -948,7 +994,7 @@ class DataManager:
             return self.getProcessorByRecordGroupID(rg_id)
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
-            return None
+            return None, None, None
 
     ## create/add functions
     def createProject(self, project_info, user_info):

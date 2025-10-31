@@ -40,7 +40,13 @@ def time_it(func):
 
 
 def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
-    processor_attributes = processor["attributes"]
+    if processor is None:
+        _log.info(f"no processor found")
+        return attributes, False
+    processor_attributes = processor.get("attributes", None)
+    if processor_attributes is None or len(processor_attributes) == 0:
+        _log.info(f"no processor attributes found")
+        return attributes, False
     processor_attributes.sort(key=lambda x: x.get("page_order_sort", float("inf")))
 
     ## we want to make sure that the frontend and backend are always in sync.
@@ -78,7 +84,6 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
                     f"{attribute_name} was not in processor's attributes. adding this to the end of the sorted attributes list"
                 )
                 sorted_attributes.append(attr)
-
     return sorted_attributes, requires_db_update
 
 
@@ -631,3 +636,23 @@ def generate_mongo_pipeline(
         pipeline.append({"$limit": records_per_page})
 
     return pipeline
+
+
+def remap_airtable_keys(original_dict):
+    key_map = {
+        "Page Sort Order": "page_order_sort",
+        "Name": "name",
+        "Alias": "alias",
+        "Google Data Type": "google_data_type",
+        "Occurrence": "occurrence",
+        "Database Data Type": "database_data_type",
+        "Cleaning Function": "cleaning_function",
+        "Model Enabled": "model_enabled",
+    }
+
+    new_dict = {}
+    for old_key, value in original_dict.items():
+        new_key = key_map.get(old_key, old_key)
+        new_dict[new_key] = value
+
+    return new_dict
