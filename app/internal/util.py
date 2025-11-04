@@ -120,10 +120,10 @@ def generate_gcs_paths(documents):
         return []
     gcs_paths = {}
     for record_id, document in documents.items():
-        # print(f"{record_id}")
         rg_id = document["rg_id"]
         record_name = document["record_name"]
-        for image_file in document.get("files", []):
+        image_files = document.get("files", [])
+        for image_file in image_files:
             blob_path = f"uploads/{rg_id}/{record_id}/{image_file}"
             arcname = f"documents/{record_name}/{os.path.basename(image_file)}"
             gcs_paths[blob_path] = arcname

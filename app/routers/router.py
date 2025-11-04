@@ -2,6 +2,7 @@ import os
 import logging
 import aiofiles
 import requests
+import time
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from fastapi import (
@@ -78,7 +79,6 @@ async def auth_login(request: Request):
         "redirect_uri": "postmessage",
         "grant_type": "authorization_code",
     }
-
     response = requests.post(token_uri, data=data)
     user_tokens = response.json()
     try:
@@ -87,8 +87,17 @@ async def auth_login(request: Request):
         )
         user_info["email"] = user_info.get("email", "").lower()
     except Exception as e:  # should probably specify exception type
-        _log.info(f"unable to authenticate: {e}")
-        raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
+        _log.info(f"unable to authenticate on 1st try: {e}")
+        _log.info(f"waiting 2 seconds")
+        try:
+            time.sleep(2.5)
+            user_info = id_token.verify_oauth2_token(
+                user_tokens["id_token"], google_requests.Request(), client_id
+            )
+            user_info["email"] = user_info.get("email", "").lower()
+        except Exception as e:  # should probably specify exception type
+            _log.info(f"unable to authenticate: {e}")
+            raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
 
     email = user_info["email"]
     user = data_manager.getUser(email)
@@ -834,7 +843,7 @@ async def download_records(
     sort_by = req.get("sort", ["dateCreated", 1])
 
     json_fields_to_include = {
-        "topLevelFields": ["name", "filename"],
+        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
         "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
     }
 
