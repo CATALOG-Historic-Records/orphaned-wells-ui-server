@@ -211,7 +211,7 @@ def zip_files_stream(local_file_paths, documents=[]):
         blob = bucket.blob(gcs_path)
         arcname = gcs_paths[gcs_path]
 
-        def gcs_yield_chunks():
+        def gcs_yield_chunks(blob, arcname, gcs_path):
             _log.debug(f"Starting download: {gcs_path} -> {arcname}")
             start_file = time.time()
             bytes_read = 0
@@ -231,7 +231,7 @@ def zip_files_stream(local_file_paths, documents=[]):
                 f"Finished {arcname}: {mb_size:.2f} MB in {elapsed_file:.2f} s ({speed:.2f} MB/s)"
             )
 
-        zs.write_iter(arcname, gcs_yield_chunks())
+        zs.write_iter(arcname, gcs_yield_chunks(blob, arcname, gcs_path))
 
     def streaming_generator():
         for chunk in zs:
