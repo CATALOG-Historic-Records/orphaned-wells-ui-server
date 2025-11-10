@@ -1,0 +1,94 @@
+
+name: OGRRE Backend Tests
+
+on:
+  push:
+
+defaults:
+  run:
+    # -l: login shell, needed when using Conda
+    shell: bash -l {0}
+
+env:
+  PIP_PROGRESS_BAR: "off"
+
+jobs:
+  app-test:
+    name: Test Backend Endpoints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Check secret length
+        run: |
+          echo "Length: ${#STAGING_ENV}"
+        env:
+          STAGING_ENV: ${{ secrets.STAGING_ENV }}
+
+      - name: Create .env file from secret
+        run: |
+          cat << 'EOF' > ogrre/.env
+          ${{ secrets.STAGING_ENV }}
+          EOF
+
+      - name: Install application
+        run: |
+          pip install .
+
+      - name: Add creds file
+        id: create-creds-json
+        uses: jsdaniell/create-json@v1.2.3
+        with:
+            name: "ogrre/creds.json"
+            json: ${{ secrets.STAGING_CREDS_JSON }}
+
+      - name: Add service key json file
+        id: create-service-key-json
+        uses: jsdaniell/create-json@v1.2.3
+        with:
+            name: "ogrre/michael2-service-key.json"
+            json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
+
+      - name: Run application
+        run: |
+          nohup python ogrre/main.py &
+          sleep 15
+
+      - name: Test that backend is up and running
+        run: |
+          curl -f http://localhost:8001/docs
+
+      - name: Test auth_refresh
+        id: get_token
+        run: |
+          RESPONSE=$(curl -sSf \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.REFRESH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '"${{ secrets.REFRESH_TOKEN }}"' \
+            http://localhost:8001/auth_refresh)
+
+            ID_TOKEN=$(echo "$RESPONSE" | jq -r '.id_token')
+
+            echo "::add-mask::$ID_TOKEN"
+
+            # Fail if it's empty or null
+            if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+              echo "Failed to extract id_token"
+              exit 1
+            fi
+
+            # Save for later steps
+            echo "id_token=$ID_TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Test get_projects
+        run: |
+          RESPONSE=$(curl -sSf \
+            -H "Authorization: Bearer ${{ steps.get_token.outputs.id_token }}" \
+            http://localhost:8001/get_projects)
+      
+      ## TODO: add tests for each (testable) endpoint
+      ## OPTIONAL: add verification to make sure responses match expected output

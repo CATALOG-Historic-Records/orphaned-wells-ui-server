@@ -1,13 +1,9 @@
 import os
 import certifi
-from dotenv import load_dotenv
 import urllib.parse
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
-
-# fetch environment variables
-load_dotenv()
 DB_USERNAME = os.getenv("DB_USERNAME")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
