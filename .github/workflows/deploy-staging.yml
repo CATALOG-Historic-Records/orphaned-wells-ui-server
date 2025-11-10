@@ -35,14 +35,14 @@ jobs:
         id: create-creds-json
         uses: jsdaniell/create-json@v1.2.3
         with:
-            name: "app/internal/creds.json"
+            name: "ogrre/creds.json"
             json: ${{ secrets.STAGING_CREDS_JSON }}
 
       - name: Add service key json file
         id: create-service-key-json
         uses: jsdaniell/create-json@v1.2.3
         with:
-            name: "app/internal/michael2-service-key.json"
+            name: "ogrre/michael2-service-key.json"
             json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
     
       - name: Extract metadata (labels, tags, etc.) for Docker

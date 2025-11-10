@@ -17,16 +17,16 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 
-from app.internal.data_manager import data_manager
-from app.internal.image_handling import (
+from ogrre.internal.data_manager import data_manager
+from ogrre.internal.image_handling import (
     process_document,
     process_zip,
     deployProcessor,
     undeployProcessor,
     check_if_processor_is_deployed,
 )
-import app.internal.util as util
-import app.internal.auth as auth
+import ogrre.internal.util as util
+import ogrre.internal.auth as auth
 
 _log = logging.getLogger(__name__)
 
@@ -808,6 +808,79 @@ async def check_if_records_exist(
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
+@router.post("/get_download_size/{location}/{_id}")
+async def get_download_size(
+    location: str,
+    _id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Download records for given project ID.
+
+    Args:
+        location: one of: team, project, record_group
+        _id: id of team, project or record group
+        request body:
+            exportType: type of export (csv or json)
+            columns: list attributes to export
+
+    Returns:
+        Some combination of
+            JSON file containing all or subset of record data for provided location
+            CSV file containing all or subset of record data for provided location
+            All document images for provided location
+    """
+    req = await request.json()
+
+    filter_by = req.get("filter", {})
+    sort_by = req.get("sort", ["dateCreated", 1])
+
+    json_fields_to_include = {
+        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
+    }
+
+    if location == "project":
+        records, _ = data_manager.fetchRecordsByProject(
+            user_info,
+            _id,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+    elif location == "record_group":
+        records, _ = data_manager.fetchRecordsByRecordGroup(
+            user_info,
+            _id,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+    elif location == "team":
+        records, _ = data_manager.fetchRecordsByTeam(
+            user_info,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+    else:
+        raise HTTPException(
+            status_code=400, detail=f"Location must be project, record_group, or team"
+        )
+
+    try:
+        documents = util.compileDocumentImageList(records)
+        gcs_paths = util.generate_gcs_paths(documents)
+        totalBytes = util.compute_total_size([], gcs_paths.keys())
+        return totalBytes
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
+
+
 @router.post("/download_records/{location}/{_id}", response_class=StreamingResponse)
 async def download_records(
     location: str,
@@ -847,6 +920,8 @@ async def download_records(
         "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
     }
 
+    output_file_id = util.last4_before_decimal()
+
     keep_all_columns = False
     if len(selectedColumns) == 0:
         keep_all_columns = True
@@ -858,6 +933,7 @@ async def download_records(
             filter_by=filter_by,
             sort_by=sort_by,
             include_attribute_fields=json_fields_to_include,
+            forDownload=True,
         )
     elif location == "record_group":
         records, _ = data_manager.fetchRecordsByRecordGroup(
@@ -866,6 +942,7 @@ async def download_records(
             filter_by=filter_by,
             sort_by=sort_by,
             include_attribute_fields=json_fields_to_include,
+            forDownload=True,
         )
     elif location == "team":
         records, _ = data_manager.fetchRecordsByTeam(
@@ -873,6 +950,7 @@ async def download_records(
             filter_by=filter_by,
             sort_by=sort_by,
             include_attribute_fields=json_fields_to_include,
+            forDownload=True,
         )
     else:
         raise HTTPException(
@@ -889,7 +967,7 @@ async def download_records(
                 location,
                 selectedColumns=selectedColumns,
                 keep_all_columns=keep_all_columns,
-                output_filename=output_name,
+                output_filename=f"{output_name}_{output_file_id}",
             )
             filepaths.append(csv_file)
         if export_json:
@@ -901,19 +979,22 @@ async def download_records(
                 location,
                 selectedColumns=selectedColumns,
                 keep_all_columns=keep_all_columns,
-                output_filename=output_name,
+                output_filename=f"{output_name}_{output_file_id}",
             )
             filepaths.append(json_file)
         if export_images:
             documents = util.compileDocumentImageList(records)
         else:
             documents = []
-        z = util.zip_files_stream(filepaths, documents)
+        ## TODO: make this file name more unique, so multiple downloads dont have the same name
+        download_log_file = f"zip_log_{output_file_id}.txt"
+        z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
 
         ## remove file after 60 seconds to allow for the user download to finish
+        filepaths.append(download_log_file)
         background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
         headers = {"Content-Disposition": "attachment; filename=records.zip"}
-        _log.info(f"returning streaming response")
+        # _log.info(f"returning streaming response")
         return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
@@ -1029,6 +1110,60 @@ async def update_user_roles(request: Request, user_info: dict = Depends(authenti
             status_code=400,
             detail=f"Please provide an update and an email in the request body",
         )
+
+
+@router.get("/get_schema")
+async def get_schema(user_info: dict = Depends(authenticate)):
+    """Get schema
+
+    Args:
+
+    Returns:
+        schema: dict
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+        )
+    return data_manager.getSchema(user_info)
+
+
+@router.post("/update_schema")
+async def update_schema(request: Request, user_info: dict = Depends(authenticate)):
+    """Update schema
+
+    Args:
+        schema_name: string
+        useAirtable: boolean
+        baseID: string,
+        apiToken: string,
+        iframeViewID: string
+
+    Returns:
+
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+
+    request_fields = [
+        "schema_name",
+        "use_airtable",
+        "AIRTABLE_API_TOKEN",
+        "AIRTABLE_BASE_ID",
+        "AIRTABLE_IFRAME_VIEW_ID",
+    ]
+
+    new_schema_data = {
+        key: req.get(key) for key in request_fields if req.get(key) is not None
+    }
+
+    return data_manager.updateSchema(new_schema_data, user_info)
 
 
 @router.post("/update_default_team")

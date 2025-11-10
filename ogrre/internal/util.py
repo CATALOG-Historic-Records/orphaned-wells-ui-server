@@ -7,6 +7,7 @@ import sys
 import functools
 import zipstream
 from google.cloud import storage
+from google.api_core.exceptions import NotFound
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
 
@@ -26,6 +27,12 @@ STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 
 
+def last4_before_decimal(ts=None):
+    if ts is None:
+        ts = time.time()
+    return int(ts) % 10000
+
+
 def time_it(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -40,7 +47,13 @@ def time_it(func):
 
 
 def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
-    processor_attributes = processor["attributes"]
+    if processor is None:
+        _log.info(f"no processor found")
+        return attributes, False
+    processor_attributes = processor.get("attributes", None)
+    if processor_attributes is None or len(processor_attributes) == 0:
+        _log.info(f"no processor attributes found")
+        return attributes, False
     processor_attributes.sort(key=lambda x: x.get("page_order_sort", float("inf")))
 
     ## we want to make sure that the frontend and backend are always in sync.
@@ -78,7 +91,6 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
                     f"{attribute_name} was not in processor's attributes. adding this to the end of the sorted attributes list"
                 )
                 sorted_attributes.append(attr)
-
     return sorted_attributes, requires_db_update
 
 
@@ -143,7 +155,7 @@ def generate_download_signed_url_v4(
     """
 
     storage_client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
+        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
     )
 
     # blob_name: path to file in google cloud bucket
@@ -180,64 +192,159 @@ def compileDocumentImageList(records):
 
 
 @time_it
-def zip_files_stream(local_file_paths, documents=[]):
+def compute_total_size(local_file_paths, gcs_paths):
+    """
+    Compute total bytes of local files + google cloud images.
+    local_file_paths: list of paths
+    gcs_paths: dict or list of google cloud storage image paths
+    """
+    total_size = 0
+
+    # Local file sizes
+    for file_path in local_file_paths or []:
+        if os.path.isfile(file_path):
+            try:
+                total_size += os.path.getsize(file_path)
+            except OSError as e:
+                _log.warning(f"Failed to get size of local file {file_path}: {e}")
+        else:
+            _log.warning(f"Local file not found: {file_path}")
+
+    # GCS blob sizes
+    try:
+        storage_client = storage.Client.from_service_account_json(
+            f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
+        )
+        bucket = storage_client.bucket(BUCKET_NAME)
+
+        for blob_name in gcs_paths or []:
+            try:
+                blob = bucket.blob(blob_name)
+                blob.reload()  # fetch metadata from GCS
+                if blob.size is not None:
+                    total_size += blob.size
+                else:
+                    _log.warning(f"blob has no size info: {blob_name}")
+            except NotFound:
+                _log.warning(f"blob not found: {blob_name}")
+            except Exception as e:
+                _log.error(f"Error retrieving blob size for {blob_name}: {e}")
+
+    except Exception as e:
+        _log.error(f"Error initializing GCS client or bucket: {e}")
+
+    return total_size
+
+
+@time_it
+def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
     """
     Streams a ZIP file directly without writing to temp files.
-    Includes optional local files
+    Includes optional local files (JSON and/or csv), skips missing ones gracefully.
     """
     start_total = time.time()
+    log_file = None
+    if log_to_file:
+        log_file = open(log_to_file, "w")
+
+        def logg(msg, level="debug"):
+            log_file.write(msg + "\n")
+            if level == "debug":
+                _log.debug(msg)
+            elif level == "info":
+                _log.info(msg)
+
+    else:
+        logg = _log.info
+
     if documents is None:
         documents = []
-    _log.info(
-        f"downloading and zipping {len(documents)} images along with {local_file_paths}"
+    logg(
+        f"Downloading and zipping {len(documents)} images along with {local_file_paths}",
+        level="info",
     )
 
-    zs = zipstream.ZipFile(mode="w", compression=zipstream.ZIP_STORED)
+    zs = zipstream.ZipFile(mode="w", compression=zipstream.ZIP_STORED, allowZip64=True)
 
-    # Add CSV and JSON first
+    # Add csv and/or json first
     if local_file_paths:
         for file_path in local_file_paths:
             if os.path.isfile(file_path):
                 zs.write(file_path, os.path.basename(file_path))
+            else:
+                logg(f"Local file not found, skipping: {file_path}", level="info")
 
     client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/internal/{STORAGE_SERVICE_KEY}"
+        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
     )
     bucket = client.bucket(BUCKET_NAME)
 
     gcs_paths = generate_gcs_paths(documents)
-
+    i = 0
+    not_found_amt = 0
     for gcs_path in gcs_paths:
+        i += 1
         blob = bucket.blob(gcs_path)
+        # check if blob exists before writing to ZIP
+        try:
+            if not blob.exists():
+                not_found_amt += 1
+                logg(f"image #{i} not found, skipping: {gcs_path}", level="info")
+                continue
+        except Exception as e:
+            logg(f"Error checking existence for {gcs_path}: {e}", level="info")
+            continue
         arcname = gcs_paths[gcs_path]
 
-        def gcs_yield_chunks(blob, arcname, gcs_path):
-            _log.debug(f"Starting download: {gcs_path} -> {arcname}")
+        def gcs_yield_chunks(blob, arcname, gcs_path, i):
+            logg(f"Starting download #{i}: {gcs_path} -> {arcname}")
             start_file = time.time()
             bytes_read = 0
-
-            with blob.open("rb") as f:
-                while True:
-                    chunk = f.read(65536)  # 64KB chunks
-                    if not chunk:
-                        break
-                    bytes_read += len(chunk)
-                    yield chunk
+            try:
+                with blob.open("rb") as f:
+                    while True:
+                        chunk = f.read(65536)  # 64KB
+                        if not chunk:
+                            break
+                        bytes_read += len(chunk)
+                        yield chunk
+            except NotFound:
+                logg(f"Exception, blob not found: {gcs_path}", level="info")
+                return
+            except Exception as e:
+                logg(f"Error downloading {gcs_path}: {e}", level="info")
+                return
 
             elapsed_file = time.time() - start_file
             mb_size = bytes_read / (1024 * 1024)
             speed = (mb_size / elapsed_file) if elapsed_file > 0 else 0
-            _log.debug(
-                f"Finished {arcname}: {mb_size:.2f} MB in {elapsed_file:.2f} s ({speed:.2f} MB/s)"
+            logg(
+                f"Downloaded #{i}: {mb_size:.2f} MB in {elapsed_file:.2f} s ({speed:.2f} MB/s)"
             )
 
-        zs.write_iter(arcname, gcs_yield_chunks(blob, arcname, gcs_path))
+            # Add log file to download on last iteration
+            if i == len(gcs_paths):
+                if log_to_file and os.path.isfile(log_to_file):
+                    elapsed_total = time.time() - start_total
+                    logg(
+                        f"FINISHED: {i - not_found_amt} files streamed in {elapsed_total:.2f} seconds",
+                        level="none",
+                    )
+                    log_file.flush()
+                    zs.write(log_to_file, os.path.basename(log_to_file))
+                elif log_to_file:
+                    _log.info(f"Log text file is not found: {log_to_file}")
+
+        zs.write_iter(arcname, gcs_yield_chunks(blob, arcname, gcs_path, i))
 
     def streaming_generator():
         for chunk in zs:
             yield chunk
         elapsed_total = time.time() - start_total
-        _log.info(f"{len(documents)} files streamed in {elapsed_total:.2f} seconds")
+        logg(
+            f"{len(documents)} files streamed in {elapsed_total:.2f} seconds",
+            level="info",
+        )
 
     return streaming_generator()
 
@@ -428,6 +535,7 @@ def generate_mongo_pipeline(
     match_record_id=None,
     include_attribute_fields: dict = None,
     exclude_attribute_fields: dict = None,  ##TODO: add functionality for this
+    forDownload: bool = False,
 ):
     """
     Generates pipeline that applies filtering, complex sorting, paging.
@@ -630,4 +738,31 @@ def generate_mongo_pipeline(
         pipeline.append({"$skip": records_per_page * page})
         pipeline.append({"$limit": records_per_page})
 
+    if forDownload:
+        ## no need for sorting if we are downloading the records
+        pipeline = [
+            stage
+            for stage in pipeline
+            if not any(k in stage for k in ["$setWindowFields", "$sort"])
+        ]
     return pipeline
+
+
+def remap_airtable_keys(original_dict):
+    key_map = {
+        "Page Sort Order": "page_order_sort",
+        "Name": "name",
+        "Alias": "alias",
+        "Google Data Type": "google_data_type",
+        "Occurrence": "occurrence",
+        "Database Data Type": "database_data_type",
+        "Cleaning Function": "cleaning_function",
+        "Model Enabled": "model_enabled",
+    }
+
+    new_dict = {}
+    for old_key, value in original_dict.items():
+        new_key = key_map.get(old_key, old_key)
+        new_dict[new_key] = value
+
+    return new_dict

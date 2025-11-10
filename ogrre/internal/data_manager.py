@@ -9,11 +9,12 @@ from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 
 import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
-from app.internal.mongodb_connection import connectToDatabase
-from app.internal.settings import AppSettings
-from app.internal.util import generate_download_signed_url_v4
-import app.internal.util as util
-from app.internal.util import time_it
+from ogrre.internal.mongodb_connection import connectToDatabase
+from ogrre.internal.settings import AppSettings
+from ogrre.internal.util import generate_download_signed_url_v4
+import ogrre.internal.util as util
+from ogrre.internal.util import time_it
+from ogrre.internal import airtable_api
 
 _log = logging.getLogger(__name__)
 
@@ -49,17 +50,66 @@ class DataManager:
         self.LOCKED = False
         ## lock_duration: amount of seconds that records remain locked if no changes are made
         self.lock_duration = 120
-        self.processor_list = self.createProcessorsList()
-        self.processor_dict = util.convert_processor_list_to_dict(self.processor_list)
+        self.using_default_processor = False
+        self.createProcessorsList()
 
-    def createProcessorsList(self):
-        processor_list = processor_api.get_processor_list(self.collaborator)
-        if not processor_list:
-            _log.info(f"no processors found, using default extractor")
-            processor_list = DEFAULT_PROCESSORS
-            self.using_default_processor = True
+    @time_it
+    def getProcessorById(self, google_id=None):
+        if self.use_airtable:
+            _log.info(f"getting processor using airtable")
+            processor = airtable_api.get_processor_by_id(self.airtable_base, google_id)
+        elif google_id is not None:
+            _log.info(f"getting processor using processor_api")
+            processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+        return processor
+
+    def fetchSchema(self):
+        query = {"collaborator": self.collaborator}
+        airtable_data = list(self.db.schema.find(query))
+        if len(airtable_data) == 1:
+            airtable_keys = airtable_data[0]
+        elif len(airtable_data) > 0:
+            _log.info(f"found MULTIPLE ENTRIES OF airtable data")
+            airtable_keys = airtable_data[0]
         else:
-            self.using_default_processor = False
+            _log.info(f"did not find airtable data")
+            airtable_keys = None
+            ## TODO: make call to get default?
+
+        return airtable_keys
+
+    def createAirtableProcessorsList(self, airtable_keys):
+        if airtable_keys is None:
+            _log.info(f"airtable_keys is none")
+            return []
+        AIRTABLE_API_TOKEN = airtable_keys.get("AIRTABLE_API_TOKEN")
+        AIRTABLE_BASE_ID = airtable_keys.get("AIRTABLE_BASE_ID")
+        airtable_base = airtable_api.get_airtable_base(
+            AIRTABLE_API_TOKEN, AIRTABLE_BASE_ID
+        )
+        self.airtable_base = airtable_base
+        return airtable_api.get_processor_list(airtable_base)
+
+    @time_it
+    def createProcessorsList(self):
+        airtable_keys = self.fetchSchema()
+        if airtable_keys:
+            self.use_airtable = airtable_keys.get("use_airtable", False)
+            _log.info(f"using airtable: {self.use_airtable}")
+        else:
+            self.use_airtable = False
+        if self.use_airtable:
+            processor_list = self.createAirtableProcessorsList(airtable_keys)
+        else:
+            processor_list = processor_api.get_processor_list(self.collaborator)
+            if not processor_list:
+                _log.info(f"no processors found, using default extractor")
+                processor_list = DEFAULT_PROCESSORS
+                self.using_default_processor = True
+            else:
+                self.using_default_processor = False
+            self.processor_list = processor_list
+        # _log.info(f"returning processor list: {processor_list}")
         return processor_list
 
     ## lock functions
@@ -141,6 +191,25 @@ class DataManager:
         except Exception as e:
             _log.error(f"error trying to lock record: {e}")
             return False
+
+    def getSchema(self, user_info):
+        user = user_info.get("email")
+        _log.info(f"{user} is fetching schema")
+        schema = self.fetchSchema()
+        schema["_id"] = str(schema.get("_id"))
+        return schema
+
+    def updateSchema(self, schema_data, user_info):
+        user = user_info.get("email")
+        query = {"collaborator": self.collaborator}
+        resp = self.db.schema.update_one(query, {"$set": schema_data})
+        self.recordHistory(
+            user=user,
+            action="updateSchema",
+            query=schema_data,
+        )
+        self.createProcessorsList()
+        return "success"
 
     ## user functions
     def getUser(self, email):
@@ -565,6 +634,7 @@ class DataManager:
         search_for_errors=True,
         include_attribute_fields=None,  ## use this to include ONLY specific fields
         exclude_attribute_fields=None,  ## use this to exclude specific fields
+        forDownload=False,
     ):
         records = []
 
@@ -578,6 +648,7 @@ class DataManager:
             convert_target_value_to_number=True,
             include_attribute_fields=include_attribute_fields,
             exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
         )
 
         cursor = self.db.records.aggregate(pipeline)
@@ -605,6 +676,7 @@ class DataManager:
         filter_by={},
         include_attribute_fields=None,
         exclude_attribute_fields=None,
+        forDownload=False,
     ):
         team_info = self.fetchTeamInfo(user["email"])
         rg_list = self.getTeamRecordGroupsList(team_info["name"])
@@ -616,6 +688,7 @@ class DataManager:
             records_per_page,
             include_attribute_fields=include_attribute_fields,
             exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
         )
 
     def fetchRecordsByRecordGroup(
@@ -628,6 +701,7 @@ class DataManager:
         filter_by={},
         include_attribute_fields=None,
         exclude_attribute_fields=None,
+        forDownload=False,
     ):
         filter_by["record_group_id"] = rg_id
         return self.fetchRecords(
@@ -637,6 +711,7 @@ class DataManager:
             records_per_page,
             include_attribute_fields=include_attribute_fields,
             exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
         )
 
     def fetchRecordsByProject(
@@ -649,6 +724,7 @@ class DataManager:
         filter_by={},
         include_attribute_fields=None,
         exclude_attribute_fields=None,
+        forDownload=False,
     ):
         ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
         if "record_group_id" not in filter_by:
@@ -661,6 +737,7 @@ class DataManager:
             records_per_page,
             include_attribute_fields=include_attribute_fields,
             exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
         )
 
     @time_it
@@ -733,11 +810,12 @@ class DataManager:
         return None
 
     def getProcessorByGoogleId(self, google_id):
-        processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+        processor = self.getProcessorById(google_id)
         return processor
 
     def fetchProcessors(self, user):
-        return self.processor_list
+        _log.info("fetching processors")
+        return self.createProcessorsList()
 
     def fetchRoles(self, role_categories):
         roles = []
@@ -848,9 +926,7 @@ class DataManager:
         ## sort record attributes
         try:
             google_id = rg["processorId"]
-            processor_doc = processor_api.get_processor_by_id(
-                self.collaborator, google_id
-            )
+            processor_doc = self.getProcessorById(google_id)
             sorted_attributes, update_db = util.sortRecordAttributes(
                 document["attributesList"], processor_doc
             )
@@ -927,9 +1003,7 @@ class DataManager:
             cursor = self.db.record_groups.find({"_id": _id})
             document = cursor.next()
             google_id = document.get("processorId", None)
-            processor_document = processor_api.get_processor_by_id(
-                self.collaborator, google_id
-            )
+            processor_document = self.getProcessorById(google_id)
             if not processor_document:
                 processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
@@ -937,7 +1011,7 @@ class DataManager:
             return google_id, model_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor: {e}")
-            return None
+            return None, None, None
 
     def getProcessorByRecordID(self, record_id):
         _id = ObjectId(record_id)
@@ -948,7 +1022,7 @@ class DataManager:
             return self.getProcessorByRecordGroupID(rg_id)
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
-            return None
+            return None, None, None
 
     ## create/add functions
     def createProject(self, project_info, user_info):

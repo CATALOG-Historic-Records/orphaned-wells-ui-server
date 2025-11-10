@@ -8,12 +8,14 @@ import logging
 from dotenv import load_dotenv
 import argparse
 
+from dotenv import load_dotenv
+
+# fetch environment variables
+load_dotenv()
+
 _log = logging.getLogger(__name__)
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.dirname(SCRIPT_DIR))
-
-from app.routers import router
+from ogrre.routers import router
 
 app = FastAPI()
 

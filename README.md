@@ -35,7 +35,7 @@ pip install -r requirements-dev.txt
 
 ### 2. Add credential/environment files
 
-Credentials are necessary for backend functionality. This includes Google Cloud's document AI features, MongoDB database access, and Google Cloud Storage for storing documents/images. To access these functionalities, you must create the following credential files and place them in the **< orphaned-wells-ui-server-path >/app/internal/** directory:
+Credentials are necessary for backend functionality. This includes Google Cloud's document AI features, MongoDB database access, and Google Cloud Storage for storing documents/images. To access these functionalities, you must create the following credential files and place them in the **< orphaned-wells-ui-server-path >/ogrre/internal/** directory:
 1. **.env** 
     - Must contain **PROJECT_ID**, **LOCATION**, **PROCESSOR_ID**, **DB_USERNAME**, **DB_PASSWORD**, **STORAGE_SERVICE_KEY** (3rd item on this list)
 2. **creds.json**
