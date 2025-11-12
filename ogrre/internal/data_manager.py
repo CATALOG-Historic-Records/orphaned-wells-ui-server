@@ -53,9 +53,17 @@ class DataManager:
         self.using_default_processor = False
         self.createProcessorsList()
 
+    def useAirtable(self):
+        airtable_keys = self.fetchSchema()
+        if airtable_keys:
+            self.use_airtable = airtable_keys.get("use_airtable", False)
+        else:
+            self.use_airtable = False
+        return self.use_airtable
+
     @time_it
     def getProcessorById(self, google_id=None):
-        if self.use_airtable:
+        if self.useAirtable():
             _log.info(f"getting processor using airtable")
             processor = airtable_api.get_processor_by_id(self.airtable_base, google_id)
         elif google_id is not None:
