@@ -51,11 +51,22 @@ class DataManager:
         ## lock_duration: amount of seconds that records remain locked if no changes are made
         self.lock_duration = 120
         self.using_default_processor = False
+        self.use_airtable = False
         self.createProcessorsList()
+
+    def useAirtable(self):
+        ## DISABLE AIRTABLE FOR NOW:
+        return False
+        airtable_keys = self.fetchSchema()
+        if airtable_keys:
+            self.use_airtable = airtable_keys.get("use_airtable", False)
+        else:
+            self.use_airtable = False
+        return self.use_airtable
 
     @time_it
     def getProcessorById(self, google_id=None):
-        if self.use_airtable:
+        if self.useAirtable():
             _log.info(f"getting processor using airtable")
             processor = airtable_api.get_processor_by_id(self.airtable_base, google_id)
         elif google_id is not None:
@@ -92,24 +103,25 @@ class DataManager:
 
     @time_it
     def createProcessorsList(self):
-        airtable_keys = self.fetchSchema()
-        if airtable_keys:
-            self.use_airtable = airtable_keys.get("use_airtable", False)
-            _log.info(f"using airtable: {self.use_airtable}")
+        ## REMOVE AIRTABLE FUNCTIONALITY
+        # airtable_keys = self.fetchSchema()
+        # if airtable_keys:
+        #     self.use_airtable = airtable_keys.get("use_airtable", False)
+        #     _log.info(f"using airtable: {self.use_airtable}")
+        # else:
+        #     self.use_airtable = False
+        # if self.use_airtable:
+        #     processor_list = self.createAirtableProcessorsList(airtable_keys)
+        # else:
+
+        processor_list = processor_api.get_processor_list(self.collaborator)
+        if not processor_list:
+            _log.info(f"no processors found, using default extractor")
+            processor_list = DEFAULT_PROCESSORS
+            self.using_default_processor = True
         else:
-            self.use_airtable = False
-        if self.use_airtable:
-            processor_list = self.createAirtableProcessorsList(airtable_keys)
-        else:
-            processor_list = processor_api.get_processor_list(self.collaborator)
-            if not processor_list:
-                _log.info(f"no processors found, using default extractor")
-                processor_list = DEFAULT_PROCESSORS
-                self.using_default_processor = True
-            else:
-                self.using_default_processor = False
-            self.processor_list = processor_list
-        # _log.info(f"returning processor list: {processor_list}")
+            self.using_default_processor = False
+        self.processor_list = processor_list
         return processor_list
 
     ## lock functions
