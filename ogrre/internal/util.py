@@ -750,7 +750,7 @@ def generate_mongo_pipeline(
 
 def remap_airtable_keys(original_dict):
     key_map = {
-        "Page Sort Order": "page_order_sort",
+        "Page Order Sort": "page_order_sort",
         "Name": "name",
         "Alias": "alias",
         "Google Data Type": "google_data_type",
