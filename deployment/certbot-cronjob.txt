@@ -1,0 +1,3 @@
+This command handles auto renewal of the SSL certificate. It will run daily at 3 am. It checks if the certificate is approaching expiry (within 30 days), and if so the certificate will be renewed. It will then restart the nginx server. The path "/home/<user>", must be updated to reflect the location of the docker-compose.yml file in the VM.
+
+0 3 * * * cd /home/<user> && echo "=== $(date) ===" >> /var/log/certbot-renew.log && (docker compose run --rm certbot renew && docker compose exec nginx nginx -s reload) >> /var/log/certbot-renew.log 2>&1

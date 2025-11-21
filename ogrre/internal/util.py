@@ -7,6 +7,8 @@ import sys
 import functools
 import zipstream
 from google.cloud import storage
+import csv
+import json
 from google.api_core.exceptions import NotFound
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
@@ -142,9 +144,12 @@ def generate_gcs_paths(documents):
     return gcs_paths
 
 
-def generate_download_signed_url_v4(
-    rg_id, record_id, filename, bucket_name=BUCKET_NAME
-):
+def get_document_image(rg_id, record_id, filename, bucket_name=BUCKET_NAME):
+    path = f"uploads/{rg_id}/{record_id}/{filename}"
+    return generate_download_signed_url_v4(path, bucket_name=bucket_name)
+
+
+def generate_download_signed_url_v4(path, bucket_name=BUCKET_NAME):
     """Generates a v4 signed URL for downloading a blob.
 
     Note that this method requires a service account key file. You can not use
@@ -157,19 +162,20 @@ def generate_download_signed_url_v4(
     storage_client = storage.Client.from_service_account_json(
         f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
     )
-
     # blob_name: path to file in google cloud bucket
-    blob_name = f"uploads/{rg_id}/{record_id}/{filename}"
+    blob_name = f"{path}"
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-
-    url = blob.generate_signed_url(
-        version="v4",
-        # This URL is valid for 15 minutes
-        expiration=datetime.timedelta(minutes=15),
-        # Allow GET requests using this URL.
-        method="GET",
-    )
+    try:
+        url = blob.generate_signed_url(
+            version="v4",
+            # This URL is valid for 15 minutes
+            expiration=datetime.timedelta(minutes=15),
+            # Allow GET requests using this URL.
+            method="GET",
+        )
+    except Exception as e:
+        _log.info(f"unable to get GCS image for path: {path}")
 
     return url
 
@@ -524,7 +530,7 @@ def defaultJSONDumpHandler(obj):
         return str(obj)
 
 
-def generate_mongo_pipeline(
+def generate_mongo_records_pipeline(
     filter_by,
     primary_sort,
     records_per_page=None,
@@ -766,3 +772,71 @@ def remap_airtable_keys(original_dict):
         new_dict[new_key] = value
 
     return new_dict
+
+
+def csv_to_dict(upload_file):
+    # upload_file.file is already a file-like object
+    upload_file.file.seek(0)  # ensure start
+    reader = csv.reader(upload_file.file.read().decode("utf-8").splitlines())
+    headers = next(reader)
+
+    data = []
+    for row in reader:
+        item = dict(zip(headers, row))
+        data.append(item)
+    return data
+
+
+def convert_to_target_format(data):
+    target_format = []
+    key_map = {
+        "Name": "name",
+        "Google Data type": "data_type",
+        "Database Data Type": "database_data_type",
+        "Occurrence": "occurrence",
+        "Grouping": "grouping",
+        "Page Order Sort": "page_order_sort",
+        "Cleaning Function": "cleaning_function",
+    }
+
+    for row in data:
+        target_item = {}
+        for item_key in row:
+            item = row[item_key]
+            json_key = key_map.get(item_key, None)
+            if json_key:
+                target_item[json_key] = item
+            else:
+                ## TODO: we can add these if we want to, but it might just be a waste of space
+                # target_item[item_key] = item
+                _log.debug(f"we dont have a matching key for: {item_key}")
+        target_format.append(target_item)
+    return target_format
+
+
+def convert_csv_to_dict(csv_file):
+    data = csv_to_dict(csv_file)
+    target_format = convert_to_target_format(data)
+    return target_format
+
+
+def upload_to_gcs(
+    file_bytes: bytes, original_filename: str, processor_name: str
+) -> str:
+    """
+    Uploads raw bytes to Google Cloud Storage and returns the public URL.
+    """
+
+    client = storage.Client.from_service_account_json(
+        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
+    )
+    bucket = client.bucket(BUCKET_NAME)
+
+    extension = original_filename.split(".")[-1]
+    # blob_name = f"sample_images/{uuid.uuid4()}.{extension}"
+    blob_name = f"sample_images/{processor_name}"
+
+    blob = bucket.blob(blob_name)
+    blob.upload_from_string(file_bytes, content_type=f"image/{extension}")
+
+    return generate_download_signed_url_v4(blob_name)
