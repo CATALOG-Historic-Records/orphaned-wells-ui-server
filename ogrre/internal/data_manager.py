@@ -11,10 +11,11 @@ from pymongo import ASCENDING, DESCENDING, UpdateOne
 import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
 from ogrre.internal.mongodb_connection import connectToDatabase
 from ogrre.internal.settings import AppSettings
-from ogrre.internal.util import generate_download_signed_url_v4
+from ogrre.internal.util import get_document_image
 import ogrre.internal.util as util
 from ogrre.internal.util import time_it
-from ogrre.internal import airtable_api
+
+# from ogrre.internal import airtable_api
 
 _log = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ DEFAULT_PROCESSORS = [
         "Model ID": "pretrained-form-parser-v2.1-2023-06-26",
     },
 ]
+
+USE_DB_PROCESSORS = False
 
 
 class DataManager:
@@ -54,67 +57,45 @@ class DataManager:
         self.use_airtable = False
         self.createProcessorsList()
 
-    def useAirtable(self):
-        ## DISABLE AIRTABLE FOR NOW:
-        return False
-        airtable_keys = self.fetchSchema()
-        if airtable_keys:
-            self.use_airtable = airtable_keys.get("use_airtable", False)
+    def getMongoProcessorByID(self, google_id):
+        projection = {"_id": 0}
+        query = {"processorId": google_id}
+        processor = list(self.db.processors.find(query, projection=projection))
+        if len(processor) > 0:
+            return processor[0]
         else:
-            self.use_airtable = False
-        return self.use_airtable
+            return None
+
+    def getMongoProcessorsByIDs(self, google_ids):
+        projection = {"_id": 0}
+        query = {"processorId": {"$in": google_ids}}
+        processors = list(self.db.processors.find(query, projection=projection))
+        return processors
 
     @time_it
     def getProcessorById(self, google_id=None):
-        if self.useAirtable():
-            _log.info(f"getting processor using airtable")
-            processor = airtable_api.get_processor_by_id(self.airtable_base, google_id)
-        elif google_id is not None:
+        if USE_DB_PROCESSORS:
+            _log.info(f"getting processor using database")
+            processor = self.getMongoProcessorByID(google_id=google_id)
+        else:
             _log.info(f"getting processor using processor_api")
             processor = processor_api.get_processor_by_id(self.collaborator, google_id)
         return processor
 
-    def fetchSchema(self):
-        query = {"collaborator": self.collaborator}
-        airtable_data = list(self.db.schema.find(query))
-        if len(airtable_data) == 1:
-            airtable_keys = airtable_data[0]
-        elif len(airtable_data) > 0:
-            _log.info(f"found MULTIPLE ENTRIES OF airtable data")
-            airtable_keys = airtable_data[0]
-        else:
-            _log.info(f"did not find airtable data")
-            airtable_keys = None
-            ## TODO: make call to get default?
-
-        return airtable_keys
-
-    def createAirtableProcessorsList(self, airtable_keys):
-        if airtable_keys is None:
-            _log.info(f"airtable_keys is none")
-            return []
-        AIRTABLE_API_TOKEN = airtable_keys.get("AIRTABLE_API_TOKEN")
-        AIRTABLE_BASE_ID = airtable_keys.get("AIRTABLE_BASE_ID")
-        airtable_base = airtable_api.get_airtable_base(
-            AIRTABLE_API_TOKEN, AIRTABLE_BASE_ID
-        )
-        self.airtable_base = airtable_base
-        return airtable_api.get_processor_list(airtable_base)
+    def createProcessorsListFromDB(self):
+        projection = {"_id": 0, "attributes": 0}
+        projection = {"_id": 0}
+        processor_list = list(self.db.processors.find({}, projection=projection))
+        return processor_list
 
     @time_it
     def createProcessorsList(self):
-        ## REMOVE AIRTABLE FUNCTIONALITY
-        # airtable_keys = self.fetchSchema()
-        # if airtable_keys:
-        #     self.use_airtable = airtable_keys.get("use_airtable", False)
-        #     _log.info(f"using airtable: {self.use_airtable}")
-        # else:
-        #     self.use_airtable = False
-        # if self.use_airtable:
-        #     processor_list = self.createAirtableProcessorsList(airtable_keys)
-        # else:
-
-        processor_list = processor_api.get_processor_list(self.collaborator)
+        if USE_DB_PROCESSORS:
+            _log.info(f"creating processor list using db")
+            processor_list = self.createProcessorsListFromDB()
+        else:
+            _log.info(f"creating processor list using processor_api")
+            processor_list = processor_api.get_processor_list(self.collaborator)
         if not processor_list:
             _log.info(f"no processors found, using default extractor")
             processor_list = DEFAULT_PROCESSORS
@@ -138,7 +119,6 @@ class DataManager:
         _log.info(f"{user} releasing lock")
         self.LOCKED = False
 
-    @time_it
     def lockRecord(self, record_id, user, release_previous_record=True):
         _log.info(f"{user} locking {record_id}")
         if release_previous_record:
@@ -204,26 +184,60 @@ class DataManager:
             _log.error(f"error trying to lock record: {e}")
             return False
 
+    @time_it
     def getSchema(self, user_info):
         user = user_info.get("email")
         _log.info(f"{user} is fetching schema")
-        schema = self.fetchSchema()
-        if schema is not None:
-            schema["_id"] = str(schema.get("_id"))
-        else:
-            schema = {}
+        schema = list(self.db.processors.find({}, projection={"_id": 0}))
+        if len(schema) == 0:
+            _log.info(f"no processors found")
+        for processor in schema:
+            processorName = processor.get("name")
+            processor_img = util.generate_download_signed_url_v4(
+                path=f"sample_images/{processorName}"
+            )
+            processor["img"] = processor_img
         return schema
 
-    def updateSchema(self, schema_data, user_info):
+    def uploadProcessorSchema(self, file, schema_meta, user_info):
+        attributes_list = util.convert_csv_to_dict(file)
+        query = {"name": schema_meta.get("name", "Default Processor Name")}
+        new_processor = {
+            **schema_meta,
+            "attributes": attributes_list,
+            "lastUpdated": time.time(),
+        }
+        self.db.processors.update_one(query, {"$set": new_processor}, upsert=True)
+        self.recordHistory(
+            user=user_info.get("email", None),
+            action="uploadProcessorSchema",
+            query=new_processor,
+        )
+        new_processor.pop("_id", None)
+        return new_processor
+
+    def deleteProcessorSchema(self, processorName, user_info):
+        _log.info(f"deleting processor {processorName}")
+        query = {"name": processorName}
+        self.db.processors.delete_one(query)
+        self.recordHistory(
+            user=user_info.get("email", None),
+            action="deleteProcessorSchema",
+            query=query,
+        )
+        return query
+
+    def updateProcessor(self, processor_data, user_info):
         user = user_info.get("email")
-        query = {"collaborator": self.collaborator}
-        resp = self.db.schema.update_one(query, {"$set": schema_data}, upsert=True)
+        query = {"name": processor_data.get("name")}
+        processor_data["lastUpdated"] = time.time()
+        self.db.processors.update_one(query, {"$set": processor_data})
         self.recordHistory(
             user=user,
-            action="updateSchema",
-            query=schema_data,
+            action="updateProcessor",
+            query=processor_data,
         )
-        self.createProcessorsList()
+        # self.createProcessorsList()
         return "success"
 
     ## user functions
@@ -653,7 +667,7 @@ class DataManager:
     ):
         records = []
 
-        pipeline = util.generate_mongo_pipeline(
+        pipeline = util.generate_mongo_records_pipeline(
             filter_by=filter_by,
             primary_sort=sort_by,
             records_per_page=records_per_page,
@@ -797,21 +811,23 @@ class DataManager:
                 for i in range(len(document["project_list"])):
                     document["project_list"][i] = str(document["project_list"][i])
                 record_groups = self.getTeamRecordGroupsList(_id)
-            for rg_id in record_groups:
-                try:
-                    rg_document = self.db.record_groups.find(
-                        {"_id": ObjectId(rg_id)}
-                    ).next()
-                    google_id = rg_document["processorId"]
-                    processor = self.getProcessorByGoogleId(google_id)
-                    for attr in processor["attributes"]:
-                        columns.add(attr["name"])
-                except Exception as e:
-                    _log.error(f"unable to get {rg_id}: {e}")
-            columns = list(columns)
+
+            rg_ids = []
+            for rg in record_groups:
+                rg_ids.append(ObjectId(rg))
+
+            rg_documents = list(self.db.record_groups.find({"_id": {"$in": rg_ids}}))
+            processor_ids = []
+            for doc in rg_documents:
+                google_id = doc["processorId"]
+                processor_ids.append(google_id)
+            processors = self.getMongoProcessorsByIDs(processor_ids)
+            for proc in processors:
+                for attr in proc.get("attributes"):
+                    columns.add(attr["name"])
             if "projects" in document:
                 del document["projects"]
-            return {"columns": columns, "obj": document}
+            return {"columns": list(columns), "obj": document}
 
         elif location == "record_group":
             columns = []
@@ -819,6 +835,8 @@ class DataManager:
             rg_document["_id"] = _id
             google_id = rg_document["processorId"]
             processor = self.getProcessorByGoogleId(google_id)
+            if processor is None:
+                return None
             for attr in processor["attributes"]:
                 columns.append(attr["name"])
             return {"columns": columns, "obj": rg_document}
@@ -883,14 +901,14 @@ class DataManager:
         for image in document.get("image_files", []):
             if util.imageIsValid(image):
                 image_urls.append(
-                    generate_download_signed_url_v4(
+                    get_document_image(
                         document["record_group_id"], document["_id"], image
                     )
                 )
         if len(image_urls) == 0:
             if document.get("filename", False):
                 image_urls.append(
-                    generate_download_signed_url_v4(
+                    get_document_image(
                         document["record_group_id"],
                         document["_id"],
                         document["filename"],
@@ -989,7 +1007,7 @@ class DataManager:
             else document["_id"]
         )
 
-        pipeline = util.generate_mongo_pipeline(
+        pipeline = util.generate_mongo_records_pipeline(
             filter_by=filterBy,
             primary_sort=sortBy,
             for_ranking=True,
@@ -1011,7 +1029,6 @@ class DataManager:
 
         return document
 
-    @time_it
     def getProcessorByRecordGroupID(self, rg_id):
         _id = ObjectId(rg_id)
         try:
@@ -1722,7 +1739,7 @@ class DataManager:
     def recordHistory(
         self,
         action,
-        user=None,
+        user: str = None,
         project_id=None,
         rg_id=None,
         record_id=None,
