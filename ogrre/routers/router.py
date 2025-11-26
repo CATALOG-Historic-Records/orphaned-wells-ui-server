@@ -168,8 +168,13 @@ async def check_authorization(user_info: dict = Depends(authenticate)):
         user account information
     """
     email = user_info["email"]
+    db = os.environ.get("DB_CONNECTION", None)
+    if "staging" in db:
+        environment = "staging"
+    else:
+        environment = os.environ.get("ENVIRONMENT", None)
     user = data_manager.getUser(email)
-    return user
+    return {"user_data": user, "environment": environment}
 
 
 @router.post("/logout")
@@ -422,7 +427,7 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     return resp
 
 
-@router.get("/get_column_data/{location}/{_id}", response_model=dict)
+@router.get("/get_column_data/{location}/{_id}", response_model=dict or None)
 async def get_column_data(
     location: str, _id: str, user_info: dict = Depends(authenticate)
 ):
@@ -721,6 +726,35 @@ async def update_record(
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
 
     return update
+
+
+@router.post("/delete_processor/{processor_name}")
+async def delete_processor(
+    processor_name: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Delete processor.
+
+    Args:
+        processor_id: google processor id
+        model_id: model id
+
+    Returns:
+        Delete query
+    """
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete processors. Please contact a team lead or project manager.",
+        )
+    if not processor_name:
+        raise HTTPException(
+            400,
+            detail=f"Please provide processor name.",
+        )
+    return data_manager.deleteProcessorSchema(
+        processorName=processor_name, user_info=user_info
+    )
 
 
 @router.post("/delete_project/{project_id}")
@@ -1124,21 +1158,96 @@ async def get_schema(user_info: dict = Depends(authenticate)):
     if not data_manager.hasPermission(user_info["email"], "manage_schema"):
         raise HTTPException(
             403,
-            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
         )
     return data_manager.getSchema(user_info)
 
 
-@router.post("/update_schema")
-async def update_schema(request: Request, user_info: dict = Depends(authenticate)):
-    """Update schema
+@router.post("/upload_processor_schema")
+async def upload_processor_schema(
+    name: str = None,
+    displayName: str = None,
+    processorId: str = None,
+    modelId: str = None,
+    documentType: str = None,
+    img: str = None,
+    file: UploadFile = File(...),
+    user_info: dict = Depends(authenticate),
+):
+    """Upload Schema
 
     Args:
-        schema_name: string
-        useAirtable: boolean
-        baseID: string,
-        apiToken: string,
-        iframeViewID: string
+        name: processor name,
+        displayName: display name for processor,
+        processorId: google processor id,
+        modelId: google model id for primary model,
+        documentType: type of document,
+        csv_file
+
+    Returns:
+        schema: dict
+    """
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
+        )
+    if (
+        not name
+        or not displayName
+        or not processorId
+        or not modelId
+        or not documentType
+    ):
+        raise HTTPException(
+            400,
+            detail=f"Please provide each of the following as query parameters: name, displayName, processorId, modelId, documentType.",
+        )
+    schema_meta = {
+        "name": name,
+        "displayName": displayName,
+        "processorId": processorId,
+        "modelId": modelId,
+        "documentType": documentType,
+        "img": img,
+    }
+    return data_manager.uploadProcessorSchema(
+        file=file, schema_meta=schema_meta, user_info=user_info
+    )
+
+
+@router.post("/upload_sample_image/{processor_name}")
+async def upload_sample_image(
+    processor_name: str,
+    file: UploadFile = File(...),
+    user_info: dict = Depends(authenticate),
+):
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
+        )
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image.")
+
+    file_bytes = await file.read()
+    public_url = util.upload_to_gcs(file_bytes, file.filename, processor_name)
+
+    return {"url": public_url}
+
+
+@router.get("/get_image_url/{processor_name}")
+async def get_image_url(processor_name: str, user_info: dict = Depends(authenticate)):
+    url = util.generate_download_signed_url_v4(path=f"sample_images/{processor_name}")
+    return {"url": url}
+
+
+@router.post("/update_processor")
+async def update_processor(request: Request, user_info: dict = Depends(authenticate)):
+    """Update processor
+
+    Args:
+        processor: processor data
 
     Returns:
 
@@ -1146,24 +1255,25 @@ async def update_schema(request: Request, user_info: dict = Depends(authenticate
     if not data_manager.hasPermission(user_info["email"], "manage_schema"):
         raise HTTPException(
             403,
-            detail=f"You are not authorized to manage team roles. Please contact a team lead or project manager.",
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
         )
 
     req = await request.json()
 
     request_fields = [
-        "schema_name",
-        "use_airtable",
-        "AIRTABLE_API_TOKEN",
-        "AIRTABLE_BASE_ID",
-        "AIRTABLE_IFRAME_VIEW_ID",
+        "name",
+        "displayName",
+        "processorId",
+        "modelId",
+        "documentType",
+        "img",
     ]
 
     new_schema_data = {
         key: req.get(key) for key in request_fields if req.get(key) is not None
     }
 
-    return data_manager.updateSchema(new_schema_data, user_info)
+    return data_manager.updateProcessor(new_schema_data, user_info)
 
 
 @router.post("/update_default_team")
