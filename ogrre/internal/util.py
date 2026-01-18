@@ -496,6 +496,18 @@ def cleanRecords(processor_attributes, documents):
             cleanRecordAttribute(
                 processor_attributes=processor_attributes, attribute=attr
             )
+            subattributes = attr.get("subattributes", False)
+            if subattributes:
+                for subattr in subattributes:
+                    parentAttribute = subattr.get("topLevelAttribute", "")
+                    subattributeKey = subattr["key"]
+                    subattribute_identifier = f"{parentAttribute}::{subattributeKey}"
+                    cleanRecordAttribute(
+                        processor_attributes=processor_attributes,
+                        attribute=subattr,
+                        subattributeKey=subattribute_identifier,
+                    )
+
     return documents
 
 
