@@ -281,7 +281,7 @@ async def get_records(
     raise HTTPException(400, detail=f"unable to process record query")
 
 
-@router.get("/get_processors", response_model=list)
+@router.get("/get_processors", response_model=dict)
 async def get_processors(user_info: dict = Depends(authenticate)):
     """Fetch all processors for a given state/organization.
 
@@ -943,6 +943,8 @@ async def download_records(
             All document images for provided location
     """
     req = await request.json()
+
+    request_origin = request.headers.get("origin")
     # _log.info(req)
     selectedColumns = req.get("columns", [])
 
@@ -1002,6 +1004,7 @@ async def download_records(
                 selectedColumns=selectedColumns,
                 keep_all_columns=keep_all_columns,
                 output_filename=f"{output_name}_{output_file_id}",
+                request_origin=request_origin,
             )
             filepaths.append(csv_file)
         if export_json:

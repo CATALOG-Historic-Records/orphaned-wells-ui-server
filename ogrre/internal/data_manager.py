@@ -96,6 +96,7 @@ class DataManager:
         else:
             _log.info(f"creating processor list using processor_api")
             processor_list = processor_api.get_processor_list(self.collaborator)
+
         if not processor_list:
             _log.info(f"no processors found, using default extractor")
             processor_list = DEFAULT_PROCESSORS
@@ -847,8 +848,11 @@ class DataManager:
         return processor
 
     def fetchProcessors(self, user):
-        _log.info("fetching processors")
-        return self.createProcessorsList()
+        processor_list = self.createProcessorsList()
+        return {
+            "USE_DB_PROCESSORS": USE_DB_PROCESSORS,
+            "processor_list": processor_list,
+        }
 
     def fetchRoles(self, role_categories):
         roles = []
@@ -1583,6 +1587,7 @@ class DataManager:
         selectedColumns=[],
         keep_all_columns=False,
         output_filename=None,
+        request_origin="",
     ):
         user = user_info.get("email", None)
         ## TODO: check if user is a part of the team who owns this project
@@ -1629,13 +1634,16 @@ class DataManager:
                                     if subattribute_name not in subattributes:
                                         subattributes.append(subattribute_name)
                     record_attribute["file"] = document.get("filename", "")
+                    record_attribute["URL"] = f"{request_origin}/record/{document_id}"
                     record_attributes.append(record_attribute)
                 except Exception as e:
                     _log.info(f"unable to add {document_id}: {e}")
 
             # compute the output file directory and name
             with open(output_file, "w", newline="") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=attributes + subattributes)
+                writer = csv.DictWriter(
+                    csvfile, fieldnames=attributes + subattributes + ["URL"]
+                )
                 writer.writeheader()
                 writer.writerows(record_attributes)
         else:
