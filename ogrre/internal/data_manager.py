@@ -104,6 +104,7 @@ class DataManager:
         else:
             self.using_default_processor = False
         self.processor_list = processor_list
+        _log.info(f"processor_list: {processor_list}")
         return processor_list
 
     ## lock functions
