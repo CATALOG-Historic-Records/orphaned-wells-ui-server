@@ -20,7 +20,7 @@ class AppSettings(BaseSettings):
         v.mkdir(parents=True, exist_ok=True)
         loggingFormat = "[%(levelname)s] %(asctime)s %(name)s (%(filename)s:%(lineno)s): %(message)s"
         loggingFileHandler = logging.handlers.RotatingFileHandler(
-            v / "orphaned-wells-ui.log", backupCount=2, maxBytes=5000000
+            v / "OGRRE.log", backupCount=2, maxBytes=5000000
         )
         logging.basicConfig(
             level=logging.INFO,
