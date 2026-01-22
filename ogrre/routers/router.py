@@ -823,8 +823,30 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
             403,
             detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
         )
-    data_manager.deleteRecord(record_id, user_info)
+    data_manager.deleteRecords([record_id], user_info)
 
+    return {"response": "success"}
+
+
+@router.post("/delete_records")
+async def delete_records(request: Request, user_info: dict = Depends(authenticate)):
+    """Delete records.
+
+    Args:
+        request.record_ids: List of record identifiers
+
+    Returns:
+        Success response
+    """
+    print(f"inside delete_records")
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
+        )
+    req = await request.json()
+    record_ids = req.get("record_ids", [])
+    data_manager.deleteRecords(record_ids, user_info)
     return {"response": "success"}
 
 

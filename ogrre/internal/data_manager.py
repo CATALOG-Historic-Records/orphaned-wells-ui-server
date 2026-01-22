@@ -1470,7 +1470,7 @@ class DataManager:
 
         ## add records to deleted records collection and remove from records collection
         background_tasks.add_task(
-            self.deleteRecords,
+            self._deleteRecords,
             query={"record_group_id": {"$in": record_groups}},
             deletedBy=user_info,
         )
@@ -1499,7 +1499,7 @@ class DataManager:
 
         ## add records to deleted records collection and remove from records collection
         background_tasks.add_task(
-            self.deleteRecords,
+            self._deleteRecords,
             query={"record_group": rg_id},
             deletedBy=user_info,
         )
@@ -1514,31 +1514,31 @@ class DataManager:
         self.removeRecordGroupFromTeam(_id, team)
         return "success"
 
-    def deleteRecord(self, record_id, user_info):
-        user = user_info.get("email", None)
-        ## TODO: check if user is a part of the team who owns the project that owns this record
-        _log.info(f"deleting {record_id}")
-        _id = ObjectId(record_id)
-        myquery = {"_id": _id}
-        self.db.records.delete_one(myquery)
-        self.recordHistory("deleteRecord", user=user, record_id=record_id)
+    def deleteRecords(self, record_ids, user_info):
+        _ids = [ObjectId(record_id) for record_id in record_ids]
+        myquery = {"_id": {"$in": _ids}}
+        self._deleteRecords(query=myquery, deletedBy=user_info)
+        self.recordHistory(
+            "deleteRecords", user=user_info.get("email", None), notes=myquery
+        )
         return "success"
 
-    def deleteRecords(self, query, deletedBy):
+    def _deleteRecords(self, query, deletedBy):
         user = deletedBy.get("email", None)
         _log.info(f"deleting records with query: {query}")
         ## add records to deleted records collection
         record_cursor = self.db.records.find(query)
         try:
             for record_document in record_cursor:
-                record_document["deleted_by"] = deletedBy
+                record_document["deleted_by"] = user
                 self.db.deleted_records.insert_one(record_document)
         except Exception as e:
             _log.error(f"unable to move all deleted records: {e}")
 
         ## Delete records associated with this project
-        self.db.records.delete_many(query)
-        # self.recordHistory("deleteRecords", user=user, notes=query)
+        resp = self.db.records.delete_many(query)
+        _log.info(f"delete resp = {resp}")
+
         return "success"
 
     def deleteRecordGroups(self, record_groups, deletedBy):
