@@ -547,8 +547,12 @@ async def upload_document(
         ## read document file
         try:
             async with aiofiles.open(original_output_path, "wb") as out_file:
-                content = await file.read()  # async read
-                await out_file.write(content)
+                chunk_size = 1024 * 1024
+                while True:
+                    chunk = await file.read(chunk_size)
+                    if not chunk:
+                        break
+                    await out_file.write(chunk)
             return process_document(
                 rg_id,
                 user_info,
@@ -558,7 +562,7 @@ async def upload_document(
                 filename,
                 data_manager,
                 mime_type,
-                content,
+                doc_ai_input_path=original_output_path,
                 reprocessed=reprocessed,
                 run_cleaning_functions=run_cleaning_functions,
                 undeployProcessor=undeployProcessor,
@@ -819,8 +823,30 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
             403,
             detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
         )
-    data_manager.deleteRecord(record_id, user_info)
+    data_manager.deleteRecords([record_id], user_info)
 
+    return {"response": "success"}
+
+
+@router.post("/delete_records")
+async def delete_records(request: Request, user_info: dict = Depends(authenticate)):
+    """Delete records.
+
+    Args:
+        request.record_ids: List of record identifiers
+
+    Returns:
+        Success response
+    """
+    print(f"inside delete_records")
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
+        )
+    req = await request.json()
+    record_ids = req.get("record_ids", [])
+    data_manager.deleteRecords(record_ids, user_info)
     return {"response": "success"}
 
 

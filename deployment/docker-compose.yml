@@ -16,10 +16,13 @@ services:
       - token_uri=${token_uri}
       - client_id=${client_id}
       - client_secret=${client_secret}
+      - LOG_DIR=/logs
     container_name: web
     ports:
       - "8001:8001"
     restart: unless-stopped
+    volumes:
+      - ./logs:/logs
     logging:
       driver: "json-file"
       options:

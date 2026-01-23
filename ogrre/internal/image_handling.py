@@ -5,6 +5,8 @@ import time
 import json
 import aiofiles
 import aiohttp
+import multiprocessing
+import tracemalloc
 from PIL import Image
 from gcloud.aio.storage import Storage
 from google.api_core.client_options import ClientOptions
@@ -33,10 +35,55 @@ docai_client = documentai.DocumentProcessorServiceClient(
     # credentials=f"{DIRNAME}/creds.json"
 )
 
+MEMORY_PROFILE = os.getenv("MEMORY_PROFILE", "").lower() in ("1", "true", "yes")
+MEMORY_PROFILE_RATE = int(os.getenv("MEMORY_PROFILE_RATE", "1"))
+MEMORY_PROFILE_TOP = int(os.getenv("MEMORY_PROFILE_TOP", "10"))
+PROCESS_IMAGE_IN_SUBPROCESS = os.getenv("PROCESS_IMAGE_IN_SUBPROCESS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_profile_counter = 0
+
 from ogrre.internal.google_processor_manager import (
     deploy_processor_version,
     undeploy_processor_version,
 )
+
+
+def _maybe_take_snapshot():
+    global _profile_counter
+    if not MEMORY_PROFILE:
+        return None
+    _profile_counter += 1
+    if _profile_counter % MEMORY_PROFILE_RATE != 0:
+        return None
+    if not tracemalloc.is_tracing():
+        tracemalloc.start()
+    return tracemalloc.take_snapshot()
+
+
+def _log_snapshot_diff(before, after, label, record_id=None):
+    if not before or not after:
+        return
+    pid = os.getpid()
+    prefix = f"pid={pid}"
+    if record_id:
+        prefix = f"{prefix} record_id={record_id}"
+    stats = after.compare_to(before, "lineno")
+    _log.info(f"memory profile {label} [{prefix}]: top {MEMORY_PROFILE_TOP}")
+    for stat in stats[:MEMORY_PROFILE_TOP]:
+        _log.info(f"{stat}")
+
+
+async def _save_upload_file(upload_file, destination_path):
+    async with aiofiles.open(destination_path, "wb") as out_file:
+        chunk_size = 1024 * 1024
+        while True:
+            chunk = await upload_file.read(chunk_size)
+            if not chunk:
+                break
+            await out_file.write(chunk)
 
 
 def process_zip(
@@ -88,10 +135,7 @@ async def process_single_file(
     mime_type = file.content_type
     ## read document file
     try:
-        async with aiofiles.open(original_output_path, "wb") as out_file:
-            content = await file.read()
-            await out_file.write(content)
-
+        await _save_upload_file(file, original_output_path)
         return await process_document(
             rg_id,
             user_info,
@@ -101,6 +145,7 @@ async def process_single_file(
             filename,
             data_manager,
             mime_type,
+            doc_ai_input_path=original_output_path,
         )
     except Exception as e:
         _log.error(f"unable to read image file: {e}")
@@ -116,7 +161,7 @@ def process_document(
     filename,
     data_manager,
     mime_type,
-    content,
+    doc_ai_input_path,
     reprocessed=False,
     run_cleaning_functions=True,
     undeployProcessor=True,
@@ -178,22 +223,39 @@ def process_document(
         files_to_delete.append(original_output_path)
 
     ## send to google doc AI
-    background_tasks.add_task(
-        process_image,
-        file_name=f"{filename}{file_ext}",
-        mime_type=mime_type,
-        rg_id=rg_id,
-        record_id=new_record_id,
-        processor_id=processor_id,
-        model_id=model_id,
-        processor_attributes=processor_attributes,
-        data_manager=data_manager,
-        image_content=content,
-        reprocessed=reprocessed,
-        files_to_delete=files_to_delete,
-        run_cleaning_functions=run_cleaning_functions,
-        undeployProcessor=undeployProcessor,
-    )
+    if PROCESS_IMAGE_IN_SUBPROCESS:
+        background_tasks.add_task(
+            _spawn_process_image_worker,
+            file_name=f"{filename}{file_ext}",
+            mime_type=mime_type,
+            rg_id=rg_id,
+            record_id=new_record_id,
+            processor_id=processor_id,
+            model_id=model_id,
+            processor_attributes=processor_attributes,
+            doc_ai_input_path=doc_ai_input_path,
+            reprocessed=reprocessed,
+            files_to_delete=files_to_delete,
+            run_cleaning_functions=run_cleaning_functions,
+            undeployProcessor=undeployProcessor,
+        )
+    else:
+        background_tasks.add_task(
+            process_image,
+            file_name=f"{filename}{file_ext}",
+            mime_type=mime_type,
+            rg_id=rg_id,
+            record_id=new_record_id,
+            processor_id=processor_id,
+            model_id=model_id,
+            processor_attributes=processor_attributes,
+            data_manager=data_manager,
+            doc_ai_input_path=doc_ai_input_path,
+            reprocessed=reprocessed,
+            files_to_delete=files_to_delete,
+            run_cleaning_functions=run_cleaning_functions,
+            undeployProcessor=undeployProcessor,
+        )
     return {"record_id": new_record_id}
 
 
@@ -264,6 +326,20 @@ def get_page(entity, attribute):
     return page
 
 
+def _process_image_worker(**kwargs):
+    from ogrre.internal.data_manager import DataManager
+
+    data_manager = DataManager()
+    process_image(data_manager=data_manager, **kwargs)
+
+
+def _spawn_process_image_worker(**kwargs):
+    ctx = multiprocessing.get_context("spawn")
+    process = ctx.Process(target=_process_image_worker, kwargs=kwargs)
+    process.daemon = True
+    process.start()
+
+
 ## Document AI functions
 def process_image(
     file_name,
@@ -274,12 +350,33 @@ def process_image(
     model_id,
     processor_attributes,
     data_manager,
-    image_content,
+    doc_ai_input_path,
     reprocessed=False,
     files_to_delete=[],
     run_cleaning_functions=True,
     undeployProcessor=True,
 ):
+    snapshot_start = _maybe_take_snapshot()
+    try:
+        with open(doc_ai_input_path, "rb") as file_handle:
+            image_content = file_handle.read()
+    except Exception as e:
+        _log.error(f"unable to read doc ai input file: {e}")
+        record = {
+            "record_group_id": rg_id,
+            "filename": f"{file_name}",
+            "status": "error",
+            "error_message": str(e),
+        }
+        data_manager.updateRecord(
+            record_id,
+            record,
+            update_type="record",
+            forceUpdate=True,
+            calling_function="process_image",
+        )
+        return
+
     if not processor_attributes:
         _log.info(f"no processor attributes found")
         processor_attributes = []
@@ -314,6 +411,14 @@ def process_image(
         )
         return
 
+    snapshot_after_prepare = _maybe_take_snapshot()
+    _log_snapshot_diff(
+        snapshot_start,
+        snapshot_after_prepare,
+        "after_prepare_request",
+        record_id=record_id,
+    )
+
     ## delete raw document and image_content to free up memory
     del image_content
     del raw_document
@@ -338,6 +443,13 @@ def process_image(
         )
         return
 
+    snapshot_after_process = _maybe_take_snapshot()
+    _log_snapshot_diff(
+        snapshot_after_prepare,
+        snapshot_after_process,
+        "after_docai_process",
+        record_id=record_id,
+    )
     _log.info(f"processed document in doc_ai")
     document_object = result.document
 
@@ -519,13 +631,6 @@ def process_image(
 
     ## delete local files
     util.deleteFiles(filepaths=files_to_delete, sleep_time=0)
-
-    if undeployProcessor:
-        _log.info(f"attempting to undeploy")
-        start_time = time.time()
-        undeploy_processor_version(RESOURCE_NAME)
-        finish_time = time.time()
-        _log.info(f"took {finish_time-start_time} seconds to undeploy")
 
     _log.info(f"updated record in db: {record_id}")
 
