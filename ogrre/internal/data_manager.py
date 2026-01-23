@@ -1717,19 +1717,20 @@ class DataManager:
         else:
             return False
 
+    @time_it
     def checkIfRecordsExist(self, filenames, rg_id):
         # Convert filenames into regex patterns
-        regex_patterns = [
-            {"filename": {"$regex": re.escape(filename.split(".")[0]), "$options": "i"}}
-            for filename in filenames
-        ]
+
+        bases = [f.split(".")[0] for f in filenames]
+
         query = {
-            "$and": [
-                {"record_group_id": rg_id},  # Match the given rg_id
-                {"$or": regex_patterns},  # Match any filename in filenames as regex
-            ]
+            "record_group_id": rg_id,
+            "$expr": {
+                "$in": [{"$arrayElemAt": [{"$split": ["$filename", "."]}, 0]}, bases]
+            },
         }
-        record_cursor = self.db.records.find(query)
+
+        record_cursor = self.db.records.find(query, {"filename": 1})
         duplicate_records = set()
         for document in record_cursor:
             duplicate_records.add(document["filename"].split(".")[0])
