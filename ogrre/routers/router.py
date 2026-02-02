@@ -14,7 +14,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 
 from ogrre.internal.data_manager import data_manager
@@ -1267,7 +1267,7 @@ async def upload_sample_image(
 
 @router.get("/get_image_url/{processor_name}")
 async def get_image_url(processor_name: str, user_info: dict = Depends(authenticate)):
-    url = util.generate_download_signed_url_v4(path=f"sample_images/{processor_name}")
+    url = util.generate_file_url(path=f"sample_images/{processor_name}")
     return {"url": url}
 
 

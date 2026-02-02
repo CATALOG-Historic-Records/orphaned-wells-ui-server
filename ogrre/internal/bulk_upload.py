@@ -4,8 +4,9 @@ import os
 import requests
 import time
 import shutil
-from google.cloud import storage
 from io import BytesIO
+
+from ogrre.internal import storage_api
 
 
 def upload_documents_from_directory(
@@ -91,17 +92,18 @@ def upload_documents_from_directory(
             return
         print(f"uploading documents from {cloud_bucket}/{cloud_directory}")
         try:
-            client = storage.Client.from_service_account_json(
-                f"./{storage_service_key}"
+            blob_names = storage_api.list_files(
+                prefix=cloud_directory,
+                bucket_name=cloud_bucket,
+                storage_service_key=storage_service_key,
             )
         except Exception as e:
             print(
                 "please provide a valid path to a google storage service key json file"
             )
             return
-        bucket = client.bucket(cloud_bucket)
-        for blob in bucket.list_blobs(prefix=cloud_directory):
-            file_name = blob.name.replace(f"{cloud_directory}/", "")
+        for blob_name in blob_names:
+            file_name = blob_name.replace(f"{cloud_directory}/", "")
             if ".pdf" in file_name.lower():
                 mime_type = "application/pdf"
             elif ".tif" in file_name.lower():
@@ -119,7 +121,13 @@ def upload_documents_from_directory(
             if mime_type is not None:
                 if file_name not in dontAdd:
                     print(f"uploading {mime_type}: {file_name}")
-                    doc = BytesIO(blob.download_as_bytes())
+                    doc = BytesIO(
+                        storage_api.download_file_bytes(
+                            key=blob_name,
+                            bucket_name=cloud_bucket,
+                            storage_service_key=storage_service_key,
+                        )
+                    )
                     upload_files = {
                         "file": (file_name, doc, mime_type),
                         "Content-Disposition": 'form-data; name="file"; filename="'
@@ -134,6 +142,3 @@ def upload_documents_from_directory(
                         return
                 else:
                     print(f"skipping duplicate {file}")
-
-    if preventDuplicates:
-        client.close()

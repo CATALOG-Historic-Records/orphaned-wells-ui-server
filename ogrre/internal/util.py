@@ -1,17 +1,14 @@
 import time
 import os
 import logging
-from google.cloud import storage
 import datetime
-import sys
 import functools
 import zipstream
-from google.cloud import storage
 import csv
 import json
-from google.api_core.exceptions import NotFound
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
+from ogrre.internal import storage_api
 
 CLEANING_FUNCTIONS = {
     "clean_bool": OGRRE_cleaning_functions.clean_bool,
@@ -24,8 +21,6 @@ CLEANING_FUNCTIONS = {
 }
 
 _log = logging.getLogger(__name__)
-DIRNAME, FILENAME = os.path.split(os.path.abspath(sys.argv[0]))
-STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 
 
@@ -154,39 +149,13 @@ def generate_gcs_paths(documents):
 
 
 def get_document_image(rg_id, record_id, filename, bucket_name=BUCKET_NAME):
-    path = f"uploads/{rg_id}/{record_id}/{filename}"
-    return generate_download_signed_url_v4(path, bucket_name=bucket_name)
-
-
-def generate_download_signed_url_v4(path, bucket_name=BUCKET_NAME):
-    """Generates a v4 signed URL for downloading a blob.
-
-    Note that this method requires a service account key file. You can not use
-    this if you are using Application Default Credentials from Google Compute
-    Engine or from the Google Cloud SDK.
-    To generate STORAGE_SERVICE_KEY, follow steps here:
-    https://docs.gspread.org/en/latest/oauth2.html#for-bots-using-service-account
-    """
-
-    storage_client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
+    return storage_api.get_document_image(
+        rg_id=rg_id, record_id=record_id, filename=filename, bucket_name=bucket_name
     )
-    # blob_name: path to file in google cloud bucket
-    blob_name = f"{path}"
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-    try:
-        url = blob.generate_signed_url(
-            version="v4",
-            # This URL is valid for 15 minutes
-            expiration=datetime.timedelta(minutes=15),
-            # Allow GET requests using this URL.
-            method="GET",
-        )
-    except Exception as e:
-        _log.info(f"unable to get GCS image for path: {path}")
 
-    return url
+
+def generate_file_url(path, bucket_name=BUCKET_NAME):
+    return storage_api.get_file_url(path, bucket_name=bucket_name)
 
 
 def compileDocumentImageList(records):
@@ -226,27 +195,12 @@ def compute_total_size(local_file_paths, gcs_paths):
             _log.warning(f"Local file not found: {file_path}")
 
     # GCS blob sizes
-    try:
-        storage_client = storage.Client.from_service_account_json(
-            f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
-        )
-        bucket = storage_client.bucket(BUCKET_NAME)
-
-        for blob_name in gcs_paths or []:
-            try:
-                blob = bucket.blob(blob_name)
-                blob.reload()  # fetch metadata from GCS
-                if blob.size is not None:
-                    total_size += blob.size
-                else:
-                    _log.warning(f"blob has no size info: {blob_name}")
-            except NotFound:
-                _log.warning(f"blob not found: {blob_name}")
-            except Exception as e:
-                _log.error(f"Error retrieving blob size for {blob_name}: {e}")
-
-    except Exception as e:
-        _log.error(f"Error initializing GCS client or bucket: {e}")
+    for blob_name in gcs_paths or []:
+        size = storage_api.get_file_size(blob_name, bucket_name=BUCKET_NAME)
+        if size is not None:
+            total_size += size
+        else:
+            _log.warning(f"blob has no size info or was not found: {blob_name}")
 
     return total_size
 
@@ -289,46 +243,27 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
             else:
                 logg(f"Local file not found, skipping: {file_path}", level="info")
 
-    client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
-    )
-    bucket = client.bucket(BUCKET_NAME)
-
     gcs_paths = generate_gcs_paths(documents)
     i = 0
     not_found_amt = 0
     for gcs_path in gcs_paths:
         i += 1
-        blob = bucket.blob(gcs_path)
         # check if blob exists before writing to ZIP
-        try:
-            if not blob.exists():
-                not_found_amt += 1
-                logg(f"image #{i} not found, skipping: {gcs_path}", level="info")
-                continue
-        except Exception as e:
-            logg(f"Error checking existence for {gcs_path}: {e}", level="info")
+        if not storage_api.file_exists(gcs_path, bucket_name=BUCKET_NAME):
+            not_found_amt += 1
+            logg(f"image #{i} not found, skipping: {gcs_path}", level="info")
             continue
         arcname = gcs_paths[gcs_path]
 
-        def gcs_yield_chunks(blob, arcname, gcs_path, i):
+        def gcs_yield_chunks(arcname, gcs_path, i):
             logg(f"Starting download #{i}: {gcs_path} -> {arcname}")
             start_file = time.time()
             bytes_read = 0
-            try:
-                with blob.open("rb") as f:
-                    while True:
-                        chunk = f.read(65536)  # 64KB
-                        if not chunk:
-                            break
-                        bytes_read += len(chunk)
-                        yield chunk
-            except NotFound:
-                logg(f"Exception, blob not found: {gcs_path}", level="info")
-                return
-            except Exception as e:
-                logg(f"Error downloading {gcs_path}: {e}", level="info")
-                return
+            for chunk in storage_api.iter_file_bytes(
+                gcs_path, bucket_name=BUCKET_NAME, chunk_size=65536
+            ):
+                bytes_read += len(chunk)
+                yield chunk
 
             elapsed_file = time.time() - start_file
             mb_size = bytes_read / (1024 * 1024)
@@ -350,7 +285,7 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
                 elif log_to_file:
                     _log.info(f"Log text file is not found: {log_to_file}")
 
-        zs.write_iter(arcname, gcs_yield_chunks(blob, arcname, gcs_path, i))
+        zs.write_iter(arcname, gcs_yield_chunks(arcname, gcs_path, i))
 
     def streaming_generator():
         for chunk in zs:
@@ -812,12 +747,12 @@ def convert_to_target_format(data):
     target_format = []
     key_map = {
         "Name": "name",
-        "Google Data type": "data_type",
         "Database Data Type": "database_data_type",
         "Occurrence": "occurrence",
         "Grouping": "grouping",
         "Page Order Sort": "page_order_sort",
         "Cleaning Function": "cleaning_function",
+        # "Data Type" OR "Google DataType" -> "data_type"
     }
 
     for row in data:
@@ -831,14 +766,89 @@ def convert_to_target_format(data):
                 ## TODO: we can add these if we want to, but it might just be a waste of space
                 # target_item[item_key] = item
                 _log.debug(f"we dont have a matching key for: {item_key}")
+        if "Data Type" in row:
+            target_item["data_type"] = row["Data Type"]
+        elif "Google Data Type" in row:
+            target_item["data_type"] = row["Google Data Type"]
         target_format.append(target_item)
     return target_format
 
 
 def convert_csv_to_dict(csv_file):
+    """
+    Docstring for convert_csv_to_dict
+
+    :param csv_file: CSV file containing schema fields
+        Each field must contain:
+         - "Name"
+         - "Google Data type"
+         - "Database Data Type"
+         - "Occurrence"
+         - "Grouping"
+         - "Page Order Sort"
+         - "Cleaning Function"
+    """
     data = csv_to_dict(csv_file)
     target_format = convert_to_target_format(data)
     return target_format
+
+
+def format_schema_json(json_file):
+    """
+    Docstring for format_schema_json
+
+    :param json file: JSON file containing schema fields
+        Each field must contain:
+         - "name"
+         - "data_type"
+         - "database_data_type"
+         - "occurrence"
+         - "grouping"
+         - "page_order_sort"
+         - "cleaning_function"
+    """
+    if hasattr(json_file, "file"):
+        json_file.file.seek(0)
+        raw = json_file.file.read()
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+    elif hasattr(json_file, "read"):
+        raw = json_file.read()
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+    else:
+        raw = json_file
+
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError("schema json must be a list of objects")
+
+    allowed_keys = {
+        "name",
+        "data_type",
+        "database_data_type",
+        "occurrence",
+        "grouping",
+        "page_order_sort",
+        "cleaning_function",
+    }
+    data_type_aliases = {"google_data_type", "Google Data type"}
+
+    formatted = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        new_item = {}
+        for key in allowed_keys:
+            if key in item:
+                new_item[key] = item[key]
+        if "data_type" not in new_item:
+            for alias in data_type_aliases:
+                if alias in item:
+                    new_item["data_type"] = item[alias]
+                    break
+        formatted.append(new_item)
+    return formatted
 
 
 def upload_to_gcs(
@@ -847,17 +857,123 @@ def upload_to_gcs(
     """
     Uploads raw bytes to Google Cloud Storage and returns the public URL.
     """
-
-    client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
+    return storage_api.upload_sample_image(
+        file_bytes=file_bytes,
+        original_filename=original_filename,
+        processor_name=processor_name,
     )
-    bucket = client.bucket(BUCKET_NAME)
 
-    extension = original_filename.split(".")[-1]
-    # blob_name = f"sample_images/{uuid.uuid4()}.{extension}"
-    blob_name = f"sample_images/{processor_name}"
 
-    blob = bucket.blob(blob_name)
-    blob.upload_from_string(file_bytes, content_type=f"image/{extension}")
+def generate_record_group_stats(rg_ids):
+    ## pipeline for getting the following record group stats:
+    ## total amount, amount reviewed (reviewed or defected), amount containing cleaning errors
+    pipeline = [
+        {"$match": {"record_group_id": {"$in": rg_ids}}},
+        {
+            "$group": {
+                "_id": "$record_group_id",
+                "total_amt": {"$sum": 1},
+                "reviewed_amt": {
+                    "$sum": {
+                        "$cond": [
+                            {"$in": ["$review_status", ["defective", "reviewed"]]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+                "error_amt": {
+                    "$sum": {
+                        "$cond": [
+                            {
+                                "$or": [
+                                    {
+                                        "$anyElementTrue": {
+                                            "$map": {
+                                                "input": {
+                                                    "$ifNull": [
+                                                        "$attributesList",
+                                                        [],
+                                                    ]
+                                                },
+                                                "as": "attr",
+                                                "in": {
+                                                    "$and": [
+                                                        {
+                                                            "$ne": [
+                                                                "$$attr.cleaning_error",
+                                                                False,
+                                                            ]
+                                                        },
+                                                        {
+                                                            "$ne": [
+                                                                {
+                                                                    "$type": "$$attr.cleaning_error"
+                                                                },
+                                                                "missing",
+                                                            ]
+                                                        },
+                                                    ]
+                                                },
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "$anyElementTrue": {
+                                            "$map": {
+                                                "input": {
+                                                    "$reduce": {
+                                                        "input": {
+                                                            "$ifNull": [
+                                                                "$attributesList",
+                                                                [],
+                                                            ]
+                                                        },
+                                                        "initialValue": [],
+                                                        "in": {
+                                                            "$concatArrays": [
+                                                                "$$value",
+                                                                {
+                                                                    "$ifNull": [
+                                                                        "$$this.subattributes",
+                                                                        [],
+                                                                    ]
+                                                                },
+                                                            ]
+                                                        },
+                                                    }
+                                                },
+                                                "as": "sub",
+                                                "in": {
+                                                    "$and": [
+                                                        {
+                                                            "$ne": [
+                                                                "$$sub.cleaning_error",
+                                                                False,
+                                                            ]
+                                                        },
+                                                        {
+                                                            "$ne": [
+                                                                {
+                                                                    "$type": "$$sub.cleaning_error"
+                                                                },
+                                                                "missing",
+                                                            ]
+                                                        },
+                                                    ]
+                                                },
+                                            }
+                                        }
+                                    },
+                                ]
+                            },
+                            1,
+                            0,
+                        ]
+                    }
+                },
+            }
+        },
+    ]
 
-    return generate_download_signed_url_v4(blob_name)
+    return pipeline
