@@ -13,6 +13,16 @@ from dotenv import load_dotenv
 # fetch environment variables
 load_dotenv()
 
+PROJECT_ID = os.getenv("PROJECT_ID")
+STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
+
+if PROJECT_ID:
+    os.environ["GCLOUD_PROJECT"] = PROJECT_ID
+
+if STORAGE_SERVICE_KEY:
+    dirname, _ = os.path.split(os.path.abspath(sys.argv[0]))
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f"{dirname}/{STORAGE_SERVICE_KEY}"
+
 _log = logging.getLogger(__name__)
 
 from ogrre.routers import router

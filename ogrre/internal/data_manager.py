@@ -15,8 +15,6 @@ from ogrre.internal.util import get_document_image
 import ogrre.internal.util as util
 from ogrre.internal.util import time_it
 
-# from ogrre.internal import airtable_api
-
 _log = logging.getLogger(__name__)
 
 COLLABORATORS = ["isgs", "calgem", "osage"]
@@ -30,7 +28,7 @@ DEFAULT_PROCESSORS = [
     },
 ]
 
-USE_DB_PROCESSORS = False
+USE_DB_PROCESSORS = True
 
 
 class DataManager:
@@ -43,10 +41,6 @@ class DataManager:
         self.db = connectToDatabase()
         self.environment = os.getenv("ENVIRONMENT")
         self.collaborator = os.getenv("COLLABORATOR")
-        _log.info(f"os env collaborator: {self.collaborator}")
-        if not self.collaborator or self.collaborator.lower() not in COLLABORATORS:
-            # fallback to to using isgs
-            self.collaborator = "isgs"
         _log.info(f"working in environment: {self.environment}")
         _log.info(f"collaborator is: {self.collaborator}")
 
@@ -194,14 +188,18 @@ class DataManager:
             _log.info(f"no processors found")
         for processor in schema:
             processorName = processor.get("name")
-            processor_img = util.generate_download_signed_url_v4(
+            processor_img = util.generate_file_url(
                 path=f"sample_images/{processorName}"
             )
             processor["img"] = processor_img
         return schema
 
     def uploadProcessorSchema(self, file, schema_meta, user_info):
-        attributes_list = util.convert_csv_to_dict(file)
+        filename = (file.filename or "").lower()
+        if file.content_type == "application/json" or filename.endswith(".json"):
+            attributes_list = util.format_schema_json(file)
+        else:
+            attributes_list = util.convert_csv_to_dict(file)
         query = {"name": schema_meta.get("name", "Default Processor Name")}
         new_processor = {
             **schema_meta,
@@ -479,117 +477,7 @@ class DataManager:
         return record_groups
 
     def getRecordGroupProgress(self, rg_ids):
-        ## pipeline for getting the following record group stats:
-        ## total amount, amount reviewed (reviewed or defected), amount containing cleaning errors
-        pipeline = [
-            {"$match": {"record_group_id": {"$in": rg_ids}}},
-            {
-                "$group": {
-                    "_id": "$record_group_id",
-                    "total_amt": {"$sum": 1},
-                    "reviewed_amt": {
-                        "$sum": {
-                            "$cond": [
-                                {"$in": ["$review_status", ["defective", "reviewed"]]},
-                                1,
-                                0,
-                            ]
-                        }
-                    },
-                    "error_amt": {
-                        "$sum": {
-                            "$cond": [
-                                {
-                                    "$or": [
-                                        {
-                                            "$anyElementTrue": {
-                                                "$map": {
-                                                    "input": {
-                                                        "$ifNull": [
-                                                            "$attributesList",
-                                                            [],
-                                                        ]
-                                                    },
-                                                    "as": "attr",
-                                                    "in": {
-                                                        "$and": [
-                                                            {
-                                                                "$ne": [
-                                                                    "$$attr.cleaning_error",
-                                                                    False,
-                                                                ]
-                                                            },
-                                                            {
-                                                                "$ne": [
-                                                                    {
-                                                                        "$type": "$$attr.cleaning_error"
-                                                                    },
-                                                                    "missing",
-                                                                ]
-                                                            },
-                                                        ]
-                                                    },
-                                                }
-                                            }
-                                        },
-                                        {
-                                            "$anyElementTrue": {
-                                                "$map": {
-                                                    "input": {
-                                                        "$reduce": {
-                                                            "input": {
-                                                                "$ifNull": [
-                                                                    "$attributesList",
-                                                                    [],
-                                                                ]
-                                                            },
-                                                            "initialValue": [],
-                                                            "in": {
-                                                                "$concatArrays": [
-                                                                    "$$value",
-                                                                    {
-                                                                        "$ifNull": [
-                                                                            "$$this.subattributes",
-                                                                            [],
-                                                                        ]
-                                                                    },
-                                                                ]
-                                                            },
-                                                        }
-                                                    },
-                                                    "as": "sub",
-                                                    "in": {
-                                                        "$and": [
-                                                            {
-                                                                "$ne": [
-                                                                    "$$sub.cleaning_error",
-                                                                    False,
-                                                                ]
-                                                            },
-                                                            {
-                                                                "$ne": [
-                                                                    {
-                                                                        "$type": "$$sub.cleaning_error"
-                                                                    },
-                                                                    "missing",
-                                                                ]
-                                                            },
-                                                        ]
-                                                    },
-                                                }
-                                            }
-                                        },
-                                    ]
-                                },
-                                1,
-                                0,
-                            ]
-                        }
-                    },
-                }
-            },
-        ]
-
+        pipeline = util.generate_record_group_stats(rg_ids)
         stats = {str(s["_id"]): s for s in self.db.records.aggregate(pipeline)}
         return stats
 

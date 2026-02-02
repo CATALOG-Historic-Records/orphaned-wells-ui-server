@@ -1,16 +1,10 @@
 import os
-import sys
 import logging
 import time
-import json
 import aiofiles
-import aiohttp
 import multiprocessing
 import tracemalloc
 from PIL import Image
-from gcloud.aio.storage import Storage
-from google.api_core.client_options import ClientOptions
-from google.cloud import documentai, storage
 
 from fastapi import HTTPException
 import fitz
@@ -18,22 +12,12 @@ import zipfile
 import mimetypes
 
 from ogrre.internal.bulk_upload import upload_documents_from_directory
+from ogrre.internal import storage_api
+from ogrre.internal import document_ai_api
 import ogrre.internal.util as util
 
 _log = logging.getLogger(__name__)
 
-LOCATION = os.getenv("LOCATION")
-PROJECT_ID = os.getenv("PROJECT_ID")
-STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
-BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
-os.environ["GCLOUD_PROJECT"] = PROJECT_ID
-DIRNAME, FILENAME = os.path.split(os.path.abspath(sys.argv[0]))
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
-
-docai_client = documentai.DocumentProcessorServiceClient(
-    client_options=ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com"),
-    # credentials=f"{DIRNAME}/creds.json"
-)
 
 MEMORY_PROFILE = os.getenv("MEMORY_PROFILE", "").lower() in ("1", "true", "yes")
 MEMORY_PROFILE_RATE = int(os.getenv("MEMORY_PROFILE_RATE", "1"))
@@ -44,11 +28,6 @@ PROCESS_IMAGE_IN_SUBPROCESS = os.getenv("PROCESS_IMAGE_IN_SUBPROCESS", "").lower
     "yes",
 )
 _profile_counter = 0
-
-from ogrre.internal.google_processor_manager import (
-    deploy_processor_version,
-    undeploy_processor_version,
-)
 
 
 def _maybe_take_snapshot():
@@ -211,7 +190,7 @@ def process_document(
     for output_path in output_paths:
         filepath = output_path.split("/")[-1]
         background_tasks.add_task(
-            upload_to_google_storage,
+            storage_api.upload_file,
             file_path=output_path,
             file_name=f"{filepath}",
             folder=f"uploads/{rg_id}/{new_record_id}",
@@ -304,28 +283,6 @@ def convert_tiff(filename, file_ext, output_directory, convert_to=".png"):
         return [filepath]
 
 
-def get_coordinates(entity, attribute):
-    try:
-        bounding_poly = entity.page_anchor.page_refs[0].bounding_poly
-        coordinates = []
-        for i in range(4):
-            coordinate = bounding_poly.normalized_vertices[i]
-            coordinates.append([coordinate.x, coordinate.y])
-    except Exception as e:
-        coordinates = None
-        _log.info(f"unable to get coordinates of attribute {attribute}: {e}")
-    return coordinates
-
-
-def get_page(entity, attribute):
-    try:
-        page = entity.page_anchor.page_refs[0].page
-    except Exception as e:
-        page = None
-        _log.info(f"unable to get coordinates of attribute {attribute}: {e}")
-    return page
-
-
 def _process_image_worker(**kwargs):
     from ogrre.internal.data_manager import DataManager
 
@@ -385,32 +342,6 @@ def process_image(
             processor_attributes
         )
 
-    RESOURCE_NAME = docai_client.processor_version_path(
-        PROJECT_ID, LOCATION, processor_id, model_id
-    )
-
-    raw_document = documentai.RawDocument(content=image_content, mime_type=mime_type)
-    try:
-        request = documentai.ProcessRequest(
-            name=RESOURCE_NAME, raw_document=raw_document
-        )
-    except Exception as e:
-        _log.error(f"error on documentai.ProcessRequest: {e}")
-        record = {
-            "record_group_id": rg_id,
-            "filename": f"{file_name}",
-            "status": "error",
-            "error_message": str(e),
-        }
-        data_manager.updateRecord(
-            record_id,
-            record,
-            update_type="record",
-            forceUpdate=True,
-            calling_function="process_image",
-        )
-        return
-
     snapshot_after_prepare = _maybe_take_snapshot()
     _log_snapshot_diff(
         snapshot_start,
@@ -419,15 +350,17 @@ def process_image(
         record_id=record_id,
     )
 
-    ## delete raw document and image_content to free up memory
-    del image_content
-    del raw_document
-
     # Use the Document AI client to process the document
     try:
-        result = docai_client.process_document(request=request)
+        attributesList = document_ai_api.process_document_content(
+            image_content=image_content,
+            mime_type=mime_type,
+            processor_id=processor_id,
+            model_id=model_id,
+            using_default_processor=data_manager.using_default_processor,
+        )
     except Exception as e:
-        _log.error(f"error on docai_client.process_document: {e}")
+        _log.error(f"error on google document ai processing: {e}")
         record = {
             "record_group_id": rg_id,
             "filename": f"{file_name}",
@@ -442,6 +375,8 @@ def process_image(
             calling_function="process_image",
         )
         return
+
+    del image_content
 
     snapshot_after_process = _maybe_take_snapshot()
     _log_snapshot_diff(
@@ -451,119 +386,22 @@ def process_image(
         record_id=record_id,
     )
     _log.info(f"processed document in doc_ai")
-    document_object = result.document
-
-    # our predefined attributes will be located in the entities object
-    document_entities = document_object.entities
-    """
-    entities has the following (useful) attributes: 
-    <attribute>: <example value>
-    type_: "Spud_Date"
-    mention_text: "8-25-72"
-    confidence: 1
-    normalized_value:
-        {
-            date_value {
-                year: 1972
-                month: 8
-                day: 25
-            }
-            text: "1972-08-25"
-        }
-    """
-    attributesList = []
     found_attributes = {}
-
-    # check if using generic extractor. if so, dive into generic_entities
-    if data_manager.using_default_processor:
-        _log.info(f"generic processor, diving into properties")
-        document_entities = document_entities[0].properties
-
-    for entity in document_entities:
-        attribute = entity.type_
-        text_value = entity.text_anchor.content
-        normalized_value = entity.normalized_value.text
-        confidence = entity.confidence
-        raw_text = entity.mention_text
-        if normalized_value:
-            value = normalized_value
-        else:
-            value = raw_text
-        coordinates = get_coordinates(entity, attribute)
-
-        ## page numbers start at 0
-        page = get_page(entity, attribute)
-        # subattributes = {}
-        subattributesList = []
-        for prop in entity.properties:
-            sub_text_value = prop.text_anchor.content
-            sub_normalized_value = prop.normalized_value.text
-            sub_attribute = prop.type_
-            sub_confidence = prop.confidence
-            sub_raw_text = prop.mention_text
-            sub_coordinates = get_coordinates(prop, sub_attribute)
-            sub_page = get_page(prop, sub_attribute)
-            if sub_normalized_value:
-                sub_value = sub_normalized_value
-            else:
-                sub_value = sub_raw_text
-            original_sub_attribute = sub_attribute
-
-            new_subattribute = {
-                "key": original_sub_attribute,
-                "ai_confidence": confidence,
-                "confidence": sub_confidence,
-                "raw_text": sub_raw_text,
-                "text_value": sub_text_value,
-                "value": sub_value,
-                "normalized_vertices": sub_coordinates,
-                "normalized_value": sub_normalized_value,
-                "isSubattribute": True,
-                "topLevelAttribute": attribute,
-                "edited": False,
-                "page": sub_page,
-            }
-            if run_cleaning_functions:
-                util.cleanRecordAttribute(
-                    processor_attributes=prcoessor_attributes_dictionary,
-                    attribute=new_subattribute,
-                    subattributeKey=f"{attribute}::{original_sub_attribute}",
-                )
-            subattributesList.append(new_subattribute)
-
-        if len(subattributesList) == 0:
-            subattributesList = None
-
-        original_attribute = attribute
-
-        ## add index to list for this key
-        this_attributes_indexes = found_attributes.get(original_attribute, [])
-        next_index = len(attributesList)
-        this_attributes_indexes.append(next_index)
-        found_attributes[original_attribute] = this_attributes_indexes
-        # found_attributes[original_attribute] = found_attributes.get(original_attribute, []).append(len(attributesList))
-
-        new_attribute = {
-            "key": original_attribute,
-            "ai_confidence": confidence,
-            "confidence": confidence,
-            "raw_text": raw_text,
-            "text_value": text_value,
-            "value": value,
-            "normalized_vertices": coordinates,
-            "normalized_value": normalized_value,
-            "subattributes": subattributesList,
-            "isSubattribute": False,
-            "edited": False,
-            "page": page,
-        }
+    for idx, attribute in enumerate(attributesList):
+        attribute_key = attribute["key"]
+        found_attributes.setdefault(attribute_key, []).append(idx)
         if run_cleaning_functions:
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
-                attribute=new_attribute,
+                attribute=attribute,
             )
-
-        attributesList.append(new_attribute)
+            subattributes_list = attribute.get("subattributes") or []
+            for subattribute in subattributes_list:
+                util.cleanRecordAttribute(
+                    processor_attributes=prcoessor_attributes_dictionary,
+                    attribute=subattribute,
+                    subattributeKey=f"{attribute_key}::{subattribute['key']}",
+                )
 
     ## sort attributes and add attributes that weren't found:
     sortedAttributesList = []
@@ -626,7 +464,6 @@ def process_image(
     del record
     del attributesList
     del sortedAttributesList
-    del document_object
     del found_attributes
 
     ## delete local files
@@ -638,16 +475,9 @@ def process_image(
 
 
 def deployProcessor(rg_id, data_manager):
-    ## fetch processor id
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
-
-    RESOURCE_NAME = docai_client.processor_version_path(
-        PROJECT_ID, LOCATION, processor_id, model_id
-    )
-
-    _log.debug(f"attempting to deploy processor model: {model_id}")
+    _log.debug(f"attempting to deploy processor for record group {rg_id}")
     start_time = time.time()
-    deployment = deploy_processor_version(RESOURCE_NAME)
+    deployment = document_ai_api.deploy_processor(rg_id, data_manager)
     if deployment != "DEPLOYED":
         finish_time = time.time()
         _log.error(
@@ -661,14 +491,8 @@ def deployProcessor(rg_id, data_manager):
 
 def undeployProcessor(rg_id, data_manager):
     _log.debug(f"attempting to deploy processor for record group {rg_id}")
-    ## fetch processor id
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
-
-    RESOURCE_NAME = docai_client.processor_version_path(
-        PROJECT_ID, LOCATION, processor_id, model_id
-    )
     start_time = time.time()
-    undeploy_processor_version(RESOURCE_NAME)
+    document_ai_api.undeploy_processor(rg_id, data_manager)
     finish_time = time.time()
     _log.debug(f"took {finish_time-start_time} seconds to undeploy")
     return True
@@ -676,55 +500,7 @@ def undeployProcessor(rg_id, data_manager):
 
 def check_if_processor_is_deployed(rg_id, data_manager):
     try:
-        processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
-
-        opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
-        client = documentai.DocumentProcessorServiceClient(client_options=opts)
-        parent = client.processor_path(PROJECT_ID, LOCATION, processor_id)
-
-        processor_versions = client.list_processor_versions(parent=parent)
-
-        # _log.info(f"processor_versions={processor_versions}")
-        for processor_version in processor_versions:
-            processor_version_id = client.parse_processor_version_path(
-                processor_version.name
-            )["processor_version"]
-            if (
-                processor_version_id == model_id
-            ):  ## processor states: 1=deployed, 2=deploying, 3=undeployed
-                _log.debug(f"processor state == {processor_version.state}")
-                return processor_version.state
-        _log.error(f"unable to find model id: {model_id}")
-        return 10
+        return document_ai_api.check_if_processor_is_deployed(rg_id, data_manager)
     except Exception as e:
         print(f"unable to check processor status: {e}")
         return 10
-
-
-## Google Cloud Storage Functions
-async def async_upload_to_bucket(blob_name, file_obj, folder, bucket_name=BUCKET_NAME):
-    """Upload image file to bucket."""
-
-    async with aiohttp.ClientSession() as session:
-        storage = Storage(service_file=f"{DIRNAME}/creds.json", session=session)
-        status = await storage.upload(bucket_name, f"{folder}/{blob_name}", file_obj)
-        return status["selfLink"]
-
-
-async def upload_to_google_storage(file_path, file_name, folder="uploads"):
-    async with aiofiles.open(file_path, "rb") as afp:
-        f = await afp.read()
-    url = await async_upload_to_bucket(file_name, f, folder=folder)
-    _log.info(f"uploaded document to cloud storage: {url}")
-
-
-def delete_google_storage_directory(rg_id, bucket_name=BUCKET_NAME):
-    _log.info(f"deleting record group {rg_id} from google storage")
-    storage_client = storage.Client.from_service_account_json(
-        f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
-    )
-    bucket = storage_client.get_bucket(bucket_name)
-    blobs = bucket.list_blobs(prefix=f"uploads/{rg_id}")
-    for blob in blobs:
-        _log.info(f"deleting {blob}")
-        blob.delete()
