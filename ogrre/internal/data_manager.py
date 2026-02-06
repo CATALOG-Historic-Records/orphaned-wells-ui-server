@@ -16,6 +16,7 @@ import ogrre.internal.util as util
 from ogrre.internal.util import time_it
 
 _log = logging.getLogger(__name__)
+REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
 
 COLLABORATORS = ["isgs", "calgem", "osage"]
 
@@ -28,7 +29,7 @@ DEFAULT_PROCESSORS = [
     },
 ]
 
-USE_DB_PROCESSORS = True
+USE_DB_PROCESSORS = False
 
 
 class DataManager:
@@ -363,6 +364,8 @@ class DataManager:
             return e
 
     def hasPermission(self, email, permission):
+        if not REQUIRE_AUTH:
+            return True
         user_doc = self.getUser(email)
         user_permissions = self.getUserPermissions(user_doc)
         if permission in user_permissions:
@@ -513,9 +516,15 @@ class DataManager:
 
     @time_it
     def fetchProjects(self, user):
-        user_projects = self.getUserProjectList(user)
         projects = []
-        cursor = self.db.projects.find({"_id": {"$in": user_projects}})
+        if user.get("anonymous", False):
+            _log.info(f"getting all projects for anonymous user")
+            cursor = self.db.projects.find({})
+        else:
+            _log.info(f"user is not anonymous")
+            user_email = user.get("email", None)
+            user_projects = self.getUserProjectList(user_email)
+            cursor = self.db.projects.find({"_id": {"$in": user_projects}})
         for document in cursor:
             document["_id"] = str(document["_id"])
             projects.append(document)
@@ -783,7 +792,7 @@ class DataManager:
         # projectId = document.get("project_id", "")
         # project_id = ObjectId(projectId)
 
-        user_record_groups = self.getUserRecordGroups(user)
+        user_record_groups = self.getUserRecordGroups(user_info)
         if not rg_id in user_record_groups:
             return None, None
 
