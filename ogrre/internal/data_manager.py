@@ -900,6 +900,12 @@ class DataManager:
         document = cursor.next()
         return document.get("record_notes", [])
 
+    def fetchRecordHistory(self, record_id, user_info):
+        history_cursor = self.db.history.find(
+            {"record_id": record_id}, {"_id": 0}
+        ).sort("timestamp", DESCENDING)
+        return list(history_cursor)
+
     @time_it
     def getRecordIndexes(self, document, filterBy, sortBy):
         target_id = (
