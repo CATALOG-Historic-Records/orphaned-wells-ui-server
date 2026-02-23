@@ -446,6 +446,25 @@ async def get_record_notes(record_id: str, user_info: dict = Depends(authenticat
     return record_notes
 
 
+@router.get("/get_record_history/{record_id}")
+async def get_record_history(record_id: str, user_info: dict = Depends(authenticate)):
+    """Fetch record history.
+
+    Args:
+        record_id: Record identifier
+
+    Returns:
+        List containing record history
+    """
+    record_history = data_manager.fetchRecordHistory(record_id, user_info)
+    if record_history is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
+        )
+    return record_history
+
+
 @router.get("/get_processor_data/{google_id}", response_model=dict)
 async def get_processor_data(google_id: str, user_info: dict = Depends(authenticate)):
     """Fetch processor data for provided id.
@@ -1121,7 +1140,7 @@ async def run_cleaning_functions(
             detail=f"You are not authorized to run cleaning functions. Please contact a team lead or project manager.",
         )
 
-    data_manager.cleanCollection(location, _id)
+    data_manager.cleanCollection(location, _id, user_info)
 
     return _id
 
