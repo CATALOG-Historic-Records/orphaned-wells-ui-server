@@ -6,7 +6,7 @@ import json
 import re
 
 from bson import ObjectId
-from pymongo import ASCENDING, DESCENDING, UpdateOne
+from pymongo import ASCENDING, DESCENDING, InsertOne, UpdateOne
 
 import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
 from ogrre.internal.mongodb_connection import connectToDatabase
@@ -29,7 +29,11 @@ DEFAULT_PROCESSORS = [
     },
 ]
 
-USE_DB_PROCESSORS = False
+USE_DB_PROCESSORS = os.getenv("USE_DB_PROCESSORS", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 class DataManager:
@@ -868,7 +872,7 @@ class DataManager:
 
             if update_db and background_tasks:
                 ## after sorting, update the record list so frontend and backend are in sync
-                ## this shouldnt always be necessary, but for now do it every time
+                ## only persist when the stored list differs from the sorted result
                 background_tasks.add_task(
                     self.updateRecord,
                     record_id=document["_id"],
@@ -899,6 +903,12 @@ class DataManager:
         cursor = self.db.records.find({"_id": _id})
         document = cursor.next()
         return document.get("record_notes", [])
+
+    def fetchRecordHistory(self, record_id, user_info):
+        history_cursor = self.db.history.find(
+            {"record_id": record_id}, {"_id": 0}
+        ).sort("timestamp", DESCENDING)
+        return list(history_cursor)
 
     @time_it
     def getRecordIndexes(self, document, filterBy, sortBy):
@@ -941,6 +951,8 @@ class DataManager:
                 processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
             model_id = processor_document.get("Model ID", None)
+            if model_id is None:
+                model_id = processor_document.get("modelId", None)
             return google_id, model_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor: {e}")
@@ -1093,6 +1105,7 @@ class DataManager:
         notes=None,
         calling_function=None,
     ):
+        # _log.info(f"new_data: {new_data}")
         attained_lock = False
         user = None
         if user_info is None and not forceUpdate:
@@ -1132,14 +1145,19 @@ class DataManager:
                     v = new_data.get("v", None)
                     reviewStatus = new_data.get("review_status", None)
                     subIndex = new_data.get("subIndex", None)
+                    ## update can be in the form of 'attributesList.[idx]?.subattributes?.[subidx]
                     if not is_subattribute:
+                        attr_key = f"attributesList.{idx}"
                         data_update = {
-                            f"attributesList.{idx}": v,
+                            attr_key: v,
                         }
+                        update_key_parts = attr_key.split(".")
                     else:
+                        attr_key = f"attributesList.{idx}.subattributes.{subIndex}"
                         data_update = {
-                            f"attributesList.{idx}.subattributes.{subIndex}": v,
+                            attr_key: v,
                         }
+                        update_key_parts = attr_key.split(".")
                     if reviewStatus == "unreviewed":
                         data_update["review_status"] = "incomplete"
 
@@ -1176,7 +1194,14 @@ class DataManager:
                     ).next()
                     previous_state = {}
                     for each in data_update:
-                        previous_state[each] = record_doc.get(each, None)
+                        if "attributesList." in each:
+                            next_prev = util.getPreviousAttributeOrSubattributeValue(
+                                update_key_parts, record_doc
+                            )
+                            previous_state[each] = next_prev
+                            # _log.info(f"next_prev: {next_prev}")
+                        else:
+                            previous_state[each] = record_doc.get(each, None)
                 except Exception as e:
                     _log.info(f"unable to get record's previous state: {e}")
                     previous_state = None
@@ -1671,6 +1696,30 @@ class DataManager:
         except Exception as e:
             _log.error(f"unable to record history item: {e}")
 
+    def recordHistoryBulk(self, updates):
+        if not updates:
+            return
+        try:
+            ts = time.time()
+            history_ops = []
+            for update in updates:
+                history_item = {
+                    "action": update.get("action"),
+                    "user": update.get("user"),
+                    "project_id": update.get("project_id"),
+                    "record_group_id": update.get("record_group_id"),
+                    "record_id": update.get("record_id"),
+                    "notes": update.get("notes"),
+                    "query": update.get("query"),
+                    "previous_state": update.get("previous_state"),
+                    "calling_function": update.get("calling_function"),
+                    "timestamp": update.get("timestamp", ts),
+                }
+                history_ops.append(InsertOne(history_item))
+            self.db.history.bulk_write(history_ops, ordered=False)
+        except Exception as e:
+            _log.error(f"unable to record bulk history items: {e}")
+
     def cleanAttribute(self, attribute, record_id=None, rg_id=None):
         if record_id is None and rg_id is None:
             return None
@@ -1698,7 +1747,7 @@ class DataManager:
                 processor_attributes=processor_attributes, attribute=attribute
             )
 
-    def cleanCollection(self, location, _id):
+    def cleanCollection(self, location, _id, user_info):
         documents = []
         try:
             if location == "record":
@@ -1725,12 +1774,24 @@ class DataManager:
                 processor_attributes=processor_attributes, documents=documents
             )
             update_ops = []
+            history_ops = []
             for document in documents:
                 update_ops.append(
                     UpdateOne({"_id": document["_id"]}, {"$set": document})
                 )
+
+                history_item = {
+                    "user": user_info.get("email", None),
+                    "action": "cleanRecord",
+                    "record_id": str(document["_id"]),
+                }
+                if location == "record_group":
+                    history_item["record_group_id"] = _id
+                history_ops.append(history_item)
             _log.info(f"updateOps length {len(update_ops)}")
-            self.db.records.bulk_write(update_ops)
+            if update_ops:
+                self.db.records.bulk_write(update_ops)
+            self.recordHistoryBulk(history_ops)
         except Exception as e:
             _log.error(f"error on cleaning {location}: {e}")
 

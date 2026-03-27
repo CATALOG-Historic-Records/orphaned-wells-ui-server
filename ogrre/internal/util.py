@@ -47,15 +47,13 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     if processor is None:
         _log.info(f"no processor found")
         return attributes, False
+    if attributes is None:
+        attributes = []
     processor_attributes = processor.get("attributes", None)
     if processor_attributes is None or len(processor_attributes) == 0:
         _log.info(f"no processor attributes found")
         return attributes, False
     processor_attributes.sort(key=lambda x: x.get("page_order_sort", float("inf")))
-
-    ## we want to make sure that the frontend and backend are always in sync.
-    ## for now, update the db with this sorted list every time before returning
-    requires_db_update = len(processor_attributes) > 0
 
     ## match record attribute to each processor attribute
     sorted_attributes = []
@@ -77,7 +75,6 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
                 )
                 new_attr = createNewAttribute(key=attribute_name)
                 sorted_attributes.append(new_attr)
-                requires_db_update = True
 
     obsolete_fields_amt = 0
     ## obsolete fields will get removed automatically.
@@ -97,6 +94,8 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     _log.info(f"found {obsolete_fields_amt} obsolete fields.")
     if obsolete_fields_amt >= 10:
         _log.info(f"many obsolete fields found, this is probably a mistake.")
+    ## only persist when the stored list is actually different from the sorted list
+    requires_db_update = sorted_attributes != attributes
     return sorted_attributes, requires_db_update
 
 
@@ -977,3 +976,23 @@ def generate_record_group_stats(rg_ids):
     ]
 
     return pipeline
+
+
+def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
+    _log.info(f"getPreviousAttributeOrSubattributeValue")
+    try:
+        curr = record_doc
+        for each in key_parts:
+            if isinstance(each, str) and each.isdigit():
+                _log.info(f"found int: {each}")
+                each = int(each)
+                _log.info(f"-> {each}")
+            val = curr[each]
+            curr = val
+            if each != "attributesList":
+                _log.info(f"val: {val}")
+
+        return val
+    except Exception as e:
+        _log.info(f"exception: {e}")
+        return None
