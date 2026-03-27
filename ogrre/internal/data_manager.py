@@ -244,6 +244,40 @@ class DataManager:
         # self.createProcessorsList()
         return "success"
 
+    def updateProcessorAttribute(self, processor_name, field_name, updates, user_info):
+        user = user_info.get("email")
+        query = {"name": processor_name, "attributes.name": field_name}
+        set_updates = {"lastUpdated": time.time()}
+        unset_updates = {}
+
+        for key, value in updates.items():
+            attr_key = f"attributes.$.{key}"
+            if value is None or value == "":
+                unset_updates[attr_key] = ""
+            else:
+                set_updates[attr_key] = value
+
+        db_update = {"$set": set_updates}
+        if unset_updates:
+            db_update["$unset"] = unset_updates
+
+        result = self.db.processors.update_one(query, db_update)
+        if result.matched_count == 0:
+            raise ValueError(
+                f"processor field not found for processor '{processor_name}' and field '{field_name}'"
+            )
+
+        self.recordHistory(
+            user=user,
+            action="updateProcessorAttribute",
+            query={
+                "processor_name": processor_name,
+                "field_name": field_name,
+                "updates": updates,
+            },
+        )
+        return "success"
+
     ## user functions
     def getUser(self, email):
         cursor = self.db.users.find({"email": email})

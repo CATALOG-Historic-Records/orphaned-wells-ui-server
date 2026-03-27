@@ -1241,6 +1241,17 @@ async def get_schema(user_info: dict = Depends(authenticate)):
     return data_manager.getSchema(user_info)
 
 
+@router.get("/get_cleaning_functions")
+async def get_cleaning_functions(user_info: dict = Depends(authenticate)):
+    """Get available cleaning function names."""
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
+        )
+    return {"cleaning_functions": list(util.CLEANING_FUNCTIONS.keys())}
+
+
 @router.post("/upload_processor_schema")
 async def upload_processor_schema(
     name: str = None,
@@ -1352,6 +1363,52 @@ async def update_processor(request: Request, user_info: dict = Depends(authentic
     }
 
     return data_manager.updateProcessor(new_schema_data, user_info)
+
+
+@router.post("/update_processor_attribute")
+async def update_processor_attribute(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    """Update a processor schema attribute field."""
+    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+    processor_name = req.get("processor_name")
+    field_name = req.get("field_name")
+    updates = req.get("updates")
+
+    if (
+        not processor_name
+        or not field_name
+        or not isinstance(updates, dict)
+        or not updates
+    ):
+        raise HTTPException(
+            400,
+            detail="Please provide processor_name, field_name, and a non-empty updates object in the request body.",
+        )
+
+    allowed_update_fields = {"cleaning_function"}
+    invalid_fields = set(updates.keys()) - allowed_update_fields
+    if invalid_fields:
+        raise HTTPException(
+            400,
+            detail=f"Unsupported processor attribute update fields: {sorted(invalid_fields)}",
+        )
+
+    try:
+        return data_manager.updateProcessorAttribute(
+            processor_name=processor_name,
+            field_name=field_name,
+            updates=updates,
+            user_info=user_info,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/update_default_team")
