@@ -872,7 +872,7 @@ class DataManager:
 
             if update_db and background_tasks:
                 ## after sorting, update the record list so frontend and backend are in sync
-                ## this shouldnt always be necessary, but for now do it every time
+                ## only persist when the stored list differs from the sorted result
                 background_tasks.add_task(
                     self.updateRecord,
                     record_id=document["_id"],
@@ -1105,6 +1105,7 @@ class DataManager:
         notes=None,
         calling_function=None,
     ):
+        # _log.info(f"new_data: {new_data}")
         attained_lock = False
         user = None
         if user_info is None and not forceUpdate:
@@ -1144,14 +1145,19 @@ class DataManager:
                     v = new_data.get("v", None)
                     reviewStatus = new_data.get("review_status", None)
                     subIndex = new_data.get("subIndex", None)
+                    ## update can be in the form of 'attributesList.[idx]?.subattributes?.[subidx]
                     if not is_subattribute:
+                        attr_key = f"attributesList.{idx}"
                         data_update = {
-                            f"attributesList.{idx}": v,
+                            attr_key: v,
                         }
+                        update_key_parts = attr_key.split(".")
                     else:
+                        attr_key = f"attributesList.{idx}.subattributes.{subIndex}"
                         data_update = {
-                            f"attributesList.{idx}.subattributes.{subIndex}": v,
+                            attr_key: v,
                         }
+                        update_key_parts = attr_key.split(".")
                     if reviewStatus == "unreviewed":
                         data_update["review_status"] = "incomplete"
 
@@ -1188,7 +1194,14 @@ class DataManager:
                     ).next()
                     previous_state = {}
                     for each in data_update:
-                        previous_state[each] = record_doc.get(each, None)
+                        if "attributesList." in each:
+                            next_prev = util.getPreviousAttributeOrSubattributeValue(
+                                update_key_parts, record_doc
+                            )
+                            previous_state[each] = next_prev
+                            # _log.info(f"next_prev: {next_prev}")
+                        else:
+                            previous_state[each] = record_doc.get(each, None)
                 except Exception as e:
                     _log.info(f"unable to get record's previous state: {e}")
                     previous_state = None
