@@ -1392,7 +1392,14 @@ async def update_processor_attribute(
             detail="Please provide processor_name, field_name, and a non-empty updates object in the request body.",
         )
 
-    allowed_update_fields = {"cleaning_function"}
+    allowed_update_fields = {
+        "name",
+        "alias",
+        "cleaning_function",
+        "data_type",
+        "database_data_type",
+        "page_order_sort",
+    }
     invalid_fields = set(updates.keys()) - allowed_update_fields
     if invalid_fields:
         raise HTTPException(
