@@ -979,7 +979,6 @@ def generate_record_group_stats(rg_ids):
 
 
 def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
-    _log.info(f"getPreviousAttributeOrSubattributeValue")
     try:
         curr = record_doc
         for each in key_parts:
@@ -989,9 +988,6 @@ def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
                 _log.info(f"-> {each}")
             val = curr[each]
             curr = val
-            if each != "attributesList":
-                _log.info(f"val: {val}")
-
         return val
     except Exception as e:
         _log.info(f"exception: {e}")

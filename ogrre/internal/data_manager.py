@@ -244,6 +244,108 @@ class DataManager:
         # self.createProcessorsList()
         return "success"
 
+    def updateProcessorAttribute(
+        self, processor_name, field_name, updates, user_info, operation="update"
+    ):
+        user = user_info.get("email")
+        processor_query = {"name": processor_name}
+        processor = self.db.processors.find_one(processor_query)
+        if processor is None:
+            raise ValueError(f"processor '{processor_name}' not found")
+
+        if operation == "add":
+            new_field_name = updates.get("name") or field_name
+            if not new_field_name:
+                raise ValueError(
+                    "new processor field name is required for add operation"
+                )
+            if not updates.get("data_type"):
+                raise ValueError("data_type is required for add operation")
+            if not updates.get("database_data_type"):
+                raise ValueError("database_data_type is required for add operation")
+
+            existing_attribute = next(
+                (
+                    attribute
+                    for attribute in processor.get("attributes", [])
+                    if attribute.get("name") == new_field_name
+                ),
+                None,
+            )
+            if existing_attribute is not None:
+                raise ValueError(
+                    f"processor field '{new_field_name}' already exists for processor '{processor_name}'"
+                )
+
+            new_attribute = {
+                key: value
+                for key, value in updates.items()
+                if value is not None and value != ""
+            }
+            new_attribute["name"] = new_field_name
+
+            result = self.db.processors.update_one(
+                processor_query,
+                {
+                    "$push": {"attributes": new_attribute},
+                    "$set": {"lastUpdated": time.time()},
+                },
+            )
+            if result.matched_count == 0:
+                raise ValueError(f"processor '{processor_name}' not found")
+
+        elif operation == "delete":
+            if not field_name:
+                raise ValueError("field_name is required for delete operation")
+
+            result = self.db.processors.update_one(
+                processor_query,
+                {
+                    "$pull": {"attributes": {"name": field_name}},
+                    "$set": {"lastUpdated": time.time()},
+                },
+            )
+            if result.matched_count == 0:
+                raise ValueError(f"processor '{processor_name}' not found")
+            if result.modified_count == 0:
+                raise ValueError(
+                    f"processor field not found for processor '{processor_name}' and field '{field_name}'"
+                )
+
+        else:
+            query = {"name": processor_name, "attributes.name": field_name}
+            set_updates = {"lastUpdated": time.time()}
+            unset_updates = {}
+
+            for key, value in updates.items():
+                attr_key = f"attributes.$.{key}"
+                if value is None or value == "":
+                    unset_updates[attr_key] = ""
+                else:
+                    set_updates[attr_key] = value
+
+            db_update = {"$set": set_updates}
+            if unset_updates:
+                db_update["$unset"] = unset_updates
+
+            result = self.db.processors.update_one(query, db_update)
+            if result.matched_count == 0:
+                raise ValueError(
+                    f"processor field not found for processor '{processor_name}' and field '{field_name}'"
+                )
+
+        self.recordHistory(
+            user=user,
+            action="updateProcessorAttribute",
+            query={
+                "processor_name": processor_name,
+                "field_name": field_name,
+                "updates": updates,
+                "operation": operation,
+            },
+        )
+        return "success"
+
     ## user functions
     def getUser(self, email):
         cursor = self.db.users.find({"email": email})
