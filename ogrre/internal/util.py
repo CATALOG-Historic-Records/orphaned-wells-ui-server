@@ -6,6 +6,7 @@ import functools
 import zipstream
 import csv
 import json
+import copy
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
 from ogrre.internal import storage_api
@@ -96,6 +97,7 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
         _log.info(f"many obsolete fields found, this is probably a mistake.")
     ## only persist when the stored list is actually different from the sorted list
     requires_db_update = sorted_attributes != attributes
+    _log.info(f"sorted attributes. requires_db_update: {requires_db_update}")
     return sorted_attributes, requires_db_update
 
 
@@ -424,25 +426,71 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
 
 
 def cleanRecords(processor_attributes, documents):
+    # We want to track the before and after values of each cleaned attribute, subattribute
+    # To do so, we really only need attr[key] and attr[value] (same with subattributes)
+    # for record history
+    attributes_list_before_and_after = {}
+
     for doc in documents:
         attributes_list = doc["attributesList"]
+        current_attributes_list_before_and_after = {
+            "attributesList_before": [],
+            "attributesList_after": [],
+        }
         for attr in attributes_list:
+            attribute_before_cleaning = {
+                "key": attr.get("key"),
+                "value": attr.get("value"),
+            }
             cleanRecordAttribute(
                 processor_attributes=processor_attributes, attribute=attr
             )
+            attribute_after_cleaning = {
+                "key": attr.get("key"),
+                "value": attr.get("value"),
+            }
             subattributes = attr.get("subattributes", False)
             if subattributes:
+                attribute_before_cleaning["subattributes"] = []
+                attribute_after_cleaning["subattributes"] = []
                 for subattr in subattributes:
                     parentAttribute = subattr.get("topLevelAttribute", "")
                     subattributeKey = subattr["key"]
                     subattribute_identifier = f"{parentAttribute}::{subattributeKey}"
+                    subattribute_before_cleaning = {
+                        "key": subattr.get("key"),
+                        "value": subattr.get("value"),
+                        "subattribute_identifier": subattribute_identifier,
+                    }
                     cleanRecordAttribute(
                         processor_attributes=processor_attributes,
                         attribute=subattr,
                         subattributeKey=subattribute_identifier,
                     )
+                    subattribute_after_cleaning = {
+                        "key": subattr.get("key"),
+                        "value": subattr.get("value"),
+                        "subattribute_identifier": subattribute_identifier,
+                    }
+                    attribute_before_cleaning["subattributes"].append(
+                        subattribute_before_cleaning
+                    )
+                    attribute_after_cleaning["subattributes"].append(
+                        subattribute_after_cleaning
+                    )
 
-    return documents
+            current_attributes_list_before_and_after["attributesList_before"].append(
+                attribute_before_cleaning
+            )
+            current_attributes_list_before_and_after["attributesList_after"].append(
+                attribute_after_cleaning
+            )
+        # current_attributes_list_before_and_after["attributesList_after"] = copy.deepcopy(attributes_list)
+        attributes_list_before_and_after[
+            str(doc.get("_id"))
+        ] = current_attributes_list_before_and_after
+
+    return attributes_list_before_and_after
 
 
 def createNewAttribute(
@@ -979,7 +1027,6 @@ def generate_record_group_stats(rg_ids):
 
 
 def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
-    _log.info(f"getPreviousAttributeOrSubattributeValue")
     try:
         curr = record_doc
         for each in key_parts:
@@ -989,9 +1036,6 @@ def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
                 _log.info(f"-> {each}")
             val = curr[each]
             curr = val
-            if each != "attributesList":
-                _log.info(f"val: {val}")
-
         return val
     except Exception as e:
         _log.info(f"exception: {e}")

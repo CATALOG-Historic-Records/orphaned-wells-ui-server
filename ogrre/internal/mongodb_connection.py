@@ -13,12 +13,17 @@ ca = certifi.where()
 
 
 def connectToDatabase():
-    username = urllib.parse.quote_plus(DB_USERNAME)
-    password = urllib.parse.quote_plus(DB_PASSWORD)
-    db_connection = urllib.parse.quote_plus(DB_CONNECTION)
-
-    uri = f"mongodb+srv://{username}:{password}@{db_connection}.mongodb.net/?retryWrites=true&w=majority"
-    client = MongoClient(uri, server_api=ServerApi("1"), tlsCAFile=ca)
+    if DB_CONNECTION.startswith("mongodb://") or DB_CONNECTION.startswith(
+        "mongodb+srv://"
+    ):
+        uri = DB_CONNECTION
+        client = MongoClient(uri, server_api=ServerApi("1"))
+    else:
+        username = urllib.parse.quote_plus(DB_USERNAME)
+        password = urllib.parse.quote_plus(DB_PASSWORD)
+        db_connection = urllib.parse.quote_plus(DB_CONNECTION)
+        uri = f"mongodb+srv://{username}:{password}@{db_connection}.mongodb.net/?retryWrites=true&w=majority"
+        client = MongoClient(uri, server_api=ServerApi("1"), tlsCAFile=ca)
     # Send a ping to confirm a successful connection
     try:
         client.admin.command("ping")
