@@ -1658,6 +1658,39 @@ class DataManager:
         record_doc = self.db.records.find(search_query).next()
         return record_doc.get("record_notes", [])
 
+    def create_record_group_processor_attribute_map(self):
+        try:
+            cursor = self.db.record_groups.find(
+                {},
+                {
+                    "_id": 1,
+                    "processorId": 1,
+                },
+            )
+            rg_processor_attribute_map = {}
+            for rg in cursor:
+                rg_id = str(rg["_id"])
+                google_id = str(rg.get("processorId"))
+                if not google_id:
+                    rg_processor_attribute_map[rg_id] = {}
+                    continue
+
+                processor_document = self.getProcessorById(google_id)
+                if not processor_document:
+                    print("processor lookup returned no document for ")
+                    rg_processor_attribute_map[rg_id] = {}
+                    continue
+
+                processor_attributes = processor_document.get("attributes", None) or []
+                rg_processor_attribute_map[
+                    rg_id
+                ] = util.convert_processor_attributes_to_dict(processor_attributes)
+            # _log.info(f"rg_processor_attribute_map: {rg_processor_attribute_map}")
+            return rg_processor_attribute_map
+        except Exception as e:
+            _log.error(f"failed: {e}")
+            return {}
+
     def resetRecord(self, record_id, record_data, user):
         # print(f"resetting record: {record_id}")
         record_attributes = record_data["attributesList"]
@@ -1856,6 +1889,7 @@ class DataManager:
         request_origin="",
     ):
         user = user_info.get("email", None)
+        rg_attribute_map = self.create_record_group_processor_attribute_map()
         ## TODO: check if user is a part of the team who owns this project
         today = time.time()
         output_dir = self.app_settings.export_dir
@@ -1868,28 +1902,35 @@ class DataManager:
         record_attributes = []
         if exportType == "csv":
             for document in records:
+                record_group_id = document["record_group_id"]
                 document_id = str(document["_id"])
                 try:
                     current_attributes = set()
+                    current_parent_attributes = set()
                     record_attribute = {}
                     for document_attribute in document.get("attributesList", []):
                         attribute_name = document_attribute["key"].replace(" ", "")
                         if attribute_name in selectedColumns or keep_all_columns:
+                            field_schema = rg_attribute_map.get(
+                                record_group_id, {}
+                            ).get(attribute_name)
+                            database_type = field_schema.get("database_data_type")
+                            if str(database_type).lower() == "table":
+                                isParent = True
+                            else:
+                                isParent = False
                             original_attribute_name = attribute_name
                             i = 2
-                            while attribute_name in current_attributes:
+                            while (
+                                attribute_name in current_attributes
+                                or attribute_name in current_parent_attributes
+                            ):
                                 ## add a number to the end of the attribute so it (and its subattributes)
                                 ## is differentiable from other instances of the attribute
                                 attribute_name = f"{original_attribute_name}_{i}"
                                 i += 1
-                            current_attributes.add(attribute_name)
-                            if attribute_name not in attributes:
-                                attributes.append(attribute_name)
-                            record_attribute[attribute_name] = document_attribute[
-                                "value"
-                            ]
-                            ## add subattributes
                             if document_attribute.get("subattributes", None):
+                                current_parent_attributes.add(attribute_name)
                                 for document_subattribute in document_attribute[
                                     "subattributes"
                                 ]:
@@ -1899,6 +1940,14 @@ class DataManager:
                                     ] = document_subattribute["value"]
                                     if subattribute_name not in subattributes:
                                         subattributes.append(subattribute_name)
+                            elif not isParent:
+                                current_attributes.add(attribute_name)
+                                if attribute_name not in attributes:
+                                    attributes.append(attribute_name)
+                                record_attribute[attribute_name] = document_attribute[
+                                    "value"
+                                ]
+
                     record_attribute["file"] = document.get("filename", "")
                     record_attribute["URL"] = f"{request_origin}/record/{document_id}"
                     record_attributes.append(record_attribute)
