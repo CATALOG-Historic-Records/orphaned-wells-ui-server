@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import aiofiles
 import aiohttp
@@ -19,6 +20,9 @@ STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "google").lower()
 LOCAL_STORAGE_ROOT = os.path.expanduser(
     os.getenv("LOCAL_STORAGE_ROOT", "~/.ogrre/uploads")
 )
+LOCAL_STORAGE_URL_BASE = os.getenv(
+    "LOCAL_STORAGE_URL_BASE", "http://localhost:8001/local-storage"
+).rstrip("/")
 
 
 def _storage_path(key):
@@ -108,7 +112,7 @@ def delete_directory(prefix, bucket_name=BUCKET_NAME):
 
 def get_file_url(key, bucket_name=BUCKET_NAME):
     if _is_local():
-        return _storage_path(key)
+        return f"{LOCAL_STORAGE_URL_BASE}/{quote(key, safe='/')}"
 
     _, bucket = _get_bucket(bucket_name=bucket_name)
     blob = bucket.blob(f"{key}")

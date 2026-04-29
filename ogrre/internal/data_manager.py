@@ -19,6 +19,12 @@ _log = logging.getLogger(__name__)
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
 
 COLLABORATORS = ["isgs", "calgem", "osage"]
+DEFAULT_UNAUTHENTICATED_TEAM = {
+    "name": "default",
+    "display_name": "Default",
+    "users": ["anonymous"],
+    "project_list": [],
+}
 
 DEFAULT_PROCESSORS = [
     {
@@ -54,7 +60,27 @@ class DataManager:
         self.lock_duration = 120
         self.using_default_processor = False
         self.use_airtable = False
+        self.ensureDefaultUnauthenticatedTeam()
         self.createProcessorsList()
+
+    def ensureDefaultUnauthenticatedTeam(self):
+        if REQUIRE_AUTH:
+            return
+
+        query = {"name": DEFAULT_UNAUTHENTICATED_TEAM["name"]}
+        update = {"$setOnInsert": DEFAULT_UNAUTHENTICATED_TEAM.copy()}
+        result = self.db.teams.update_one(query, update, upsert=True)
+        if result.upserted_id:
+            _log.info("created default unauthenticated team")
+
+    def getDefaultTeamForUser(self, email):
+        if not REQUIRE_AUTH and email == "anonymous":
+            return DEFAULT_UNAUTHENTICATED_TEAM["name"]
+
+        user_document = self.getDocument("users", ({"email": email}))
+        if user_document is None:
+            return None
+        return user_document.get("default_team", None)
 
     def getMongoProcessorByID(self, google_id):
         projection = {"_id": 0}
@@ -571,10 +597,10 @@ class DataManager:
         return projects
 
     def getUserProjectList(self, user):
-        user_query = {"email": user}
-        user_cursor = self.db.users.find(user_query)
-        user_document = user_cursor.next()
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user)
+        if default_team is None:
+            _log.info(f"user {user} has no default team")
+            return []
         return self.getTeamProjectList(default_team)
 
     @time_it
@@ -591,16 +617,24 @@ class DataManager:
         return stats
 
     def fetchTeamInfo(self, email):
-        user_doc = self.db.users.find({"email": email}).next()
-        team_name = user_doc["default_team"]
-        team_doc = self.db.teams.find({"name": team_name}).next()
+        team_name = self.getDefaultTeamForUser(email)
+        if team_name is None:
+            _log.error(f"unable to find default team for user {email}")
+            return None
+
+        team_doc = self.getDocument("teams", {"name": team_name})
+        if team_doc is None:
+            _log.error(f"unable to find team {team_name}")
+            return None
+
         if "projects" in team_doc:
             del team_doc["projects"]
         ## convert object ids to strings
         team_doc["_id"] = str(team_doc["_id"])
-        for i in range(len(team_doc["project_list"])):
-            project_object_id = team_doc["project_list"][i]
-            team_doc["project_list"][i] = str(project_object_id)
+        team_doc["project_list"] = [
+            str(project_object_id)
+            for project_object_id in team_doc.get("project_list", [])
+        ]
         return team_doc
 
     def fetchTeams(self, user_info):
@@ -623,14 +657,16 @@ class DataManager:
     @time_it
     def fetchProjects(self, user):
         projects = []
-        if user.get("anonymous", False):
-            _log.info(f"getting all projects for anonymous user")
-            cursor = self.db.projects.find({})
+        if user.get("anonymous", False) and not REQUIRE_AUTH:
+            _log.info(f"getting projects for anonymous user - default team")
+            user_projects = self.getTeamProjectList(
+                DEFAULT_UNAUTHENTICATED_TEAM["name"]
+            )
         else:
             _log.info(f"user is not anonymous")
             user_email = user.get("email", None)
             user_projects = self.getUserProjectList(user_email)
-            cursor = self.db.projects.find({"_id": {"$in": user_projects}})
+        cursor = self.db.projects.find({"_id": {"$in": user_projects}})
         for document in cursor:
             document["_id"] = str(document["_id"])
             projects.append(document)
@@ -1096,8 +1132,7 @@ class DataManager:
     def createProject(self, project_info, user_info):
         ## get user's default team
         user_email = user_info.get("email", "")
-        user_document = self.getDocument("users", ({"email": user_email}))
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user_email)
         if default_team is None:
             _log.info(f"user {user_email} has no default team")
             return False
@@ -1130,8 +1165,7 @@ class DataManager:
     def createRecordGroup(self, rg_info, user_info):
         ## get user's default team
         user_email = user_info.get("email", "")
-        user_document = self.getDocument("users", ({"email": user_email}))
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user_email)
         if default_team is None:
             _log.info(f"user {user_email} has no default team")
             return False
@@ -1658,6 +1692,39 @@ class DataManager:
         record_doc = self.db.records.find(search_query).next()
         return record_doc.get("record_notes", [])
 
+    def create_record_group_processor_attribute_map(self):
+        try:
+            cursor = self.db.record_groups.find(
+                {},
+                {
+                    "_id": 1,
+                    "processorId": 1,
+                },
+            )
+            rg_processor_attribute_map = {}
+            for rg in cursor:
+                rg_id = str(rg["_id"])
+                google_id = str(rg.get("processorId"))
+                if not google_id:
+                    rg_processor_attribute_map[rg_id] = {}
+                    continue
+
+                processor_document = self.getProcessorById(google_id)
+                if not processor_document:
+                    print("processor lookup returned no document for ")
+                    rg_processor_attribute_map[rg_id] = {}
+                    continue
+
+                processor_attributes = processor_document.get("attributes", None) or []
+                rg_processor_attribute_map[
+                    rg_id
+                ] = util.convert_processor_attributes_to_dict(processor_attributes)
+            # _log.info(f"rg_processor_attribute_map: {rg_processor_attribute_map}")
+            return rg_processor_attribute_map
+        except Exception as e:
+            _log.error(f"failed: {e}")
+            return {}
+
     def resetRecord(self, record_id, record_data, user):
         # print(f"resetting record: {record_id}")
         record_attributes = record_data["attributesList"]
@@ -1856,6 +1923,7 @@ class DataManager:
         request_origin="",
     ):
         user = user_info.get("email", None)
+        rg_attribute_map = self.create_record_group_processor_attribute_map()
         ## TODO: check if user is a part of the team who owns this project
         today = time.time()
         output_dir = self.app_settings.export_dir
@@ -1868,28 +1936,35 @@ class DataManager:
         record_attributes = []
         if exportType == "csv":
             for document in records:
+                record_group_id = document["record_group_id"]
                 document_id = str(document["_id"])
                 try:
                     current_attributes = set()
+                    current_parent_attributes = set()
                     record_attribute = {}
                     for document_attribute in document.get("attributesList", []):
                         attribute_name = document_attribute["key"].replace(" ", "")
                         if attribute_name in selectedColumns or keep_all_columns:
+                            field_schema = rg_attribute_map.get(
+                                record_group_id, {}
+                            ).get(attribute_name)
+                            database_type = field_schema.get("database_data_type")
+                            if str(database_type).lower() == "table":
+                                isParent = True
+                            else:
+                                isParent = False
                             original_attribute_name = attribute_name
                             i = 2
-                            while attribute_name in current_attributes:
+                            while (
+                                attribute_name in current_attributes
+                                or attribute_name in current_parent_attributes
+                            ):
                                 ## add a number to the end of the attribute so it (and its subattributes)
                                 ## is differentiable from other instances of the attribute
                                 attribute_name = f"{original_attribute_name}_{i}"
                                 i += 1
-                            current_attributes.add(attribute_name)
-                            if attribute_name not in attributes:
-                                attributes.append(attribute_name)
-                            record_attribute[attribute_name] = document_attribute[
-                                "value"
-                            ]
-                            ## add subattributes
                             if document_attribute.get("subattributes", None):
+                                current_parent_attributes.add(attribute_name)
                                 for document_subattribute in document_attribute[
                                     "subattributes"
                                 ]:
@@ -1899,6 +1974,14 @@ class DataManager:
                                     ] = document_subattribute["value"]
                                     if subattribute_name not in subattributes:
                                         subattributes.append(subattribute_name)
+                            elif not isParent:
+                                current_attributes.add(attribute_name)
+                                if attribute_name not in attributes:
+                                    attributes.append(attribute_name)
+                                record_attribute[attribute_name] = document_attribute[
+                                    "value"
+                                ]
+
                     record_attribute["file"] = document.get("filename", "")
                     record_attribute["URL"] = f"{request_origin}/record/{document_id}"
                     record_attributes.append(record_attribute)

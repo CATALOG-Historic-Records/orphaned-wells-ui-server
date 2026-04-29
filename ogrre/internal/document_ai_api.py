@@ -7,11 +7,6 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 import requests
 
-from ogrre.internal.google_processor_manager import (
-    deploy_processor_version,
-    undeploy_processor_version,
-)
-
 _log = logging.getLogger(__name__)
 
 LOCATION = os.getenv("LOCATION")
@@ -22,15 +17,21 @@ DOCUMENT_AI_URL = os.getenv("DOCUMENT_AI_URL")
 DOCUMENT_AI_TIMEOUT = float(os.getenv("DOCUMENT_AI_TIMEOUT", "60"))
 
 
-_client_options = None
-if LOCATION:
-    _client_options = ClientOptions(
-        api_endpoint=f"{LOCATION}-documentai.googleapis.com"
-    )
+_docai_client = None
 
-_docai_client = documentai.DocumentProcessorServiceClient(
-    client_options=_client_options
-)
+
+def _get_docai_client():
+    global _docai_client
+    if _docai_client is None:
+        client_options = None
+        if LOCATION:
+            client_options = ClientOptions(
+                api_endpoint=f"{LOCATION}-documentai.googleapis.com"
+            )
+        _docai_client = documentai.DocumentProcessorServiceClient(
+            client_options=client_options
+        )
+    return _docai_client
 
 
 def _get_coordinates(entity, attribute):
@@ -71,13 +72,14 @@ def process_document_content(
             using_default_processor=using_default_processor,
         )
 
-    resource_name = _docai_client.processor_version_path(
+    docai_client = _get_docai_client()
+    resource_name = docai_client.processor_version_path(
         PROJECT_ID, LOCATION, processor_id, model_id
     )
 
     raw_document = documentai.RawDocument(content=image_content, mime_type=mime_type)
     request = documentai.ProcessRequest(name=resource_name, raw_document=raw_document)
-    result = _docai_client.process_document(request=request)
+    result = docai_client.process_document(request=request)
     document_object = result.document
 
     document_entities = document_object.entities
@@ -189,9 +191,12 @@ def deploy_processor(rg_id, data_manager):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping deploy")
         return "DEPLOYED"
+    from ogrre.internal.google_processor_manager import deploy_processor_version
+
     processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
 
-    resource_name = _docai_client.processor_version_path(
+    docai_client = _get_docai_client()
+    resource_name = docai_client.processor_version_path(
         PROJECT_ID, LOCATION, processor_id, model_id
     )
 
@@ -204,9 +209,12 @@ def undeploy_processor(rg_id, data_manager):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping undeploy")
         return True
+    from ogrre.internal.google_processor_manager import undeploy_processor_version
+
     processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
 
-    resource_name = _docai_client.processor_version_path(
+    docai_client = _get_docai_client()
+    resource_name = docai_client.processor_version_path(
         PROJECT_ID, LOCATION, processor_id, model_id
     )
     undeploy_processor_version(resource_name)
@@ -219,10 +227,7 @@ def check_if_processor_is_deployed(rg_id, data_manager):
         return 1
     processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
 
-    opts = None
-    if LOCATION:
-        opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
-    client = documentai.DocumentProcessorServiceClient(client_options=opts)
+    client = _get_docai_client()
     parent = client.processor_path(PROJECT_ID, LOCATION, processor_id)
 
     processor_versions = client.list_processor_versions(parent=parent)
