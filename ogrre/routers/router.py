@@ -17,7 +17,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 
-from ogrre.internal.data_manager import data_manager
+from ogrre.internal.data_manager import DEFAULT_UNAUTHENTICATED_TEAM, data_manager
 from ogrre.internal.image_handling import (
     process_document,
     process_zip,
@@ -33,6 +33,25 @@ _log = logging.getLogger(__name__)
 token_uri, client_id, client_secret = auth.get_google_credentials()
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+
+def anonymous_user():
+    return {
+        "email": "anonymous",
+        "roles": {},
+        "permissions": [],
+        "anonymous": True,
+        "default_team": DEFAULT_UNAUTHENTICATED_TEAM["name"],
+    }
+
+
+def require_authenticated_admin_route():
+    if not REQUIRE_AUTH:
+        raise HTTPException(
+            status_code=403,
+            detail="This route is disabled when authentication is disabled.",
+        )
+
 
 router = APIRouter(
     prefix="",
@@ -52,7 +71,7 @@ async def authenticate(token: str = Depends(oauth2_scheme)):
         user account information
     """
     if not REQUIRE_AUTH:
-        return {"email": "anonymous", "roles": {}, "anonymous": True}
+        return anonymous_user()
     if not token:
         raise HTTPException(status_code=401, detail="missing authentication token")
     try:
@@ -198,13 +217,14 @@ async def check_authorization(user_info: dict = Depends(authenticate)):
     """
     email = user_info["email"]
     db = os.environ.get("DB_CONNECTION", None)
-    if "staging" in db:
+    if db and "staging" in db:
         environment = "staging"
     else:
         environment = os.environ.get("ENVIRONMENT", None)
-    user = data_manager.getUser(email)
     if not REQUIRE_AUTH:
-        user = {"email": "anonymous", "roles": {}, "anonymous": True}
+        user = anonymous_user()
+    else:
+        user = data_manager.getUser(email)
     return {"user_data": user, "environment": environment}
 
 
@@ -564,11 +584,18 @@ async def upload_document(
         New document record identifier.
     """
     user_email = user_email.lower()
-    if not data_manager.hasPermission(user_email, "upload_document"):
+    if not REQUIRE_AUTH:
+        user_info = anonymous_user()
+    elif not data_manager.hasPermission(user_email, "upload_document"):
         raise HTTPException(
             403,
             detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
         )
+    else:
+        user_info = data_manager.getUserInfo(user_email)
+        if user_info is None:
+            raise HTTPException(404, detail=f"User not found")
+
     if preventDuplicates:
         record_exists = data_manager.checkIfRecordExists(file.filename, rg_id)
         if record_exists:
@@ -577,7 +604,6 @@ async def upload_document(
                 content={"message": f"{file.filename} exists for {rg_id}, returning"},
             )
 
-    user_info = data_manager.getUserInfo(user_email)
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail=f"Project not found")
@@ -1119,6 +1145,7 @@ async def get_users(user_info: dict = Depends(authenticate)):
     Returns:
         List of users, role types
     """
+    require_authenticated_admin_route()
     users = data_manager.getUsers(user_info)
     return users
 
@@ -1158,6 +1185,7 @@ async def add_user(
     Returns:
         user status
     """
+    require_authenticated_admin_route()
     req = await request.json()
     team_lead = req.get("team_lead", False)
     sys_admin = req.get("sys_admin", False)
@@ -1203,6 +1231,7 @@ async def update_user_roles(request: Request, user_info: dict = Depends(authenti
     Returns:
         result
     """
+    require_authenticated_admin_route()
     if not data_manager.hasPermission(user_info["email"], "manage_team"):
         raise HTTPException(
             403,
@@ -1473,6 +1502,7 @@ async def update_default_team(
     Returns:
         result
     """
+    require_authenticated_admin_route()
     if not data_manager.hasPermission(user_info["email"], "manage_system"):
         raise HTTPException(
             403,
@@ -1502,6 +1532,7 @@ async def fetch_roles(request: Request, user_info: dict = Depends(authenticate))
     Returns:
         List containing available roles
     """
+    require_authenticated_admin_route()
     if not data_manager.hasPermission(user_info["email"], "manage_team"):
         raise HTTPException(
             403,
@@ -1519,6 +1550,7 @@ async def fetch_teams(user_info: dict = Depends(authenticate)):
     Returns:
         List containing teams
     """
+    require_authenticated_admin_route()
     if not data_manager.hasPermission(user_info["email"], "manage_system"):
         raise HTTPException(
             403,
@@ -1538,6 +1570,7 @@ async def delete_user(email: str, user_info: dict = Depends(authenticate)):
     Returns:
         result
     """
+    require_authenticated_admin_route()
     email = email.lower()
     if data_manager.hasPermission(user_info["email"], "delete"):
         data_manager.deleteUser(email, user_info)

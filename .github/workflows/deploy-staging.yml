@@ -31,33 +31,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-      - name: Add creds file
-        id: create-creds-json
-        uses: jsdaniell/create-json@v1.2.3
-        with:
-            name: "ogrre/creds.json"
-            json: ${{ secrets.STAGING_CREDS_JSON }}
-
-      - name: Add service key json file
-        id: create-service-key-json
-        uses: jsdaniell/create-json@v1.2.3
-        with:
-            name: "ogrre/michael2-service-key.json"
-            json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
-    
       - name: Extract metadata (labels, tags, etc.) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-            images: michaelpescelbl/fastapiwithnginx
+            images: michaelpescelbl/orphaned-wells-ui-server
     
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
             context: .
-            file: ./deployment/Dockerfile
+            file: ./deployment/dockerfile
             push: true
-            tags: michaelpescelbl/fastapiwithnginx:latest
+            tags: michaelpescelbl/orphaned-wells-ui-server:latest
             labels: ${{ steps.meta.outputs.labels }}
 
   deploy_staging:
@@ -69,14 +55,32 @@ jobs:
         - name: Checkout code
           uses: actions/checkout@v4
 
+        - name: Prepare runtime secret directory
+          run: mkdir -p deployment/secrets
+
+        - name: Add runtime creds file
+          id: create-runtime-creds-json
+          uses: jsdaniell/create-json@v1.2.3
+          with:
+            name: "deployment/secrets/creds.json"
+            json: ${{ secrets.STAGING_CREDS_JSON }}
+
+        - name: Add runtime service key json file
+          id: create-runtime-service-key-json
+          uses: jsdaniell/create-json@v1.2.3
+          with:
+            name: "deployment/secrets/michael2-service-key.json"
+            json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
+
         - name: copy file via ssh key
           uses: appleboy/scp-action@v0.1.4
           with:
             host: ${{ secrets.STAGING_BACKEND_IP }}
             username: ${{ secrets.SSH_USERNAME }}
             key: ${{ secrets.SSH_PRIVATE_KEY }}
-            source: "deployment/docker-compose.yml, deployment/nginx/staging/default.conf, deployment/nginx/isgs/default.conf"
+            source: "deployment/docker-compose.yml, deployment/nginx/staging/default.conf, deployment/nginx/isgs/default.conf, deployment/secrets/creds.json, deployment/secrets/michael2-service-key.json"
             target: .
+            strip_components: 1
 
         - name: run docker-compose
           uses: appleboy/ssh-action@v1.0.0
@@ -85,6 +89,14 @@ jobs:
             username: ${{ secrets.SSH_USERNAME }}
             key: ${{ secrets.SSH_PRIVATE_KEY }}
             script: |
+                if [ -s deployment/secrets/creds.json ]; then
+                  mkdir -p secrets
+                  cp deployment/secrets/creds.json secrets/creds.json
+                  cp deployment/secrets/michael2-service-key.json secrets/michael2-service-key.json
+                fi
+                test -s secrets/creds.json
+                test -s secrets/michael2-service-key.json
+                chmod 600 secrets/creds.json secrets/michael2-service-key.json
                 echo ${{ secrets.DOCKERHUB_ACCESS_TOKEN }} | sudo docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
                 sudo docker compose down
                 sudo docker rmi -f $(sudo docker images -q)

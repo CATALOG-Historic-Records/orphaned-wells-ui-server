@@ -19,6 +19,12 @@ _log = logging.getLogger(__name__)
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
 
 COLLABORATORS = ["isgs", "calgem", "osage"]
+DEFAULT_UNAUTHENTICATED_TEAM = {
+    "name": "default",
+    "display_name": "Default",
+    "users": ["anonymous"],
+    "project_list": [],
+}
 
 DEFAULT_PROCESSORS = [
     {
@@ -54,7 +60,27 @@ class DataManager:
         self.lock_duration = 120
         self.using_default_processor = False
         self.use_airtable = False
+        self.ensureDefaultUnauthenticatedTeam()
         self.createProcessorsList()
+
+    def ensureDefaultUnauthenticatedTeam(self):
+        if REQUIRE_AUTH:
+            return
+
+        query = {"name": DEFAULT_UNAUTHENTICATED_TEAM["name"]}
+        update = {"$setOnInsert": DEFAULT_UNAUTHENTICATED_TEAM.copy()}
+        result = self.db.teams.update_one(query, update, upsert=True)
+        if result.upserted_id:
+            _log.info("created default unauthenticated team")
+
+    def getDefaultTeamForUser(self, email):
+        if not REQUIRE_AUTH and email == "anonymous":
+            return DEFAULT_UNAUTHENTICATED_TEAM["name"]
+
+        user_document = self.getDocument("users", ({"email": email}))
+        if user_document is None:
+            return None
+        return user_document.get("default_team", None)
 
     def getMongoProcessorByID(self, google_id):
         projection = {"_id": 0}
@@ -571,10 +597,10 @@ class DataManager:
         return projects
 
     def getUserProjectList(self, user):
-        user_query = {"email": user}
-        user_cursor = self.db.users.find(user_query)
-        user_document = user_cursor.next()
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user)
+        if default_team is None:
+            _log.info(f"user {user} has no default team")
+            return []
         return self.getTeamProjectList(default_team)
 
     @time_it
@@ -591,16 +617,24 @@ class DataManager:
         return stats
 
     def fetchTeamInfo(self, email):
-        user_doc = self.db.users.find({"email": email}).next()
-        team_name = user_doc["default_team"]
-        team_doc = self.db.teams.find({"name": team_name}).next()
+        team_name = self.getDefaultTeamForUser(email)
+        if team_name is None:
+            _log.error(f"unable to find default team for user {email}")
+            return None
+
+        team_doc = self.getDocument("teams", {"name": team_name})
+        if team_doc is None:
+            _log.error(f"unable to find team {team_name}")
+            return None
+
         if "projects" in team_doc:
             del team_doc["projects"]
         ## convert object ids to strings
         team_doc["_id"] = str(team_doc["_id"])
-        for i in range(len(team_doc["project_list"])):
-            project_object_id = team_doc["project_list"][i]
-            team_doc["project_list"][i] = str(project_object_id)
+        team_doc["project_list"] = [
+            str(project_object_id)
+            for project_object_id in team_doc.get("project_list", [])
+        ]
         return team_doc
 
     def fetchTeams(self, user_info):
@@ -623,14 +657,16 @@ class DataManager:
     @time_it
     def fetchProjects(self, user):
         projects = []
-        if user.get("anonymous", False):
-            _log.info(f"getting all projects for anonymous user")
-            cursor = self.db.projects.find({})
+        if user.get("anonymous", False) and not REQUIRE_AUTH:
+            _log.info(f"getting projects for anonymous user - default team")
+            user_projects = self.getTeamProjectList(
+                DEFAULT_UNAUTHENTICATED_TEAM["name"]
+            )
         else:
             _log.info(f"user is not anonymous")
             user_email = user.get("email", None)
             user_projects = self.getUserProjectList(user_email)
-            cursor = self.db.projects.find({"_id": {"$in": user_projects}})
+        cursor = self.db.projects.find({"_id": {"$in": user_projects}})
         for document in cursor:
             document["_id"] = str(document["_id"])
             projects.append(document)
@@ -1096,8 +1132,7 @@ class DataManager:
     def createProject(self, project_info, user_info):
         ## get user's default team
         user_email = user_info.get("email", "")
-        user_document = self.getDocument("users", ({"email": user_email}))
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user_email)
         if default_team is None:
             _log.info(f"user {user_email} has no default team")
             return False
@@ -1130,8 +1165,7 @@ class DataManager:
     def createRecordGroup(self, rg_info, user_info):
         ## get user's default team
         user_email = user_info.get("email", "")
-        user_document = self.getDocument("users", ({"email": user_email}))
-        default_team = user_document.get("default_team", None)
+        default_team = self.getDefaultTeamForUser(user_email)
         if default_team is None:
             _log.info(f"user {user_email} has no default team")
             return False

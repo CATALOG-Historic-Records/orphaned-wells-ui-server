@@ -405,6 +405,7 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
         if cleaning_function_name == "" or cleaning_function_name is None:
             _log.debug(f"cleaning_function for {attribute_key} is empty string or none")
             attribute["cleaned"] = False
+            attribute["cleaning_error"] = False
             return False
         cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
         if cleaning_function:
