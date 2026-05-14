@@ -538,12 +538,12 @@ def createNewAttribute(
 def defaultJSONDumpHandler(obj):
     if isinstance(obj, datetime.datetime):
         date_string = obj.date().isoformat()
-        _log.info(
-            f"JSON Dump found datetime object, returning iso format: {date_string}"
-        )
+        # _log.info(
+        #     f"JSON Dump found datetime object, returning iso format: {date_string}"
+        # )
         return date_string
     else:
-        _log.info(f"JSON Dump found Type {type(obj)}. returning string")
+        # _log.info(f"JSON Dump found Type {type(obj)}. returning string")
         return str(obj)
 
 
@@ -586,15 +586,34 @@ def generate_mongo_records_pipeline(
         project = {"$project": {}}
         topLevelFields = include_attribute_fields.get("topLevelFields", [])
         attributesListFields = include_attribute_fields.get("attributesList", [])
+        subtattributesFields = include_attribute_fields.get("subattributes", [])
         for topLevelField in topLevelFields:
             project["$project"][topLevelField] = 1
 
         if len(attributesListFields) > 0:
             attributesList_include = {}
             for attributesListField in attributesListFields:
-                attributesList_include[
-                    attributesListField
-                ] = f"$$attr.{attributesListField}"
+                if (
+                    attributesListField == "subattributes"
+                    and len(subtattributesFields) > 0
+                ):
+                    subattributesList_include = {}
+                    for subtattributesField in subtattributesFields:
+                        subattributesList_include[
+                            subtattributesField
+                        ] = f"$$subattr.{subtattributesField}"
+                    subattributesProject = {
+                        "$map": {
+                            "input": {"$ifNull": ["$$attr.subattributes", []]},
+                            "as": "subattr",
+                            "in": subattributesList_include,
+                        }
+                    }
+                    attributesList_include[attributesListField] = subattributesProject
+                else:
+                    attributesList_include[
+                        attributesListField
+                    ] = f"$$attr.{attributesListField}"
             project["$project"]["attributesList"] = {
                 "$map": {
                     "input": "$attributesList",

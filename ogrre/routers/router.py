@@ -1055,6 +1055,7 @@ async def download_records(
     json_fields_to_include = {
         "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
         "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
+        "subattributes": ["key", "value", "normalized_vertices"],
     }
 
     output_file_id = util.last4_before_decimal()
@@ -1062,7 +1063,6 @@ async def download_records(
     keep_all_columns = False
     if len(selectedColumns) == 0:
         keep_all_columns = True
-
     if location == "project":
         records, _ = data_manager.fetchRecordsByProject(
             user_info,

@@ -97,13 +97,10 @@ class DataManager:
         processors = list(self.db.processors.find(query, projection=projection))
         return processors
 
-    @time_it
     def getProcessorById(self, google_id=None):
         if USE_DB_PROCESSORS:
-            _log.info(f"getting processor using database")
             processor = self.getMongoProcessorByID(google_id=google_id)
         else:
-            _log.info(f"getting processor using processor_api")
             processor = processor_api.get_processor_by_id(self.collaborator, google_id)
         return processor
 
@@ -113,7 +110,6 @@ class DataManager:
         processor_list = list(self.db.processors.find({}, projection=projection))
         return processor_list
 
-    @time_it
     def createProcessorsList(self):
         if USE_DB_PROCESSORS:
             _log.info(f"creating processor list using db")
@@ -1995,7 +1991,7 @@ class DataManager:
                 )
                 writer.writeheader()
                 writer.writerows(record_attributes)
-        else:
+        else:  ## export type is JSON
             for document in records:
                 document_id = str(document["_id"])
                 try:
