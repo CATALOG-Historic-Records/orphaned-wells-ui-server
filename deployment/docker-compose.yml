@@ -1,6 +1,6 @@
 services:
   web:
-    image: michaelpescelbl/fastapiwithnginx:latest
+    image: michaelpescelbl/orphaned-wells-ui-server:latest
     environment:
       - ENVIRONMENT=${ENVIRONMENT}
       - COLLABORATOR=${COLLABORATOR}
@@ -23,6 +23,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/logs
+      - ./secrets/creds.json:/code/ogrre/creds.json:ro
+      - ./secrets/michael2-service-key.json:/code/ogrre/michael2-service-key.json:ro
     logging:
       driver: "json-file"
       options:

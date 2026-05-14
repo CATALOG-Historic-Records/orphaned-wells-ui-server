@@ -379,6 +379,19 @@ def convert_processor_list_to_dict(processor_list):
     return processor_dict
 
 
+def convert_processor_attributes_to_dict(attributes):
+    attributes_dict = {}
+    for attr in attributes:
+        key = attr["name"]
+        attributes_dict[key] = attr
+        subattributes = attr.get("subattributes", None)
+        if subattributes:
+            for subattribute in subattributes:
+                sub_key = subattribute["name"]
+                attributes_dict[f"{key}::{sub_key}"] = subattribute
+    return attributes_dict
+
+
 def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
     if subattributeKey:
         attribute_key = subattributeKey
@@ -392,6 +405,7 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
         if cleaning_function_name == "" or cleaning_function_name is None:
             _log.debug(f"cleaning_function for {attribute_key} is empty string or none")
             attribute["cleaned"] = False
+            attribute["cleaning_error"] = False
             return False
         cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
         if cleaning_function:
@@ -524,12 +538,12 @@ def createNewAttribute(
 def defaultJSONDumpHandler(obj):
     if isinstance(obj, datetime.datetime):
         date_string = obj.date().isoformat()
-        _log.info(
-            f"JSON Dump found datetime object, returning iso format: {date_string}"
-        )
+        # _log.info(
+        #     f"JSON Dump found datetime object, returning iso format: {date_string}"
+        # )
         return date_string
     else:
-        _log.info(f"JSON Dump found Type {type(obj)}. returning string")
+        # _log.info(f"JSON Dump found Type {type(obj)}. returning string")
         return str(obj)
 
 
