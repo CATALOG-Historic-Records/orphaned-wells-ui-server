@@ -240,7 +240,11 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
     if local_file_paths:
         for file_path in local_file_paths:
             if os.path.isfile(file_path):
-                zs.write(file_path, os.path.basename(file_path))
+                zs.write(
+                    file_path,
+                    os.path.basename(file_path),
+                    compress_type=zipstream.ZIP_DEFLATED,
+                )
             else:
                 logg(f"Local file not found, skipping: {file_path}", level="info")
 
