@@ -240,7 +240,11 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
     if local_file_paths:
         for file_path in local_file_paths:
             if os.path.isfile(file_path):
-                zs.write(file_path, os.path.basename(file_path))
+                zs.write(
+                    file_path,
+                    os.path.basename(file_path),
+                    compress_type=zipstream.ZIP_DEFLATED,
+                )
             else:
                 logg(f"Local file not found, skipping: {file_path}", level="info")
 
@@ -586,15 +590,34 @@ def generate_mongo_records_pipeline(
         project = {"$project": {}}
         topLevelFields = include_attribute_fields.get("topLevelFields", [])
         attributesListFields = include_attribute_fields.get("attributesList", [])
+        subtattributesFields = include_attribute_fields.get("subattributes", [])
         for topLevelField in topLevelFields:
             project["$project"][topLevelField] = 1
 
         if len(attributesListFields) > 0:
             attributesList_include = {}
             for attributesListField in attributesListFields:
-                attributesList_include[
-                    attributesListField
-                ] = f"$$attr.{attributesListField}"
+                if (
+                    attributesListField == "subattributes"
+                    and len(subtattributesFields) > 0
+                ):
+                    subattributesList_include = {}
+                    for subtattributesField in subtattributesFields:
+                        subattributesList_include[
+                            subtattributesField
+                        ] = f"$$subattr.{subtattributesField}"
+                    subattributesProject = {
+                        "$map": {
+                            "input": {"$ifNull": ["$$attr.subattributes", []]},
+                            "as": "subattr",
+                            "in": subattributesList_include,
+                        }
+                    }
+                    attributesList_include[attributesListField] = subattributesProject
+                else:
+                    attributesList_include[
+                        attributesListField
+                    ] = f"$$attr.{attributesListField}"
             project["$project"]["attributesList"] = {
                 "$map": {
                     "input": "$attributesList",

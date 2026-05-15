@@ -1095,7 +1095,7 @@ class DataManager:
 
         return document
 
-    def getProcessorByRecordGroupID(self, rg_id):
+    def getProcessorByRecordGroupID(self, rg_id, returnNameOnly=False):
         _id = ObjectId(rg_id)
         try:
             cursor = self.db.record_groups.find({"_id": _id})
@@ -1108,6 +1108,11 @@ class DataManager:
             model_id = processor_document.get("Model ID", None)
             if model_id is None:
                 model_id = processor_document.get("modelId", None)
+            if returnNameOnly:
+                processor_name = processor_document.get("Processor Name", None)
+                if processor_name is None:
+                    processor_name = processor_document.get("name", None)
+                return processor_name
             return google_id, model_id, processor_attributes
         except Exception as e:
             _log.error(f"unable to find processor: {e}")
@@ -1905,6 +1910,23 @@ class DataManager:
         update = {"$pull": {"record_groups": rg_id}}
         self.db.teams.update_many(team_query, update)
 
+    @time_it
+    def organizeRecordsByDocumentType(self, records):
+        rg_processor_map = {}
+        setsOfRecords = {}
+        for record in records:
+            record_group_id = record.get("record_group_id")
+            processor_name = rg_processor_map.get(record_group_id, None)
+            if not processor_name:
+                processor_name = self.getProcessorByRecordGroupID(
+                    record_group_id, returnNameOnly=True
+                )
+                rg_processor_map[record_group_id] = processor_name
+                setsOfRecords[processor_name] = [record]
+            else:
+                setsOfRecords[processor_name].append(record)
+        return setsOfRecords
+
     ## miscellaneous functions
     def downloadRecords(
         self,
@@ -1991,7 +2013,7 @@ class DataManager:
                 )
                 writer.writeheader()
                 writer.writerows(record_attributes)
-        else:
+        else:  ## export type is JSON
             for document in records:
                 document_id = str(document["_id"])
                 try:
