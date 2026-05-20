@@ -13,14 +13,19 @@ ca = certifi.where()
 
 
 def connectToDatabase():
-    if DB_CONNECTION.startswith("mongodb://") or DB_CONNECTION.startswith(
-        "mongodb+srv://"
-    ):
-        uri = DB_CONNECTION
-        client = MongoClient(uri, server_api=ServerApi("1"))
+    username = urllib.parse.quote_plus(DB_USERNAME)
+    password = urllib.parse.quote_plus(DB_PASSWORD)
+
+    if DB_CONNECTION == 'localhost' and (not DB_USERNAME or not DB_PASSWORD):
+        print("Connecting to local MongoDB without authentication...")
+        uri = "mongodb://localhost:27017/"
+        client = MongoClient(uri)
+    elif DB_CONNECTION == 'localhost':
+        print("Connecting to local MongoDB with authentication...")
+        uri = f"mongodb://{username}:{password}@localhost:27017/{DB_NAME}?authSource=admin"
+        client = MongoClient(uri)
     else:
-        username = urllib.parse.quote_plus(DB_USERNAME)
-        password = urllib.parse.quote_plus(DB_PASSWORD)
+        print("Connecting to remote MongoDB server...")
         db_connection = urllib.parse.quote_plus(DB_CONNECTION)
         uri = f"mongodb+srv://{username}:{password}@{db_connection}.mongodb.net/?retryWrites=true&w=majority"
         client = MongoClient(uri, server_api=ServerApi("1"), tlsCAFile=ca)
