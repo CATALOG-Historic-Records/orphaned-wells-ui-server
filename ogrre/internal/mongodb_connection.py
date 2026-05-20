@@ -16,11 +16,11 @@ def connectToDatabase():
     username = urllib.parse.quote_plus(DB_USERNAME)
     password = urllib.parse.quote_plus(DB_PASSWORD)
 
-    if DB_CONNECTION == 'localhost' and (not DB_USERNAME or not DB_PASSWORD):
+    if DB_CONNECTION == "localhost" and (not DB_USERNAME or not DB_PASSWORD):
         print("Connecting to local MongoDB without authentication...")
         uri = "mongodb://localhost:27017/"
         client = MongoClient(uri)
-    elif DB_CONNECTION == 'localhost':
+    elif DB_CONNECTION == "localhost":
         print("Connecting to local MongoDB with authentication...")
         uri = f"mongodb://{username}:{password}@localhost:27017/{DB_NAME}?authSource=admin"
         client = MongoClient(uri)
