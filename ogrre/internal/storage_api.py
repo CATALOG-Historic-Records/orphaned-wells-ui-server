@@ -79,7 +79,13 @@ async def _async_upload_to_bucket(
 ):
     async with aiohttp.ClientSession() as session:
         storage_client = Storage(
-            service_file=service_file or f"{DIRNAME}/creds.json", session=session
+            service_file=service_file
+            or (
+                f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
+                if STORAGE_SERVICE_KEY
+                else f"{DIRNAME}/creds.json"
+            ),
+            session=session,
         )
         status = await storage_client.upload(
             bucket_name, f"{folder}/{blob_name}", file_obj
