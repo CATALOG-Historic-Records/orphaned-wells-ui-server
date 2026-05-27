@@ -17,7 +17,6 @@ from ogrre.internal.util import time_it
 
 _log = logging.getLogger(__name__)
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
-
 COLLABORATORS = ["isgs", "calgem", "osage"]
 DEFAULT_UNAUTHENTICATED_TEAM = {
     "name": "default",
@@ -937,22 +936,21 @@ class DataManager:
         ## try to attain lock
         attained_lock = self.tryLockingRecord(record_id, user)
         image_urls = []
-        for image in document.get("image_files", []):
+        image_files = document.get("image_files", [])
+        for image in image_files:
             if util.imageIsValid(image):
-                image_urls.append(
-                    get_document_image(
-                        document["record_group_id"], document["_id"], image
-                    )
+                next_img_url = get_document_image(
+                    document["record_group_id"], document["_id"], image
                 )
+                image_urls.append(next_img_url)
         if len(image_urls) == 0:
             if document.get("filename", False):
-                image_urls.append(
-                    get_document_image(
-                        document["record_group_id"],
-                        document["_id"],
-                        document["filename"],
-                    )
+                next_img_url = get_document_image(
+                    document["record_group_id"],
+                    document["_id"],
+                    document["filename"],
                 )
+                image_urls.append(next_img_url)
         document["img_urls"] = image_urls
 
         ## get record group name
@@ -1250,6 +1248,18 @@ class DataManager:
             user_info,
             calling_function="updateRecordReviewStatus",
         )
+
+    @time_it
+    def updateRecordInternal(self, record_id, field, value):
+        _id = ObjectId(record_id)
+        search_query = {"_id": _id}
+
+        update_query = {"$set": {field: value}}
+        update_resp = self.db.records.update_one(
+            search_query,
+            update_query,
+        )
+        return update_resp
 
     @time_it
     def updateRecord(

@@ -14,6 +14,7 @@ import mimetypes
 from ogrre.internal.bulk_upload import upload_documents_from_directory
 from ogrre.internal import storage_api
 from ogrre.internal import document_ai_api
+from ogrre.internal.whitespace_detector import batch_is_mostly_whitespace
 import ogrre.internal.util as util
 
 _log = logging.getLogger(__name__)
@@ -187,6 +188,7 @@ def process_document(
     ) = data_manager.getProcessorByRecordGroupID(rg_id)
 
     ## upload to cloud storage
+    image_whitespace = []
     for output_path in output_paths:
         filepath = output_path.split("/")[-1]
         background_tasks.add_task(
@@ -195,6 +197,13 @@ def process_document(
             file_name=f"{filepath}",
             folder=f"uploads/{rg_id}/{new_record_id}",
         )
+    image_whitespace = batch_is_mostly_whitespace(
+        output_paths, min_whitespace_pct=99.99
+    )
+
+    data_manager.updateRecordInternal(
+        new_record_id, "image_whitespace", image_whitespace
+    )
 
     ## if original file was pdf, make sure to delete both image and pdf files
     files_to_delete = output_paths

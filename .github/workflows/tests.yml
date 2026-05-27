@@ -43,14 +43,14 @@ jobs:
         uses: jsdaniell/create-json@v1.2.3
         with:
             name: "ogrre/creds.json"
-            json: ${{ secrets.STAGING_CREDS_JSON }}
+            json: ${{ secrets.CREDS_JSON }}
 
       - name: Add service key json file
         id: create-service-key-json
         uses: jsdaniell/create-json@v1.2.3
         with:
             name: "ogrre/michael2-service-key.json"
-            json: ${{ secrets.STAGING_SERVICE_KEY_JSON }}
+            json: ${{ secrets.SERVICE_KEY_JSON }}
 
       - name: Run application
         run: |
