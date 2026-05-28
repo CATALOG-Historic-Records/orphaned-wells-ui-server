@@ -1,3 +1,10 @@
+"""
+storage_api.py
+
+Handles the file storage for uploaded documents through OGRRE.
+Supports configurations for google cloud storage and local file storage.
+"""
+
 import datetime
 import logging
 import os
@@ -48,11 +55,12 @@ def _is_local():
     return STORAGE_BACKEND == "local"
 
 
-async def upload_file(file_path, file_name, folder="uploads"):
+async def upload_file(file_path, file_name, folder="uploads", on_bytes_read=None):
     key = f"{folder}/{file_name}" if folder else file_name
     if _is_local():
         destination = _storage_path(key)
         _ensure_local_dir(destination)
+        file_bytes = b""
         async with aiofiles.open(file_path, "rb") as src:
             async with aiofiles.open(destination, "wb") as dst:
                 while True:
@@ -60,14 +68,55 @@ async def upload_file(file_path, file_name, folder="uploads"):
                     if not chunk:
                         break
                     await dst.write(chunk)
+                    file_bytes += chunk
+        if on_bytes_read:
+            on_bytes_read(file_bytes)
+        del file_bytes
         _log.info(f"uploaded document to local storage: {destination}")
         return destination
 
     async with aiofiles.open(file_path, "rb") as afp:
-        f = await afp.read()
-    url = await _async_upload_to_bucket(file_name, f, folder=folder)
+        file_bytes = await afp.read()
+    if on_bytes_read:
+        on_bytes_read(file_bytes)
+    url = await _async_upload_to_bucket(file_name, file_bytes, folder=folder)
+    del file_bytes
     _log.info(f"uploaded document to cloud storage: {url}")
     return url
+
+
+async def upload_files(
+    file_paths, file_names, folder="uploads", on_all_bytes_read=None
+):
+    """
+    Uploads multiple files and optionally calls on_all_bytes_read with a list
+    of all files' bytes once every file has been read, before uploading.
+    """
+    all_bytes = []
+    for file_path in file_paths:
+        async with aiofiles.open(file_path, "rb") as afp:
+            all_bytes.append(await afp.read())
+
+    if on_all_bytes_read:
+        on_all_bytes_read(all_bytes)
+
+    urls = []
+    for file_name, file_bytes in zip(file_names, all_bytes):
+        if _is_local():
+            key = f"{folder}/{file_name}" if folder else file_name
+            destination = _storage_path(key)
+            _ensure_local_dir(destination)
+            async with aiofiles.open(destination, "wb") as dst:
+                await dst.write(file_bytes)
+            _log.info(f"uploaded document to local storage: {destination}")
+            urls.append(destination)
+        else:
+            url = await _async_upload_to_bucket(file_name, file_bytes, folder=folder)
+            _log.info(f"uploaded document to cloud storage: {url}")
+            urls.append(url)
+
+    del all_bytes
+    return urls
 
 
 async def _async_upload_to_bucket(

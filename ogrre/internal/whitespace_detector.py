@@ -306,3 +306,67 @@ def batch_is_mostly_whitespace(
             results_map[idx] = future.result()
 
     return [results_map[i] for i in range(len(sources))]
+
+
+def detect_whitespace_from_bytes(
+    image_bytes: bytes,
+    threshold: int = 240,
+    min_whitespace_pct: float = None,
+    channel_mode: str = "all",
+) -> dict:
+    # buf = io.BytesIO(image_bytes)
+    # img = Image.open(buf).convert("RGB")
+    buf = io.BytesIO(image_bytes)
+    try:
+        img = Image.open(buf).convert("RGB")
+    except Exception as e:
+        print(f"Exception: {e}")
+        buf.close()
+        result = {
+            "whitespace_pct": None,
+            "ink_pct": None,
+            "total_pixels": None,
+            "white_pixels": None,
+            "threshold": threshold,
+            "error": str(e),
+        }
+        if min_whitespace_pct is not None:
+            result["min_whitespace_pct"] = min_whitespace_pct
+            result["meets_threshold"] = False
+        return result
+    pixels = np.array(img, dtype=np.float32)
+    img.close()
+    del img
+    buf.close()
+
+    r, g, b = pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2]
+
+    if channel_mode == "all":
+        mask = (r >= threshold) & (g >= threshold) & (b >= threshold)
+    elif channel_mode == "any":
+        mask = (r >= threshold) | (g >= threshold) | (b >= threshold)
+    elif channel_mode == "mean":
+        mask = ((r + g + b) / 3.0) >= threshold
+    elif channel_mode == "luma":
+        mask = (0.299 * r + 0.587 * g + 0.114 * b) >= threshold
+    else:
+        raise ValueError(
+            f"Invalid channel_mode '{channel_mode}'. "
+            "Choose from: 'all', 'any', 'mean', 'luma'."
+        )
+
+    total_pixels = pixels.shape[0] * pixels.shape[1]
+    white_pixels = int(np.sum(mask))
+    whitespace_pct = (white_pixels / total_pixels) * 100.0
+
+    result = {
+        "whitespace_pct": round(whitespace_pct, 4),
+        "ink_pct": round(100.0 - whitespace_pct, 4),
+        "total_pixels": total_pixels,
+        "white_pixels": white_pixels,
+        "threshold": threshold,
+    }
+    if min_whitespace_pct is not None:
+        result["min_whitespace_pct"] = min_whitespace_pct
+        result["meets_threshold"] = whitespace_pct >= min_whitespace_pct
+    return result

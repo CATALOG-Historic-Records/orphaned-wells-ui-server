@@ -1,3 +1,12 @@
+"""
+image_handling.py
+
+Handles the processes for uploaded documents.
+If necessary, converts files from PDF to PNG.
+Uploads files to configured storage system.
+Creates initial record in database.
+Calls document_ai API to parse text and store result in record.
+"""
 import os
 import logging
 import time
@@ -14,12 +23,17 @@ import mimetypes
 from ogrre.internal.bulk_upload import upload_documents_from_directory
 from ogrre.internal import storage_api
 from ogrre.internal import document_ai_api
-from ogrre.internal.whitespace_detector import batch_is_mostly_whitespace
+from ogrre.internal.whitespace_detector import detect_whitespace_from_bytes
+
 import ogrre.internal.util as util
 
 _log = logging.getLogger(__name__)
 
-
+DETECT_WHITESPACE = os.getenv("DETECT_WHITESPACE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 MEMORY_PROFILE = os.getenv("MEMORY_PROFILE", "").lower() in ("1", "true", "yes")
 MEMORY_PROFILE_RATE = int(os.getenv("MEMORY_PROFILE_RATE", "1"))
 MEMORY_PROFILE_TOP = int(os.getenv("MEMORY_PROFILE_TOP", "10"))
@@ -187,27 +201,41 @@ def process_document(
         processor_attributes,
     ) = data_manager.getProcessorByRecordGroupID(rg_id)
 
-    ## upload to cloud storage
-    image_whitespace = []
-    for output_path in output_paths:
-        filepath = output_path.split("/")[-1]
-        background_tasks.add_task(
-            storage_api.upload_file,
-            file_path=output_path,
-            file_name=f"{filepath}",
-            folder=f"uploads/{rg_id}/{new_record_id}",
+    ## upload to cloud storage, detect whitespace
+    def on_all_bytes_read(all_file_bytes):
+        whitespace_results = []
+        for file_bytes in all_file_bytes:
+            result = detect_whitespace_from_bytes(file_bytes, min_whitespace_pct=99.99)
+            whitespace_results.append(
+                {
+                    "is_mostly_whitespace": result.get("meets_threshold"),
+                    "whitespace_pct": result.get("whitespace_pct"),
+                    "threshold": result.get("threshold"),
+                    "total_pixels": result.get("total_pixels"),
+                    "white_pixels": result.get("white_pixels"),
+                    "error": None,
+                }
+            )
+        data_manager.updateRecordInternal(
+            new_record_id, "image_whitespace", whitespace_results
         )
-    image_whitespace = batch_is_mostly_whitespace(
-        output_paths, min_whitespace_pct=99.99
-    )
 
-    data_manager.updateRecordInternal(
-        new_record_id, "image_whitespace", image_whitespace
+    file_names = [output_path.split("/")[-1] for output_path in output_paths]
+    if DETECT_WHITESPACE:
+        callback = on_all_bytes_read
+    else:
+        callback = None
+    background_tasks.add_task(
+        storage_api.upload_files,
+        file_paths=output_paths,
+        file_names=file_names,
+        folder=f"uploads/{rg_id}/{new_record_id}",
+        on_all_bytes_read=callback,
     )
 
     ## if original file was pdf, make sure to delete both image and pdf files
-    files_to_delete = output_paths
-    if original_output_path not in output_path:
+    files_to_delete = output_paths[:]
+    if original_output_path not in output_paths:
         files_to_delete.append(original_output_path)
 
     ## send to google doc AI
