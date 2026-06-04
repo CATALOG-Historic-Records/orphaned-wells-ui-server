@@ -384,6 +384,8 @@ def convert_processor_list_to_dict(processor_list):
 
 
 def convert_processor_attributes_to_dict(attributes):
+    if not attributes:
+        return None
     attributes_dict = {}
     for attr in attributes:
         key = attr["name"]

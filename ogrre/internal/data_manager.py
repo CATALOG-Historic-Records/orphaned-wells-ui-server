@@ -17,7 +17,6 @@ from ogrre.internal.util import time_it
 
 _log = logging.getLogger(__name__)
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
-
 COLLABORATORS = ["isgs", "calgem", "osage"]
 DEFAULT_UNAUTHENTICATED_TEAM = {
     "name": "default",
@@ -449,15 +448,23 @@ class DataManager:
             _log.info(f"found {email} on {team}")
             return "already_exists"
 
-        ## update user's teams
-        # myquery = {"email": email}
-        # newvalues = { "$push": { "teams": team } }
-        # cursor = self.db.users.update_one(myquery, newvalues)
+        # Keep user role maps in sync with team membership.
+        user_doc = self.getDocument("users", {"email": email})
+        if user_doc is not None:
+            roles = user_doc.get("roles", {})
+            team_roles = roles.get("team", {})
+            if team not in team_roles:
+                team_roles[team] = ["team_member"]
+            roles["team"] = team_roles
+            update_payload = {"roles": roles}
+            if not user_doc.get("default_team"):
+                update_payload["default_team"] = team
+            self.db.users.update_one({"email": email}, {"$set": update_payload})
 
         ## update team's users
         myquery = {"name": team}
         newvalues = {"$push": {"users": email}}
-        cursor = self.db.teams.update_one(myquery, newvalues)
+        self.db.teams.update_one(myquery, newvalues)
         return "success"
 
     def updateUser(self, user_info):
@@ -937,22 +944,21 @@ class DataManager:
         ## try to attain lock
         attained_lock = self.tryLockingRecord(record_id, user)
         image_urls = []
-        for image in document.get("image_files", []):
+        image_files = document.get("image_files", [])
+        for image in image_files:
             if util.imageIsValid(image):
-                image_urls.append(
-                    get_document_image(
-                        document["record_group_id"], document["_id"], image
-                    )
+                next_img_url = get_document_image(
+                    document["record_group_id"], document["_id"], image
                 )
+                image_urls.append(next_img_url)
         if len(image_urls) == 0:
             if document.get("filename", False):
-                image_urls.append(
-                    get_document_image(
-                        document["record_group_id"],
-                        document["_id"],
-                        document["filename"],
-                    )
+                next_img_url = get_document_image(
+                    document["record_group_id"],
+                    document["_id"],
+                    document["filename"],
                 )
+                image_urls.append(next_img_url)
         document["img_urls"] = image_urls
 
         ## get record group name
@@ -1250,6 +1256,18 @@ class DataManager:
             user_info,
             calling_function="updateRecordReviewStatus",
         )
+
+    @time_it
+    def updateRecordInternal(self, record_id, field, value):
+        _id = ObjectId(record_id)
+        search_query = {"_id": _id}
+
+        update_query = {"$set": {field: value}}
+        update_resp = self.db.records.update_one(
+            search_query,
+            update_query,
+        )
+        return update_resp
 
     @time_it
     def updateRecord(
@@ -2072,12 +2090,13 @@ class DataManager:
         if project is not None:
             return True
 
+    @time_it
     def checkIfRecordExists(self, filename, rg_id):
         ## remove file extension
         filename = filename.split(".")[0]
 
         ## query database
-        query = {"filename": {"$regex": filename}, "record_group_id": rg_id}
+        query = {"filename": {"$regex": f"^{filename}$"}, "record_group_id": rg_id}
         found_document = self.db.records.count_documents(query)
         if found_document > 0:
             return True

@@ -1,0 +1,116 @@
+name: Deploy to Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEPLOY_ENV:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - staging
+          - ca
+          - isgs
+          - newts
+          - osage
+  workflow_call:
+    inputs:
+      DEPLOY_ENV:
+        description: 'Environment to deploy to'
+        required: true
+        type: string
+    secrets:
+      DEPLOY_TARGETS:
+        required: true
+      CREDS_JSON:
+        required: true
+      SERVICE_KEY_JSON:
+        required: true
+      SSH_USERNAME:
+        required: true
+      PROJECT_ID:
+        required: true
+      DOCKERHUB_ACCESS_TOKEN:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: true
+
+defaults:
+  run:
+    shell: bash -l {0}
+
+env:
+  PIP_PROGRESS_BAR: "off"
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.DEPLOY_ENV }}
+    runs-on: ubuntu-latest
+    steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Prepare runtime secret directory
+          run: mkdir -p deployment/secrets
+
+        - name: Add runtime creds file
+          uses: jsdaniell/create-json@v1.2.3
+          with:
+            name: "deployment/secrets/creds.json"
+            json: ${{ secrets.CREDS_JSON }}
+
+        - name: Add runtime service key json file
+          uses: jsdaniell/create-json@v1.2.3
+          with:
+            name: "deployment/secrets/michael2-service-key.json"
+            json: ${{ secrets.SERVICE_KEY_JSON }}
+
+        - name: Parse deploy target
+          id: target
+          run: |
+            VM_NAME=$(echo '${{ secrets.DEPLOY_TARGETS }}' | jq -r '.${{ inputs.DEPLOY_ENV }}.vm_name')
+            ZONE=$(echo '${{ secrets.DEPLOY_TARGETS }}' | jq -r '.${{ inputs.DEPLOY_ENV }}.zone')
+            echo "vm_name=$VM_NAME" >> $GITHUB_OUTPUT
+            echo "zone=$ZONE" >> $GITHUB_OUTPUT
+
+        - name: Authenticate to GCP
+          uses: google-github-actions/auth@v2
+          with:
+            credentials_json: ${{ secrets.SERVICE_KEY_JSON }}
+
+        - name: Set up gcloud
+          uses: google-github-actions/setup-gcloud@v2
+
+        - name: Copy files via IAP
+          run: |
+            gcloud compute scp \
+              deployment/docker-compose.yml \
+              deployment/nginx/${{ inputs.DEPLOY_ENV }}/default.conf \
+              deployment/secrets/creds.json \
+              deployment/secrets/michael2-service-key.json \
+              ${{ secrets.SSH_USERNAME }}@${{ steps.target.outputs.vm_name }}:~/ \
+              --tunnel-through-iap \
+              --zone=${{ steps.target.outputs.zone }} \
+              --project=${{ secrets.PROJECT_ID }}
+
+        - name: Run docker-compose via IAP
+          run: |
+            gcloud compute ssh ${{ secrets.SSH_USERNAME }}@${{ steps.target.outputs.vm_name }} \
+              --tunnel-through-iap \
+              --zone=${{ steps.target.outputs.zone }} \
+              --project=${{ secrets.PROJECT_ID }} \
+              --command="
+                if [ -s ~/creds.json ]; then
+                  mkdir -p secrets
+                  cp ~/creds.json secrets/creds.json
+                  cp ~/michael2-service-key.json secrets/michael2-service-key.json
+                fi
+                test -s secrets/creds.json
+                test -s secrets/michael2-service-key.json
+                chmod 600 secrets/creds.json secrets/michael2-service-key.json
+                echo '${{ secrets.DOCKERHUB_ACCESS_TOKEN }}' | sudo docker login -u '${{ secrets.DOCKERHUB_USERNAME }}' --password-stdin
+                sudo docker compose down
+                sudo docker rmi -f \$(sudo docker images -q)
+                sudo docker compose pull
+                sudo docker compose up -d
+              "
