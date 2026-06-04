@@ -1564,6 +1564,8 @@ class DataManager:
                     data_update["defective_description"] = new_data.get(
                         "defective_description", None
                     )
+                elif update_type == "review_status":
+                    data_update["review_status"] = new_data["review_status"]
                 elif update_type != "attributesList":
                     _log.info(f"invalid update type: {update_type}")
                     return False
