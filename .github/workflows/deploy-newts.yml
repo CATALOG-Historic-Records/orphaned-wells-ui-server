@@ -1,14 +1,14 @@
 
-name: Deploy CA Server
+name: Deploy NEWTS Server
 
 on:
   push:
-    branches: [ca]
+    branches: [newts]
 
 jobs:
-  deploy_ca:
+  deploy_newts:
     if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
     uses: ./.github/workflows/deploy-dispatch.yml
     with:
-      DEPLOY_ENV: ca
+      DEPLOY_ENV: newts
     secrets: inherit

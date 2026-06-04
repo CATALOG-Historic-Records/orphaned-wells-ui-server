@@ -26,7 +26,7 @@ if STORAGE_SERVICE_KEY:
 _log = logging.getLogger(__name__)
 
 from ogrre.routers import router
-from ogrre.internal import storage_api
+from ogrre.internal import storage_api, auth
 
 app = FastAPI()
 
@@ -36,12 +36,18 @@ async def health():
     return {"status": "ok"}
 
 
+allowed_origins = auth.parse_allowed_origins()
+if not allowed_origins:
+    _log.warning(
+        "ALLOWED_ORIGINS is empty; cross-origin browser access will be blocked."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
 
 app.include_router(router.router)
