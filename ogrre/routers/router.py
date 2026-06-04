@@ -2,9 +2,7 @@ import os
 import logging
 import aiofiles
 import requests
-import time
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
+import secrets
 from fastapi import (
     Request,
     APIRouter,
@@ -16,6 +14,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
+from typing import Optional
 
 from ogrre.internal.data_manager import DEFAULT_UNAUTHENTICATED_TEAM, data_manager
 from ogrre.internal.image_handling import (
@@ -26,13 +25,32 @@ from ogrre.internal.image_handling import (
     check_if_processor_is_deployed,
 )
 import ogrre.internal.util as util
-import ogrre.internal.auth as auth
+from ogrre.internal.identity_provider import (
+    IdentityProviderError,
+    build_identity_provider,
+    get_bearer_or_session_token,
+)
 
 _log = logging.getLogger(__name__)
 
-token_uri, client_id, client_secret = auth.get_google_credentials()
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+identity_provider = build_identity_provider()
+COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
+COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "lax")
+ACCESS_COOKIE = "ogrre_session"
+REFRESH_COOKIE = "ogrre_refresh_session"
+CSRF_COOKIE = "ogrre_csrf"
+CSRF_HEADER = "X-CSRF-Token"
+COOKIE_MAX_AGE_SECONDS = int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", "3600"))
+REFRESH_COOKIE_MAX_AGE_SECONDS = int(
+    os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", "2592000")
+)
 
 
 def anonymous_user():
@@ -53,15 +71,94 @@ def require_authenticated_admin_route():
         )
 
 
+def _build_auth_failure(detail_key: str, message: str):
+    return {
+        "error": "authorization_failed",
+        "detail_key": detail_key,
+        "message": message,
+    }
+
+
+def _set_auth_cookies(
+    response: JSONResponse, id_token_value: str, refresh_token_value: Optional[str]
+):
+    response.set_cookie(
+        key=ACCESS_COOKIE,
+        value=id_token_value,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=COOKIE_MAX_AGE_SECONDS,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+    if refresh_token_value:
+        response.set_cookie(
+            key=REFRESH_COOKIE,
+            value=refresh_token_value,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+            max_age=REFRESH_COOKIE_MAX_AGE_SECONDS,
+            domain=COOKIE_DOMAIN,
+            path="/",
+        )
+    response.set_cookie(
+        key=CSRF_COOKIE,
+        value=secrets.token_urlsafe(32),
+        httponly=False,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=REFRESH_COOKIE_MAX_AGE_SECONDS,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: JSONResponse):
+    # Clear cookies with and without domain to cover host-only and domain cookies.
+    response.delete_cookie(ACCESS_COOKIE, domain=COOKIE_DOMAIN, path="/")
+    response.delete_cookie(REFRESH_COOKIE, domain=COOKIE_DOMAIN, path="/")
+    response.delete_cookie(CSRF_COOKIE, domain=COOKIE_DOMAIN, path="/")
+    response.delete_cookie(ACCESS_COOKIE, path="/")
+    response.delete_cookie(REFRESH_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
+
+
+def _is_csrf_exempt_path(path: str) -> bool:
+    return path in {"/auth_login"}
+
+
+async def csrf_protect(request: Request):
+    if not REQUIRE_AUTH:
+        return
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    if _is_csrf_exempt_path(request.url.path):
+        return
+
+    csrf_cookie = request.cookies.get(CSRF_COOKIE)
+    csrf_header = request.headers.get(CSRF_HEADER)
+    if not csrf_cookie or not csrf_header or csrf_cookie != csrf_header:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "csrf_validation_failed",
+                "message": "Missing or invalid CSRF token.",
+            },
+        )
+
+
 router = APIRouter(
     prefix="",
     tags=["uow"],
     responses={404: {"description": "route not found"}},
+    dependencies=[Depends(csrf_protect)],
 )
 
 
 @router.post("/token")
-async def authenticate(token: str = Depends(oauth2_scheme)):
+async def authenticate(request: Request, token: str = Depends(oauth2_scheme)):
     """Authenticate API calls; required as a dependency for other API calls.
 
     Args:
@@ -72,13 +169,11 @@ async def authenticate(token: str = Depends(oauth2_scheme)):
     """
     if not REQUIRE_AUTH:
         return anonymous_user()
-    if not token:
+    token_to_verify = get_bearer_or_session_token(request, token)
+    if not token_to_verify:
         raise HTTPException(status_code=401, detail="missing authentication token")
     try:
-        user_info = id_token.verify_oauth2_token(
-            token, google_requests.Request(), client_id
-        )
-        user_info["email"] = user_info.get("email", "").lower()
+        user_info = identity_provider.verify_id_token(token_to_verify)
         return user_info
     except Exception as e:
         _log.info(f"unable to authenticate: {e}")
@@ -96,60 +191,69 @@ async def auth_login(request: Request):
         user tokens (id_token, access_token, refresh_token)
     """
     if not REQUIRE_AUTH:
-        return {
-            "id_token": "anonymous",
-            "access_token": "",
-            "refresh_token": "",
-        }
-    code = await request.json()
-    data = {
-        "code": code,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": "postmessage",
-        "grant_type": "authorization_code",
-    }
-    response = requests.post(token_uri, data=data)
-    if response.status_code != 200:
-        _log.info(f"token exchange failed: {response.status_code} {response.text}")
-        raise HTTPException(status_code=401, detail="unable to authenticate")
-    user_tokens = response.json()
-    if not isinstance(user_tokens, dict) or "id_token" not in user_tokens:
-        _log.info(f"token exchange missing id_token: {user_tokens}")
-        raise HTTPException(status_code=401, detail="unable to authenticate")
-    try:
-        user_info = id_token.verify_oauth2_token(
-            user_tokens["id_token"], google_requests.Request(), client_id
+        response = JSONResponse(
+            {
+                "id_token": "anonymous",
+                "access_token": "",
+                "refresh_token": "",
+            }
         )
-        user_info["email"] = user_info.get("email", "").lower()
-    except Exception as e:  # should probably specify exception type
-        _log.info(f"unable to authenticate on 1st try: {e}")
-        _log.info(f"waiting 2 seconds")
-        try:
-            time.sleep(2.5)
-            user_info = id_token.verify_oauth2_token(
-                user_tokens["id_token"], google_requests.Request(), client_id
-            )
-            user_info["email"] = user_info.get("email", "").lower()
-        except Exception as e:  # should probably specify exception type
-            _log.info(f"unable to authenticate: {e}")
-            raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
+        _set_auth_cookies(response, "anonymous", "")
+        return response
+    code = await request.json()
+    try:
+        auth_result = identity_provider.exchange_authorization_code(code)
+        user_info = auth_result.user_info
+    except IdentityProviderError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
     email = user_info["email"]
+
+    if email is None or email == "":
+        _log.info(f"User account does not provide email")
+        data_manager.recordHistory("login", user=user, notes="denied access")
+        raise HTTPException(
+            status_code=403,
+            detail=_build_auth_failure(
+                "account_not_registered",
+                "Your identity is not associated with an email. Please add an email to your account and make it available to access OGRRE.",
+            ),
+        )
+
     user = data_manager.getUser(email)
     if user is None:
         _log.info(f"user {email} is not found in database")
         data_manager.recordHistory("login", email, notes="denied access")
-        raise HTTPException(status_code=403, detail=user_info)
+        raise HTTPException(
+            status_code=403,
+            detail=_build_auth_failure(
+                "account_not_registered",
+                "Your identity is valid, but this account is not registered for this application.",
+            ),
+        )
 
     authorized = util.validateUser(user)
     if not authorized:
         _log.info(f"user is not authorized")
         data_manager.recordHistory("login", email, notes="denied access")
-        raise HTTPException(status_code=403, detail=user_info)
+        raise HTTPException(
+            status_code=403,
+            detail=_build_auth_failure(
+                "account_not_authorized",
+                "Your account does not currently have a valid role assignment.",
+            ),
+        )
     data_manager.recordHistory("login", email)
     data_manager.updateUserObject(user_info)
-    return user_tokens
+    response = JSONResponse(
+        {
+            "status": "ok",
+            "provider": auth_result.provider,
+            "email": email,
+        }
+    )
+    _set_auth_cookies(response, auth_result.id_token, auth_result.refresh_token)
+    return response
 
 
 @router.post("/auth_refresh")
@@ -163,46 +267,50 @@ async def auth_refresh(request: Request):
         user tokens (id_token, access_token, refresh_token)
     """
     if not REQUIRE_AUTH:
-        return {
-            "id_token": "anonymous",
-            "access_token": "",
-            "refresh_token": "",
-        }
-    refresh_token = await request.json()
-    data = {
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "grant_type": "refresh_token",
-    }
-    response = requests.post(token_uri, data=data)
-    if response.status_code != 200:
-        _log.info(f"token refresh failed: {response.status_code} {response.text}")
-        raise HTTPException(status_code=401, detail="unable to authenticate")
-    user_tokens = response.json()
-    if not isinstance(user_tokens, dict) or "id_token" not in user_tokens:
-        _log.info(f"token refresh missing id_token: {user_tokens}")
-        raise HTTPException(status_code=401, detail="unable to authenticate")
-    try:
-        user_info = id_token.verify_oauth2_token(
-            user_tokens["id_token"], google_requests.Request(), client_id
+        response = JSONResponse(
+            {
+                "id_token": "anonymous",
+                "access_token": "",
+                "refresh_token": "",
+            }
         )
-    except Exception as e:
-        _log.info(f"unable to authenticate: {e}")
-        raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
+        _set_auth_cookies(response, "anonymous", "")
+        return response
+    refresh_token = request.cookies.get(REFRESH_COOKIE)
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="missing refresh token")
+    try:
+        auth_result = identity_provider.refresh_session(refresh_token)
+        user_info = auth_result.user_info
+    except IdentityProviderError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
     email = user_info["email"]
     user = data_manager.getUser(email)
     if user is None:
         _log.info(f"user {email} is not found in database")
         data_manager.recordHistory("refresh", email, notes="denied access")
-        raise HTTPException(status_code=403, detail=user_info)
+        raise HTTPException(
+            status_code=403,
+            detail=_build_auth_failure(
+                "account_not_registered",
+                "Your identity is valid, but this account is not registered for this application.",
+            ),
+        )
     authorized = util.validateUser(user)
     if not authorized:
         _log.info(f"user is not authorized")
         data_manager.recordHistory("refresh", email, notes="denied access")
-        raise HTTPException(status_code=403, detail=user_info)
+        raise HTTPException(
+            status_code=403,
+            detail=_build_auth_failure(
+                "account_not_authorized",
+                "Your account does not currently have a valid role assignment.",
+            ),
+        )
     data_manager.recordHistory("refresh", email)
-    return user_tokens
+    response = JSONResponse({"status": "ok", "provider": auth_result.provider})
+    _set_auth_cookies(response, auth_result.id_token, auth_result.refresh_token)
+    return response
 
 
 @router.post("/check_auth")
@@ -225,6 +333,14 @@ async def check_authorization(user_info: dict = Depends(authenticate)):
         user = anonymous_user()
     else:
         user = data_manager.getUser(email)
+        if user is None:
+            raise HTTPException(
+                status_code=403,
+                detail=_build_auth_failure(
+                    "account_not_registered",
+                    "Your identity is valid, but this account is not registered for this application.",
+                ),
+            )
     return {"user_data": user, "environment": environment}
 
 
@@ -238,13 +354,18 @@ async def logout(request: Request):
     Returns:
         response code
     """
-    refresh_token = await request.json()
-    response = requests.post(
-        "https://oauth2.googleapis.com/revoke",
-        params={"token": refresh_token},
-        headers={"content-type": "application/x-www-form-urlencoded"},
-    )
-    return {"logout_status": response.status_code}
+    refresh_token = request.cookies.get(REFRESH_COOKIE)
+    logout_status = 200
+    if refresh_token:
+        response = requests.post(
+            "https://oauth2.googleapis.com/revoke",
+            params={"token": refresh_token},
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+        logout_status = response.status_code
+    json_response = JSONResponse({"logout_status": logout_status})
+    _clear_auth_cookies(json_response)
+    return json_response
 
 
 @router.get("/get_projects", response_model=list)

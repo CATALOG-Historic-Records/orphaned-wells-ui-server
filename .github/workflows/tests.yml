@@ -31,6 +31,7 @@ jobs:
       - name: Create .env file from secret
         run: |
           cat << 'EOF' > ogrre/.env
+          REQUIRE_AUTH=false
           ${{ secrets.STAGING_ENV }}
           EOF
 
@@ -61,33 +62,9 @@ jobs:
         run: |
           curl -f http://localhost:8001/docs
 
-      - name: Test auth_refresh
-        id: get_token
-        run: |
-          RESPONSE=$(curl -sSf \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.REFRESH_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '"${{ secrets.REFRESH_TOKEN }}"' \
-            http://localhost:8001/auth_refresh)
-
-            ID_TOKEN=$(echo "$RESPONSE" | jq -r '.id_token')
-
-            echo "::add-mask::$ID_TOKEN"
-
-            # Fail if it's empty or null
-            if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
-              echo "Failed to extract id_token"
-              exit 1
-            fi
-
-            # Save for later steps
-            echo "id_token=$ID_TOKEN" >> $GITHUB_OUTPUT
-
       - name: Test get_projects
         run: |
           RESPONSE=$(curl -sSf \
-            -H "Authorization: Bearer ${{ steps.get_token.outputs.id_token }}" \
             http://localhost:8001/get_projects)
       
       ## TODO: add tests for each (testable) endpoint

@@ -448,15 +448,23 @@ class DataManager:
             _log.info(f"found {email} on {team}")
             return "already_exists"
 
-        ## update user's teams
-        # myquery = {"email": email}
-        # newvalues = { "$push": { "teams": team } }
-        # cursor = self.db.users.update_one(myquery, newvalues)
+        # Keep user role maps in sync with team membership.
+        user_doc = self.getDocument("users", {"email": email})
+        if user_doc is not None:
+            roles = user_doc.get("roles", {})
+            team_roles = roles.get("team", {})
+            if team not in team_roles:
+                team_roles[team] = ["team_member"]
+            roles["team"] = team_roles
+            update_payload = {"roles": roles}
+            if not user_doc.get("default_team"):
+                update_payload["default_team"] = team
+            self.db.users.update_one({"email": email}, {"$set": update_payload})
 
         ## update team's users
         myquery = {"name": team}
         newvalues = {"$push": {"users": email}}
-        cursor = self.db.teams.update_one(myquery, newvalues)
+        self.db.teams.update_one(myquery, newvalues)
         return "success"
 
     def updateUser(self, user_info):
@@ -1556,6 +1564,8 @@ class DataManager:
                     data_update["defective_description"] = new_data.get(
                         "defective_description", None
                     )
+                elif update_type == "review_status":
+                    data_update["review_status"] = new_data["review_status"]
                 elif update_type != "attributesList":
                     _log.info(f"invalid update type: {update_type}")
                     return False

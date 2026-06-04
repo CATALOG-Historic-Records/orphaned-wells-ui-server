@@ -3,7 +3,8 @@ creds.json
 tidy-outlet-service-key.json
 michael2-service-key.json
 .DS_Store
-.env*
+.env
+.env_*
 
 uploaded_images/
 __pycache__/
