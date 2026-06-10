@@ -1,0 +1,54 @@
+name: Deploy Staging Server to GKE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -l {0}
+
+env:
+  PIP_PROGRESS_BAR: "off"
+
+jobs:
+  docker_build_and_push:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_STAGING_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+    name: Push docker image to Docker Hub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          ecr: auto
+          logout: true
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: michaelpescelbl/orphaned-wells-ui-server
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deployment/dockerfile
+          push: true
+          tags: michaelpescelbl/orphaned-wells-ui-server:latest
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy_gke_staging:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_STAGING_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+    needs: docker_build_and_push
+    uses: ./.github/workflows/deploy-k8s-dispatch.yml
+    with:
+      DEPLOY_ENV: staging
+      IMAGE_TAG: latest
+    secrets: inherit

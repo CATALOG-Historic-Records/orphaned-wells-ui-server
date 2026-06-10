@@ -1,0 +1,14 @@
+name: Deploy CA Server to GKE
+
+on:
+  push:
+    branches: [ca]
+  workflow_dispatch:
+
+jobs:
+  deploy_gke_ca:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_CA_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+    uses: ./.github/workflows/deploy-k8s-dispatch.yml
+    with:
+      DEPLOY_ENV: ca
+    secrets: inherit

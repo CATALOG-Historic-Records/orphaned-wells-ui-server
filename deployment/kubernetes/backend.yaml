@@ -1,0 +1,190 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: orphaned-wells-ui-server
+    app.kubernetes.io/part-of: uow-backends
+    uow.lbl.gov/environment: ${DEPLOY_ENV}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: orphaned-wells-ui-server
+    app.kubernetes.io/component: api
+    uow.lbl.gov/environment: ${DEPLOY_ENV}
+spec:
+  replicas: ${REPLICAS}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orphaned-wells-ui-server
+      app.kubernetes.io/component: api
+      uow.lbl.gov/environment: ${DEPLOY_ENV}
+  template:
+    metadata:
+      annotations:
+        uow.lbl.gov/deploy-run: ${DEPLOY_RUN_ID}
+        uow.lbl.gov/runtime-config-sha: ${RUNTIME_CONFIG_SHA}
+      labels:
+        app.kubernetes.io/name: orphaned-wells-ui-server
+        app.kubernetes.io/component: api
+        uow.lbl.gov/environment: ${DEPLOY_ENV}
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-pull
+      containers:
+        - name: backend
+          image: ${IMAGE}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: backend-runtime-env
+          env:
+            - name: ENVIRONMENT
+              value: ${DEPLOY_ENV}
+            - name: BACKEND_URL
+              value: https://${HOSTNAME}
+            - name: LOG_DIR
+              value: /logs
+            - name: LOCAL_STORAGE_ROOT
+              value: /data/local-storage
+            - name: LOCAL_STORAGE_URL_BASE
+              value: https://${HOSTNAME}/local-storage
+          resources:
+            requests:
+              cpu: ${CPU_REQUEST}
+              memory: ${MEMORY_REQUEST}
+            limits:
+              cpu: ${CPU_LIMIT}
+              memory: ${MEMORY_LIMIT}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: backend-logs
+              mountPath: /logs
+            - name: backend-data
+              mountPath: /data
+            - name: backend-runtime-files
+              mountPath: /code/ogrre/creds.json
+              subPath: creds.json
+              readOnly: true
+            - name: backend-runtime-files
+              mountPath: /code/ogrre/michael2-service-key.json
+              subPath: michael2-service-key.json
+              readOnly: true
+      volumes:
+        - name: backend-logs
+          emptyDir: {}
+        - name: backend-data
+          emptyDir: {}
+        - name: backend-runtime-files
+          secret:
+            secretName: backend-runtime-files
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: orphaned-wells-ui-server
+    app.kubernetes.io/component: api
+    uow.lbl.gov/environment: ${DEPLOY_ENV}
+  annotations:
+    cloud.google.com/backend-config: '{"default":"backend-config"}'
+    cloud.google.com/neg: '{"ingress": true}'
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: orphaned-wells-ui-server
+    app.kubernetes.io/component: api
+    uow.lbl.gov/environment: ${DEPLOY_ENV}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: backend-config
+  namespace: ${NAMESPACE}
+spec:
+  timeoutSec: 180
+  connectionDraining:
+    drainingTimeoutSec: 60
+  healthCheck:
+    checkIntervalSec: 30
+    timeoutSec: 10
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /health
+    port: 8001
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: backend-cert
+  namespace: ${NAMESPACE}
+spec:
+  domains:
+    - ${HOSTNAME}
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: backend-frontend-config
+  namespace: ${NAMESPACE}
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: backend
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: orphaned-wells-ui-server
+    app.kubernetes.io/component: api
+    uow.lbl.gov/environment: ${DEPLOY_ENV}
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.global-static-ip-name: ${STATIC_IP_NAME}
+    networking.gke.io/managed-certificates: backend-cert
+    networking.gke.io/v1beta1.FrontendConfig: backend-frontend-config
+spec:
+  rules:
+    - host: ${HOSTNAME}
+      http:
+        paths:
+          - path: /*
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 80

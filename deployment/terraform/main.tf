@@ -2,7 +2,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.0.0"
+      version = ">= 5.0.0, < 7.0.0"
     }
   }
 }
@@ -85,6 +85,12 @@ module "backend_vms" {
   boot_resource_policies = each.value.boot_resource_policies
 
   enable_startup_script = each.value.enable_startup_script
+
+  dns_rrdatas_override = (
+    var.enable_gke && contains(var.primary_dns_to_gke_backends, each.key)
+    ? [google_compute_global_address.gke_backend[each.key].address]
+    : null
+  )
 }
 
 resource "google_compute_firewall" "backend_http_https" {
