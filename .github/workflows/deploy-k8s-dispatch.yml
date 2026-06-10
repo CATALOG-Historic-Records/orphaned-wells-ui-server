@@ -1,0 +1,360 @@
+name: Deploy to GKE Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEPLOY_ENV:
+        description: Environment to deploy to GKE
+        required: true
+        type: choice
+        options:
+          - staging
+          - ca
+          - isgs
+          - newts
+          - osage
+      IMAGE_TAG:
+        description: Existing Docker image tag to deploy
+        required: true
+        default: latest
+        type: string
+  workflow_call:
+    inputs:
+      DEPLOY_ENV:
+        description: Environment to deploy to GKE
+        required: true
+        type: string
+      IMAGE_TAG:
+        description: Existing Docker image tag to deploy
+        required: false
+        default: latest
+        type: string
+    secrets:
+      K8S_DEPLOY_TARGETS:
+        required: true
+      CREDS_JSON:
+        required: true
+      SERVICE_KEY_JSON:
+        required: true
+      PROJECT_ID:
+        required: true
+      DOCKERHUB_ACCESS_TOKEN:
+        required: true
+      DOCKERHUB_USERNAME:
+        required: true
+      STAGING_ENV:
+        required: false
+      CA_ENV:
+        required: false
+      ISGS_ENV:
+        required: false
+      NEWTS_ENV:
+        required: false
+      OSAGE_ENV:
+        required: false
+
+defaults:
+  run:
+    shell: bash -l {0}
+
+env:
+  IMAGE_NAME: michaelpescelbl/orphaned-wells-ui-server
+  PIP_PROGRESS_BAR: "off"
+
+jobs:
+  deploy:
+    # if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    name: Deploy ${{ inputs.DEPLOY_ENV }} to GKE
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare deployment workspace
+        run: mkdir -p deployment/secrets deployment/kubernetes/rendered
+
+      - name: Add runtime creds file
+        uses: jsdaniell/create-json@v1.2.3
+        with:
+          name: "deployment/secrets/creds.json"
+          json: ${{ secrets.CREDS_JSON }}
+
+      - name: Add runtime service key json file
+        uses: jsdaniell/create-json@v1.2.3
+        with:
+          name: "deployment/secrets/michael2-service-key.json"
+          json: ${{ secrets.SERVICE_KEY_JSON }}
+
+      - name: Parse GKE deploy target
+        id: target
+        env:
+          DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          K8S_DEPLOY_TARGETS_JSON: ${{ secrets.K8S_DEPLOY_TARGETS }}
+        run: |
+          targets_file="deployment/secrets/k8s-deploy-targets.json"
+          printf '%s' "$K8S_DEPLOY_TARGETS_JSON" > "$targets_file"
+
+          if ! jq -e --arg env "$DEPLOY_ENV" '.[$env]' "$targets_file" > /dev/null; then
+            echo "::error::K8S_DEPLOY_TARGETS does not contain an entry for ${DEPLOY_ENV}"
+            exit 1
+          fi
+
+          field() {
+            jq -r --arg env "$DEPLOY_ENV" --arg key "$1" '.[$env][$key] // empty' "$targets_file"
+          }
+
+          cluster_name="$(field cluster_name)"
+          cluster_location="$(field cluster_location)"
+          namespace="$(field namespace)"
+          host="$(field host)"
+          static_ip_name="$(field static_ip_name)"
+          replicas="$(field replicas)"
+          cpu_request="$(field cpu_request)"
+          memory_request="$(field memory_request)"
+          cpu_limit="$(field cpu_limit)"
+          memory_limit="$(field memory_limit)"
+          persistent_disk_size="$(field persistent_disk_size)"
+
+          : "${replicas:=1}"
+          : "${cpu_request:=2}"
+          : "${memory_request:=6Gi}"
+          : "${cpu_limit:=2}"
+          : "${memory_limit:=6Gi}"
+          : "${persistent_disk_size:=20Gi}"
+
+          # Older K8S_DEPLOY_TARGETS outputs requested only 1Gi, which lets
+          # GKE Autopilot place the pod on nodes too small for this 8-worker app.
+          if [ "$cpu_request" = "500m" ]; then
+            cpu_request="2"
+          fi
+          if [ "$memory_request" = "1Gi" ]; then
+            memory_request="6Gi"
+          fi
+          if [ "$memory_limit" = "4Gi" ]; then
+            memory_limit="6Gi"
+          fi
+
+          required=(
+            "cluster_name:$cluster_name"
+            "cluster_location:$cluster_location"
+            "namespace:$namespace"
+            "host:$host"
+            "static_ip_name:$static_ip_name"
+          )
+          for item in "${required[@]}"; do
+            key="${item%%:*}"
+            value="${item#*:}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing ${key} in K8S_DEPLOY_TARGETS for ${DEPLOY_ENV}"
+              exit 1
+            fi
+          done
+
+          {
+            echo "cluster_name=$cluster_name"
+            echo "cluster_location=$cluster_location"
+            echo "namespace=$namespace"
+            echo "host=$host"
+            echo "static_ip_name=$static_ip_name"
+            echo "replicas=$replicas"
+            echo "cpu_request=$cpu_request"
+            echo "memory_request=$memory_request"
+            echo "cpu_limit=$cpu_limit"
+            echo "memory_limit=$memory_limit"
+            echo "persistent_disk_size=$persistent_disk_size"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare runtime env file
+        env:
+          DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          HOSTNAME: ${{ steps.target.outputs.host }}
+          STAGING_ENV_CONTENT: ${{ secrets.STAGING_ENV }}
+          CA_ENV_CONTENT: ${{ secrets.CA_ENV }}
+          ISGS_ENV_CONTENT: ${{ secrets.ISGS_ENV }}
+          NEWTS_ENV_CONTENT: ${{ secrets.NEWTS_ENV }}
+          OSAGE_ENV_CONTENT: ${{ secrets.OSAGE_ENV }}
+        run: |
+          case "$DEPLOY_ENV" in
+            staging) runtime_env="$STAGING_ENV_CONTENT" ;;
+            ca) runtime_env="$CA_ENV_CONTENT" ;;
+            isgs) runtime_env="$ISGS_ENV_CONTENT" ;;
+            newts) runtime_env="$NEWTS_ENV_CONTENT" ;;
+            osage) runtime_env="$OSAGE_ENV_CONTENT" ;;
+            *)
+              echo "::error::Unsupported DEPLOY_ENV: ${DEPLOY_ENV}"
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$runtime_env" ]; then
+            echo "::error::Missing GitHub secret for ${DEPLOY_ENV^^}_ENV"
+            exit 1
+          fi
+
+          raw_env_file="deployment/secrets/runtime.env"
+          k8s_env_file="deployment/secrets/runtime.k8s.env"
+          printf '%s\n' "$runtime_env" > "$raw_env_file"
+          : > "$k8s_env_file"
+
+          while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+              ""|\#*) continue ;;
+            esac
+            line="${line#export }"
+            if [[ "$line" != *"="* ]]; then
+              continue
+            fi
+            key="${line%%=*}"
+            value="${line#*=}"
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+              value="${value:1:${#value}-2}"
+            fi
+            if [[ "$value" == \'*\' && "$value" == *\' ]]; then
+              value="${value:1:${#value}-2}"
+            fi
+            case "$key" in
+              ENVIRONMENT|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE)
+                continue
+                ;;
+            esac
+            printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
+          done < "$raw_env_file"
+
+          {
+            echo "ENVIRONMENT=$DEPLOY_ENV"
+            echo "BACKEND_URL=https://$HOSTNAME"
+            echo "LOG_DIR=/logs"
+            echo "LOCAL_STORAGE_ROOT=/data/local-storage"
+            echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
+          } >> "$k8s_env_file"
+
+          required_runtime_keys=(
+            ALLOWED_ORIGINS
+            AUTH_PROVIDER
+            SESSION_COOKIE_DOMAIN
+            SESSION_COOKIE_SAMESITE
+            SESSION_COOKIE_SECURE
+          )
+          missing_keys=()
+          for key in "${required_runtime_keys[@]}"; do
+            if ! grep -Eq "^${key}=" "$k8s_env_file"; then
+              missing_keys+=("$key")
+            fi
+          done
+
+          if [ "${#missing_keys[@]}" -gt 0 ]; then
+            echo "::error::${DEPLOY_ENV^^}_ENV did not provide required runtime key(s): ${missing_keys[*]}"
+            exit 1
+          fi
+
+      - name: Set deployment image
+        id: image
+        env:
+          IMAGE_TAG: ${{ inputs.IMAGE_TAG }}
+        run: |
+          : "${IMAGE_TAG:=latest}"
+          echo "image=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.SERVICE_KEY_JSON }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v3
+        with:
+          cluster_name: ${{ steps.target.outputs.cluster_name }}
+          location: ${{ steps.target.outputs.cluster_location }}
+          project_id: ${{ secrets.PROJECT_ID }}
+
+      - name: Create namespace and secrets
+        env:
+          NAMESPACE: ${{ steps.target.outputs.namespace }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "$NAMESPACE" create secret docker-registry dockerhub-pull \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username="$DOCKERHUB_USERNAME" \
+            --docker-password="$DOCKERHUB_ACCESS_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "$NAMESPACE" create secret generic backend-runtime-env \
+            --from-env-file=deployment/secrets/runtime.k8s.env \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "$NAMESPACE" create secret generic backend-runtime-files \
+            --from-file=creds.json=deployment/secrets/creds.json \
+            --from-file=michael2-service-key.json=deployment/secrets/michael2-service-key.json \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Render Kubernetes manifest
+        env:
+          CPU_LIMIT: ${{ steps.target.outputs.cpu_limit }}
+          CPU_REQUEST: ${{ steps.target.outputs.cpu_request }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          HOSTNAME: ${{ steps.target.outputs.host }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          MEMORY_LIMIT: ${{ steps.target.outputs.memory_limit }}
+          MEMORY_REQUEST: ${{ steps.target.outputs.memory_request }}
+          NAMESPACE: ${{ steps.target.outputs.namespace }}
+          PERSISTENT_DISK_SIZE: ${{ steps.target.outputs.persistent_disk_size }}
+          REPLICAS: ${{ steps.target.outputs.replicas }}
+          STATIC_IP_NAME: ${{ steps.target.outputs.static_ip_name }}
+        run: |
+          if ! command -v envsubst >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y gettext-base
+          fi
+          RUNTIME_CONFIG_SHA="$(
+            shasum -a 256 \
+              deployment/secrets/runtime.k8s.env \
+              deployment/secrets/creds.json \
+              deployment/secrets/michael2-service-key.json \
+              | shasum -a 256 \
+              | awk '{print $1}'
+          )"
+          export RUNTIME_CONFIG_SHA
+          envsubst < deployment/kubernetes/backend.yaml > deployment/kubernetes/rendered/backend.yaml
+
+      - name: Apply Kubernetes manifest
+        env:
+          NAMESPACE: ${{ steps.target.outputs.namespace }}
+        run: |
+          kubectl apply -f deployment/kubernetes/rendered/backend.yaml
+          if ! kubectl -n "$NAMESPACE" rollout status deployment/backend --timeout=10m; then
+            echo "::group::Deployment"
+            kubectl -n "$NAMESPACE" get deployment backend -o wide
+            kubectl -n "$NAMESPACE" describe deployment backend
+            echo "::endgroup::"
+
+            echo "::group::Pods"
+            kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=orphaned-wells-ui-server -o wide
+            kubectl -n "$NAMESPACE" describe pods -l app.kubernetes.io/name=orphaned-wells-ui-server
+            echo "::endgroup::"
+
+            echo "::group::Events"
+            kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp
+            echo "::endgroup::"
+
+            echo "::group::Backend logs"
+            kubectl -n "$NAMESPACE" logs deployment/backend --all-containers=true --tail=200 || true
+            echo "::endgroup::"
+
+            exit 1
+          fi
+          kubectl -n "$NAMESPACE" get ingress backend
+          kubectl -n "$NAMESPACE" get managedcertificate backend-cert

@@ -7,22 +7,22 @@ resource "google_compute_address" "ip" {
 }
 
 resource "google_compute_instance" "vm" {
-  name         = "${var.collaborator}-uow-server"
-  zone         = var.zone
+  name = "${var.collaborator}-uow-server"
+  zone = var.zone
 
   tags = ["backend", "http-server", "https-server"]
 
   machine_type = var.machine_type
 
   boot_disk {
-    auto_delete  = true
-    device_name  = var.boot_disk_device_name
+    auto_delete = true
+    device_name = var.boot_disk_device_name
 
     initialize_params {
-        image            = var.boot_image
-        size             = var.boot_disk_size
-        type             = "pd-balanced"
-        resource_policies = var.boot_resource_policies
+      image             = var.boot_image
+      size              = var.boot_disk_size
+      type              = "pd-balanced"
+      resource_policies = var.boot_resource_policies
     }
   }
 
@@ -70,7 +70,7 @@ resource "google_dns_record_set" "dns" {
 
   managed_zone = "uow-carbon-org"
 
-  rrdatas = [
+  rrdatas = var.dns_rrdatas_override != null ? var.dns_rrdatas_override : [
     google_compute_address.ip.address
   ]
 

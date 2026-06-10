@@ -3,6 +3,7 @@ Configuration for the backend
 """
 from pathlib import Path
 import logging
+import logging.handlers
 from typing import List, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings

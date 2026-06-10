@@ -17,7 +17,7 @@ env:
 jobs:
 
   docker_build_and_push:
-    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && vars.ENABLE_GKE_STAGING_DEPLOY != 'true' && vars.ENABLE_GKE_DEPLOYMENTS != 'true'
     name: Push docker image to Docker Hub
     runs-on: ubuntu-latest
     steps:

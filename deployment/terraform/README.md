@@ -5,6 +5,7 @@ This directory contains the Terraform configuration used to manage backend VM in
 ## What is included
 
 - `main.tf` defines a `local.collaborators` map and creates a backend VM module for each entry.
+- `gke.tf` optionally creates the shared GKE deployment infrastructure when `enable_gke=true`.
 - `modules/backend_vm` contains the reusable VM module, including a compute instance, static IP, and DNS record.
 - `variables.tf` declares the Terraform input variables.
 - `terraform.tfvars` provides the default Google Cloud project and region values.
@@ -52,6 +53,25 @@ Apply the planned changes:
 ```bash
 terraform apply -var-file=terraform.tfvars
 ```
+
+## Optional GKE deployment infrastructure
+
+The GKE path is opt-in and can be tested without changing the current VM hostnames.
+
+Create the GKE cluster, global load balancer IPs, and `<env>-k8s-server.uow-carbon.org` test DNS records:
+
+```bash
+terraform plan -var-file=terraform.tfvars -var='enable_gke=true'
+terraform apply -var-file=terraform.tfvars -var='enable_gke=true'
+```
+
+Export the GitHub Actions target map:
+
+```bash
+terraform output -json kubernetes_deploy_targets | jq -c .
+```
+
+Store that JSON as the GitHub secret `K8S_DEPLOY_TARGETS`. See `../kubernetes/README.md` for the full staging test, GitHub setup, and cutover steps.
 
 If you need to destroy infrastructure, run:
 
