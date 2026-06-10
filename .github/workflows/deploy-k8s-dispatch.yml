@@ -55,7 +55,7 @@ on:
 
 defaults:
   run:
-    shell: bash -l {0}
+    shell: bash -le -o pipefail {0}
 
 env:
   IMAGE_NAME: michaelpescelbl/orphaned-wells-ui-server
@@ -283,6 +283,8 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         run: |
+          set -e -o pipefail
+
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl -n "$NAMESPACE" create secret docker-registry dockerhub-pull \
@@ -299,6 +301,8 @@ jobs:
             --from-file=creds.json=deployment/secrets/creds.json \
             --from-file=michael2-service-key.json=deployment/secrets/michael2-service-key.json \
             --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl -n "$NAMESPACE" get secret dockerhub-pull backend-runtime-env backend-runtime-files
 
       - name: Render Kubernetes manifest
         env:
