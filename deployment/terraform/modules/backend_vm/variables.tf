@@ -30,3 +30,9 @@ variable "boot_resource_policies" {
   type    = list(string)
   default = []
 }
+
+variable "dns_rrdatas_override" {
+  type        = list(string)
+  default     = null
+  description = "Optional DNS A-record values. When unset, DNS points at this VM's static IP."
+}

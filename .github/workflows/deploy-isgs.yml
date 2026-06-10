@@ -7,7 +7,7 @@ on:
 
 jobs:
   deploy_isgs:
-    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && vars.ENABLE_GKE_DEPLOYMENTS != 'true'
     uses: ./.github/workflows/deploy-dispatch.yml
     with:
       DEPLOY_ENV: isgs

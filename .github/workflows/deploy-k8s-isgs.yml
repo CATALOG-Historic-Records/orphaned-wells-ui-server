@@ -1,0 +1,14 @@
+name: Deploy ISGS Server to GKE
+
+on:
+  push:
+    branches: [isgs]
+  workflow_dispatch:
+
+jobs:
+  deploy_gke_isgs:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_ISGS_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+    uses: ./.github/workflows/deploy-k8s-dispatch.yml
+    with:
+      DEPLOY_ENV: isgs
+    secrets: inherit
