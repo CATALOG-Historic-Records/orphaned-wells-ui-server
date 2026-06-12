@@ -5,7 +5,7 @@ This directory contains the Terraform configuration used to manage backend VM in
 ## What is included
 
 - `main.tf` defines a `local.collaborators` map and creates a backend VM module for each entry.
-- `gke.tf` optionally creates the shared GKE deployment infrastructure when `enable_gke=true`.
+- `gke.tf` creates the shared GKE deployment infrastructure unless `enable_gke=false`.
 - `modules/backend_vm` contains the reusable VM module, including a compute instance, static IP, and DNS record.
 - `variables.tf` declares the Terraform input variables.
 - `terraform.tfvars` provides the default Google Cloud project and region values.
@@ -54,15 +54,15 @@ Apply the planned changes:
 terraform apply -var-file=terraform.tfvars
 ```
 
-## Optional GKE deployment infrastructure
+## GKE deployment infrastructure
 
-The GKE path is opt-in and can be tested without changing the current VM hostnames.
+The GKE path is enabled by default. The existing VM resources are still managed by Terraform and can remain stopped in GCP while GKE serves traffic.
 
-Create the GKE cluster, global load balancer IPs, and `<env>-k8s-server.uow-carbon.org` test DNS records:
+Create or update the GKE cluster, global load balancer IPs, and `<env>-k8s-server.uow-carbon.org` test DNS records:
 
 ```bash
-terraform plan -var-file=terraform.tfvars -var='enable_gke=true'
-terraform apply -var-file=terraform.tfvars -var='enable_gke=true'
+terraform plan -var-file=terraform.tfvars
+terraform apply -var-file=terraform.tfvars
 ```
 
 Export the GitHub Actions target map:
@@ -71,7 +71,13 @@ Export the GitHub Actions target map:
 terraform output -json kubernetes_deploy_targets | jq -c .
 ```
 
-Store that JSON as the GitHub secret `K8S_DEPLOY_TARGETS`. See `../kubernetes/README.md` for the full staging test, GitHub setup, and cutover steps.
+Store that JSON as the GitHub secret `K8S_DEPLOY_TARGETS`. See `../kubernetes/README.md` for Kubernetes deployment and operations commands.
+
+To explicitly exclude GKE resources from a plan:
+
+```bash
+terraform plan -var-file=terraform.tfvars -var='enable_gke=false'
+```
 
 If you need to destroy infrastructure, run:
 
