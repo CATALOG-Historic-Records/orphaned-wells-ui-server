@@ -19,7 +19,7 @@ variable "machine_type" {
 
 variable "enable_gke" {
   type        = bool
-  default     = false
+  default     = true
   description = "Create the GKE cluster, Kubernetes ingress IPs, and GKE test DNS records."
 }
 
