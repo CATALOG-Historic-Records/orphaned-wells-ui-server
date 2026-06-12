@@ -556,12 +556,23 @@ async def get_record_data(
         group_id = data.get("group_id")
         filterBy = data.get("filterBy")
         sortBy = data.get("sortBy")
+      
+        ## the following may or may not be provided
+        ## if provided, we can use them to narrow down our fetch
+        pageNumber = data.get("pageNumber")
+        pageSize = data.get("pageSize")
+        previousRank = data.get("previousRank")
+        direction = data.get("direction")
         if location and group_id:
             page_state = {
                 "location": location,
                 "group_id": group_id,
                 "filterBy": filterBy,
                 "sortBy": sortBy,
+                "pageNumber": pageNumber,
+                "pageSize": pageSize,
+                "previousRank": previousRank,
+                "direction": direction,
             }
         else:
             page_state = None
