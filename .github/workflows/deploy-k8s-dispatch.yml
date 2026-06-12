@@ -220,7 +220,7 @@ jobs:
               value="${value:1:${#value}-2}"
             fi
             case "$key" in
-              ENVIRONMENT|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE)
+              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE)
                 continue
                 ;;
             esac
