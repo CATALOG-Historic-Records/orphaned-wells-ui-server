@@ -1,8 +1,10 @@
 resource "google_compute_address" "ip" {
   name = "${var.collaborator}-static-ip-address"
 
+  # count = var.enable_gke ? 0 : 1
   lifecycle {
     prevent_destroy = true
+    ignore_changes = all # TODO: if we disable gke, remove this line
   }
 }
 
@@ -45,9 +47,10 @@ resource "google_compute_instance" "vm" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes = [
-      metadata["ssh-keys"],
-    ]
+    # ignore_changes = [
+    #   metadata["ssh-keys"],
+    # ]
+    ignore_changes = all # TODO: if we disable gke, remove this line
   }
 
   shielded_instance_config {
@@ -76,5 +79,6 @@ resource "google_dns_record_set" "dns" {
 
   lifecycle {
     prevent_destroy = true
+    ignore_changes = all # TODO: if we disable gke, remove this line
   }
 }
