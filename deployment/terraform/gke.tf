@@ -11,12 +11,12 @@ locals {
       hostname             = trimsuffix(lookup(var.gke_backend_hostnames, name, "${name}-k8s-server.uow-carbon.org"), ".")
       test_hostname        = "${name}-k8s-server.uow-carbon.org"
       static_ip_name       = "${name}-uow-gke-ip"
-      replicas             = 1
+      replicas             = 2
       cpu_request          = "2"
-      memory_request       = "6Gi"
+      memory_request       = "12Gi"
       cpu_limit            = "2"
-      memory_limit         = "6Gi"
-      persistent_disk_size = name == "ca" ? "10Gi" : "20Gi"
+      memory_limit         = "12Gi"
+      persistent_disk_size = "20Gi"
     }
   }
 }
