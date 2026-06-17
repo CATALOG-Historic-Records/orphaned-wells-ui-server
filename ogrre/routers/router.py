@@ -24,6 +24,7 @@ from ogrre.internal.image_handling import (
     undeployProcessor,
     check_if_processor_is_deployed,
 )
+from ogrre.internal.storage_api import rotate_images_in_storage
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
     IdentityProviderError,
@@ -1735,6 +1736,78 @@ async def fetch_teams(user_info: dict = Depends(authenticate)):
         )
     resp = data_manager.fetchTeams(user_info)
     return resp
+
+
+@router.post("/rotate_images/{record_id}")
+async def rotate_record_images(
+    record_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    """Rotate selected images in a record.
+
+    Args:
+        record_id: Record identifier
+        request body:
+            selectedImageIndices: List of indices of images to rotate
+            rotationDegrees: Degrees to rotate (90, 180, or 270)
+
+    Returns:
+        Success response with new image URLs
+    """
+    if not data_manager.hasPermission(user_info["email"], "review_record"):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to rotate images. Please contact a team lead or project manager.",
+        )
+
+    try:
+        req = await request.json()
+        selected_image_indices = req.get("selectedImageIndices", [])
+        rotation_degrees = req.get("rotationDegrees", 90)
+        rg_id = req.get("recordGroupId")
+
+        if not selected_image_indices or not rg_id:
+            raise HTTPException(status_code=400, detail="Missing required parameters")
+
+        # Get the current image URLs
+        image_urls = data_manager.getRecordImageUrls(record_id, rg_id)
+        if not image_urls:
+            raise HTTPException(
+                status_code=404, detail="No images found for this record"
+            )
+
+        # Extract the URLs for the selected images
+        selected_image_urls = [image_urls[idx][1] for idx in selected_image_indices]
+
+        # Rotate the images in storage
+        rotated_urls = rotate_images_in_storage(
+            selected_image_urls, rotation_degrees, overwrite=True
+        )
+
+        # Extract the filenames from the URLs and build the new image_files list
+        # Keep the old filenames for non-rotated images
+        new_image_urls = []
+        new_image_files = []
+        for idx, (filename, url) in enumerate(image_urls):
+            if idx in selected_image_indices:
+                # For rotated images, keep the original filename
+                new_image_files.append(filename)
+                new_image_urls.append(url)
+            else:
+                new_image_files.append(filename)
+                new_image_urls.append(url)
+
+        return {
+            "success": True,
+            "message": "Images rotated successfully",
+            "newImageFiles": new_image_files,
+            "rotatedUrls": rotated_urls,
+            "new_image_urls": new_image_urls,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.error(f"Error rotating images: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/delete_user/{email}")

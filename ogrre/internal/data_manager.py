@@ -2355,5 +2355,78 @@ class DataManager:
         except Exception as e:
             _log.error(f"error on cleaning {location}: {e}")
 
+    def getRecordImageUrls(self, record_id, rg_id):
+        """
+        Get the URLs for all images in a record.
+
+        Args:
+            record_id: The record ID
+            rg_id: The record group ID
+
+        Returns:
+            A list of tuples: [(image_filename, image_url), ...]
+        """
+        try:
+            _id = ObjectId(record_id)
+            document = self.db.records.find_one({"_id": _id})
+            if not document:
+                return []
+
+            image_urls = []
+            image_files = document.get("image_files", [])
+            for image in image_files:
+                if util.imageIsValid(image):
+                    image_url = get_document_image(rg_id, record_id, image)
+                    image_urls.append((image, image_url))
+
+            # Fallback to filename if no image_files
+            if len(image_urls) == 0 and document.get("filename"):
+                image_url = get_document_image(rg_id, record_id, document["filename"])
+                image_urls.append((document["filename"], image_url))
+
+            return image_urls
+        except Exception as e:
+            _log.error(f"Error getting record image URLs: {e}")
+            return []
+
+    def updateRecordImageFiles(self, record_id, new_image_filenames, user_info):
+        """
+        Update the image_files list for a record after rotation.
+
+        Args:
+            record_id: The record ID
+            new_image_filenames: List of new image filenames
+            user_info: User information for logging/history
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            _id = ObjectId(record_id)
+            search_query = {"_id": _id}
+            user = user_info.get("email", None) if user_info else None
+
+            # Update the image_files field
+            update_query = {"$set": {"image_files": new_image_filenames}}
+            result = self.db.records.update_one(search_query, update_query)
+
+            if result.modified_count > 0:
+                # Record history of the update
+                self.recordHistory(
+                    action="rotateImages",
+                    user=user,
+                    record_id=record_id,
+                    query={"image_files": new_image_filenames},
+                    calling_function="updateRecordImageFiles",
+                )
+                _log.info(f"Updated image files for record {record_id}")
+                return True
+            else:
+                _log.warning(f"No records updated for {record_id}")
+                return False
+        except Exception as e:
+            _log.error(f"Error updating record image files: {e}")
+            return False
+
 
 data_manager = DataManager()
