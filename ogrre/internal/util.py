@@ -44,7 +44,9 @@ def time_it(func):
     return wrapper
 
 
-def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
+def sortRecordAttributes(
+    attributes, processor, keep_all_attributes=False, data_fusion=None
+):
     if processor is None:
         _log.info(f"no processor found")
         return attributes, False
@@ -61,8 +63,14 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     processor_attributes_dict = convert_processor_attributes_to_dict(
         processor_attributes
     )
+
     for each in processor_attributes:
         attribute_name = each["name"]
+
+        ## if we are using data_fusion for this record group, only
+        ## keep fields that are in the data_fusion list
+        if data_fusion and attribute_name not in data_fusion:
+            continue
         if "::" not in attribute_name:
             found_ = [item for item in attributes if item["key"] == attribute_name]
             for attribute in found_:
@@ -81,6 +89,10 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     ## obsolete fields will get removed automatically.
     for attr in attributes:
         attribute_name = attr["key"]
+        ## if we are using data_fusion for this record group, only
+        ## keep fields that are in the data_fusion list
+        if data_fusion and attribute_name not in data_fusion:
+            continue
         if attribute_name not in processor_attributes_dict:
             if keep_all_attributes:
                 _log.info(
