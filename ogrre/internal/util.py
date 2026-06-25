@@ -44,7 +44,9 @@ def time_it(func):
     return wrapper
 
 
-def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
+def sortRecordAttributes(
+    attributes, processor, keep_all_attributes=False, data_fusion=None
+):
     if processor is None:
         _log.info(f"no processor found")
         return attributes, False
@@ -61,14 +63,26 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     processor_attributes_dict = convert_processor_attributes_to_dict(
         processor_attributes
     )
+
     for each in processor_attributes:
         attribute_name = each["name"]
+
+        ## if we are using data_fusion for this record group, only
+        ## keep fields that are in the data_fusion list
+        if data_fusion and attribute_name not in data_fusion:
+            continue
         if "::" not in attribute_name:
             found_ = [item for item in attributes if item["key"] == attribute_name]
             for attribute in found_:
                 if attribute is None:
                     _log.debug(f"{attribute_name} is None")
                 else:
+                    # get alias from processor metadata, if it exists
+                    processor_attribute_data = processor_attributes_dict.get(
+                        attribute_name
+                    )
+                    if processor_attribute_data:
+                        attribute["alias"] = processor_attribute_data.get("alias")
                     sorted_attributes.append(attribute)
             if len(found_) == 0:
                 _log.debug(
@@ -81,11 +95,19 @@ def sortRecordAttributes(attributes, processor, keep_all_attributes=False):
     ## obsolete fields will get removed automatically.
     for attr in attributes:
         attribute_name = attr["key"]
+        ## if we are using data_fusion for this record group, only
+        ## keep fields that are in the data_fusion list
+        if data_fusion and attribute_name not in data_fusion:
+            continue
         if attribute_name not in processor_attributes_dict:
             if keep_all_attributes:
                 _log.info(
                     f"{attribute_name} was not in processor's attributes. adding this to the end of the sorted attributes list"
                 )
+                # get alias from processor metadata, if it exists
+                processor_attribute_data = processor_attributes_dict.get(attribute_name)
+                if processor_attribute_data:
+                    attr["alias"] = processor_attribute_data.get("alias")
                 sorted_attributes.append(attr)
             else:
                 obsolete_fields_amt += 1
