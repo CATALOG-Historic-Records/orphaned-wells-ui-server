@@ -1326,6 +1326,95 @@ async def download_records(
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 
+@router.post("/download_project_records_by_document_types/{project_id}", response_class=StreamingResponse)
+async def download_project_records_by_document_types(
+    project_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    export_csv: bool = True,
+    export_json: bool = False,
+    export_images: bool = False,
+    output_name: str = None,
+    user_info: dict = Depends(authenticate),
+):
+    req = await request.json()
+
+    request_origin = request.headers.get("origin")
+    selectedColumns = req.get("columns", [])
+    document_types = req.get("document_types", [])
+
+    filter_by = req.get("filter", {})
+    sort_by = req.get("sort", ["dateCreated", 1])
+
+    json_fields_to_include = {
+        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "attributesList": [
+            "key",
+            "value",
+            "normalized_vertices",
+            "subattributes",
+            "page",
+        ],
+        "subattributes": ["key", "value", "normalized_vertices", "page"],
+    }
+
+    output_file_id = util.last4_before_decimal()
+
+    keep_all_columns = len(selectedColumns) == 0
+    
+    # Fetch records filtered by project and document types
+    records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+        user_info,
+        project_id,
+        document_types,
+        filter_by=filter_by,
+        sort_by=sort_by,
+        include_attribute_fields=json_fields_to_include,
+        forDownload=True,
+    )
+    
+    try:
+        filepaths = []
+        if export_csv:
+            csv_file = data_manager.downloadRecords(
+                records,
+                "csv",
+                user_info,
+                project_id,
+                "project",
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=f"{output_name or 'records'}_{output_file_id}",
+                request_origin=request_origin,
+            )
+            filepaths.append(csv_file)
+        if export_json:
+            json_file = data_manager.downloadRecords(
+                records,
+                "json",
+                user_info,
+                project_id,
+                "project",
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=f"{output_name or 'records'}_{output_file_id}",
+            )
+            filepaths.append(json_file)
+        if export_images:
+            documents = util.compileDocumentImageList(records)
+        else:
+            documents = []
+            
+        download_log_file = f"zip_log_{output_file_id}.txt"
+        z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
+
+        filepaths.append(download_log_file)
+        background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
+        headers = {"Content-Disposition": "attachment; filename=records.zip"}
+        return StreamingResponse(z, media_type="application/zip", headers=headers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
+
 @router.get("/get_users")
 async def get_users(user_info: dict = Depends(authenticate)):
     """Fetch all users from DB for a given user's team.
