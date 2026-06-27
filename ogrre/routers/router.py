@@ -1227,8 +1227,18 @@ async def download_records(
             "normalized_vertices",
             "subattributes",
             "page",
+            "parentAttribute",
+            "topLevelAttribute",
         ],
-        "subattributes": ["key", "value", "normalized_vertices", "page"],
+        "subattributes": [
+            "key",
+            "value",
+            "normalized_vertices",
+            "page",
+            "subattributes",
+            "parentAttribute",
+            "topLevelAttribute",
+        ],
     }
 
     output_file_id = util.last4_before_decimal()

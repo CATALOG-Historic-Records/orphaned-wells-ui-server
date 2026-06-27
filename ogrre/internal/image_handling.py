@@ -423,62 +423,20 @@ def process_image(
         record_id=record_id,
     )
     _log.info(f"processed document in doc_ai")
-    found_attributes = {}
-    for idx, attribute in enumerate(attributesList):
-        attribute_key = attribute["key"]
-        found_attributes.setdefault(attribute_key, []).append(idx)
+    attributesList = util.normalize_record_attribute_tree(attributesList)
+    for attribute in attributesList:
         if run_cleaning_functions:
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=attribute,
             )
-            subattributes_list = attribute.get("subattributes") or []
-            for subattribute in subattributes_list:
-                util.cleanRecordAttribute(
-                    processor_attributes=prcoessor_attributes_dictionary,
-                    attribute=subattribute,
-                    subattributeKey=f"{attribute_key}::{subattribute['key']}",
-                )
 
     ## sort attributes and add attributes that weren't found:
-    sortedAttributesList = []
-    processor_attributes_list = []
-    for processor_attribute in processor_attributes:
-        attr = processor_attribute["name"]
-        processor_attributes_list.append(attr)
-        if attr in found_attributes:
-            indexes = found_attributes[attr]
-            for idx in indexes:
-                sortedAttributesList.append(attributesList[idx])
-        elif (
-            "::" not in attr
-        ):  ## :: indicates it is a subattribute. these are handled by parent attribut
-            sortedAttributesList.append(
-                {
-                    "key": attr,
-                    "ai_confidence": None,
-                    "confidence": None,
-                    "raw_text": "",
-                    "text_value": "",
-                    "value": "",
-                    "normalized_vertices": None,
-                    "normalized_value": None,
-                    "subattributes": None,
-                    "isSubattribute": False,
-                    "edited": False,
-                    "page": None,
-                }
-            )
-
-    ## double check found attributes to see if we found anything that was NOT in the processor's attributes
-    for attr in found_attributes:
-        if attr not in processor_attributes_list:
-            _log.info(
-                f"{attr} was not in processor's attributes. adding this to the end of the sorted attributes list"
-            )
-            indexes = found_attributes[attr]
-            for idx in indexes:
-                sortedAttributesList.append(attributesList[idx])
+    sortedAttributesList, _ = util.sortRecordAttributes(
+        attributesList,
+        {"attributes": processor_attributes},
+        keep_all_attributes=True,
+    )
 
     ## gotta update the record in the db
     record = {
@@ -501,7 +459,6 @@ def process_image(
     del record
     del attributesList
     del sortedAttributesList
-    del found_attributes
 
     ## delete local files
     util.deleteFiles(filepaths=files_to_delete, sleep_time=0)
