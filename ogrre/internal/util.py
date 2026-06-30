@@ -23,6 +23,145 @@ CLEANING_FUNCTIONS = {
 
 _log = logging.getLogger(__name__)
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
+ATTRIBUTE_PATH_SEPARATOR = "::"
+
+
+def split_attribute_identifier(identifier):
+    if identifier is None:
+        return []
+    return [
+        part for part in str(identifier).split(ATTRIBUTE_PATH_SEPARATOR) if part != ""
+    ]
+
+
+def combine_attribute_identifier(parent_identifier, key):
+    key = "" if key is None else str(key)
+    if parent_identifier is None or parent_identifier == "":
+        return key
+
+    parent_identifier = str(parent_identifier)
+    if key == "":
+        return parent_identifier
+    if key == parent_identifier or key.startswith(
+        f"{parent_identifier}{ATTRIBUTE_PATH_SEPARATOR}"
+    ):
+        return key
+    return f"{parent_identifier}{ATTRIBUTE_PATH_SEPARATOR}{key}"
+
+
+def relative_attribute_key(identifier, parent_identifier=None):
+    identifier = "" if identifier is None else str(identifier)
+    if not parent_identifier:
+        return identifier
+
+    parent_identifier = str(parent_identifier)
+    prefix = f"{parent_identifier}{ATTRIBUTE_PATH_SEPARATOR}"
+    if identifier.startswith(prefix):
+        return identifier[len(prefix) :].split(ATTRIBUTE_PATH_SEPARATOR, 1)[0]
+    return identifier
+
+
+def get_attribute_identifier(attribute, parent_identifier=None):
+    if not isinstance(attribute, dict):
+        return parent_identifier
+
+    key = attribute.get("key", "")
+    if parent_identifier:
+        return combine_attribute_identifier(parent_identifier, key)
+
+    if attribute.get("isSubattribute", False):
+        ## 6/25/26: Added parentAttribute, but keeping backwards compatibility
+        ## with topLevelAttribute
+        parent_attribute = attribute.get("parentAttribute") or attribute.get(
+            "topLevelAttribute"
+        )
+        if parent_attribute:
+            return combine_attribute_identifier(parent_attribute, key)
+
+    return key
+
+
+def normalize_record_attribute_tree(attributes):
+    if attributes is None:
+        return []
+
+    def normalize_attribute(
+        attribute, top_level_attribute=None, parent_identifier=None
+    ):
+        if not isinstance(attribute, dict):
+            return attribute
+
+        attribute_key = attribute.get("key")
+        is_subattribute = top_level_attribute is not None
+        attribute["isSubattribute"] = is_subattribute
+        attribute["subattributes"] = attribute.get("subattributes") or []
+
+        if is_subattribute:
+            attribute["topLevelAttribute"] = top_level_attribute
+            attribute["parentAttribute"] = parent_identifier
+
+        attribute_identifier = combine_attribute_identifier(
+            parent_identifier, attribute_key
+        )
+        for subattribute in attribute["subattributes"]:
+            normalize_attribute(
+                subattribute,
+                top_level_attribute=top_level_attribute or attribute_key,
+                parent_identifier=attribute_identifier,
+            )
+        return attribute
+
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            continue
+        normalize_attribute(
+            attribute,
+            top_level_attribute=None,
+            parent_identifier=None,
+        )
+    return attributes
+
+
+def iter_attribute_tree(attributes, parent_identifier=None):
+    for attribute in attributes or []:
+        if not isinstance(attribute, dict):
+            continue
+        attribute_identifier = get_attribute_identifier(attribute, parent_identifier)
+        yield attribute, attribute_identifier
+        yield from iter_attribute_tree(
+            attribute.get("subattributes") or [], attribute_identifier
+        )
+
+
+def attribute_index_path_to_mongo_path(primary_index, subattribute_index_path=None):
+    path = f"attributesList.{primary_index}"
+    for sub_index in subattribute_index_path or []:
+        path = f"{path}.subattributes.{sub_index}"
+    return path
+
+
+def normalize_subattribute_index_path(data, fallback_sub_index=None):
+    if data is None:
+        data = {}
+
+    path = (
+        data.get("subattributeIndexPath")
+        or data.get("subAttributeIndexPath")
+        or data.get("subIndexPath")
+    )
+    if path is None and fallback_sub_index is not None:
+        path = [fallback_sub_index]
+    if path is None:
+        return []
+    if not isinstance(path, list):
+        path = [path]
+
+    normalized_path = []
+    for each in path:
+        if each is None:
+            continue
+        normalized_path.append(int(each))
+    return normalized_path
 
 
 def last4_before_decimal(ts=None):
@@ -49,21 +188,68 @@ def sortRecordAttributes(
 ):
     if processor is None:
         _log.info(f"no processor found")
-        return attributes, False
+        return normalize_record_attribute_tree(attributes), False
     if attributes is None:
         attributes = []
     processor_attributes = processor.get("attributes", None)
     if processor_attributes is None or len(processor_attributes) == 0:
         _log.info(f"no processor attributes found")
-        return attributes, False
+        return normalize_record_attribute_tree(attributes), False
     processor_attributes.sort(key=lambda x: x.get("page_order_sort", float("inf")))
 
-    ## match record attribute to each processor attribute
-    sorted_attributes = []
+    original_attributes = copy.deepcopy(attributes)
+    attributes = normalize_record_attribute_tree(attributes)
     processor_attributes_dict = convert_processor_attributes_to_dict(
         processor_attributes
     )
+    processor_attribute_tree = create_processor_attribute_tree(processor_attributes)
 
+    def sort_subattributes(record_attribute, parent_identifier):
+        subattributes = record_attribute.get("subattributes") or []
+        if len(subattributes) == 0:
+            record_attribute["subattributes"] = []
+            return
+
+        sorted_subattributes = []
+        used_indexes = set()
+        child_names = processor_attribute_tree.get(parent_identifier, [])
+
+        for child_name in child_names:
+            child_identifier = combine_attribute_identifier(
+                parent_identifier, child_name
+            )
+            for idx, subattribute in enumerate(subattributes):
+                if idx in used_indexes:
+                    continue
+                if (
+                    get_attribute_identifier(subattribute, parent_identifier)
+                    == child_identifier
+                ):
+                    processor_attribute_data = processor_attributes_dict.get(
+                        child_identifier
+                    )
+                    if processor_attribute_data:
+                        subattribute["alias"] = processor_attribute_data.get("alias")
+                    sort_subattributes(subattribute, child_identifier)
+                    sorted_subattributes.append(subattribute)
+                    used_indexes.add(idx)
+
+        for idx, subattribute in enumerate(subattributes):
+            if idx in used_indexes:
+                continue
+            child_identifier = get_attribute_identifier(subattribute, parent_identifier)
+            if child_identifier not in processor_attributes_dict:
+                _log.info(
+                    f"{child_identifier} was not in processor's attributes. keeping it at the end of the subattributes list"
+                )
+            sort_subattributes(subattribute, child_identifier)
+            sorted_subattributes.append(subattribute)
+
+        record_attribute["subattributes"] = sorted_subattributes
+
+    ## match record attribute to each processor attribute
+    sorted_attributes = []
+    used_top_level_indexes = set()
     for each in processor_attributes:
         attribute_name = each["name"]
 
@@ -71,29 +257,36 @@ def sortRecordAttributes(
         ## keep fields that are in the data_fusion list
         if data_fusion and attribute_name not in data_fusion:
             continue
-        if "::" not in attribute_name:
-            found_ = [item for item in attributes if item["key"] == attribute_name]
-            for attribute in found_:
-                if attribute is None:
-                    _log.debug(f"{attribute_name} is None")
-                else:
-                    # get alias from processor metadata, if it exists
-                    processor_attribute_data = processor_attributes_dict.get(
-                        attribute_name
-                    )
-                    if processor_attribute_data:
-                        attribute["alias"] = processor_attribute_data.get("alias")
-                    sorted_attributes.append(attribute)
-            if len(found_) == 0:
-                _log.debug(
-                    f"{attribute_name} was not in record's attributes. adding this to the sorted attributes"
-                )
-                new_attr = createNewAttribute(key=attribute_name)
-                sorted_attributes.append(new_attr)
+        if ATTRIBUTE_PATH_SEPARATOR in attribute_name:
+            continue
+
+        found_indexes = [
+            idx
+            for idx, item in enumerate(attributes)
+            if isinstance(item, dict) and item.get("key") == attribute_name
+        ]
+        for idx in found_indexes:
+            attribute = attributes[idx]
+            if attribute is None:
+                _log.debug(f"{attribute_name} is None")
+                continue
+
+            sort_subattributes(attribute, attribute_name)
+            sorted_attributes.append(attribute)
+            used_top_level_indexes.add(idx)
+
+        if len(found_indexes) == 0:
+            _log.debug(
+                f"{attribute_name} was not in record's attributes. adding this to the sorted attributes"
+            )
+            new_attr = createNewAttribute(key=attribute_name)
+            sorted_attributes.append(new_attr)
 
     obsolete_fields_amt = 0
     ## obsolete fields will get removed automatically.
-    for attr in attributes:
+    for idx, attr in enumerate(attributes):
+        if idx in used_top_level_indexes:
+            continue
         attribute_name = attr["key"]
         ## if we are using data_fusion for this record group, only
         ## keep fields that are in the data_fusion list
@@ -104,10 +297,6 @@ def sortRecordAttributes(
                 _log.info(
                     f"{attribute_name} was not in processor's attributes. adding this to the end of the sorted attributes list"
                 )
-                # get alias from processor metadata, if it exists
-                processor_attribute_data = processor_attributes_dict.get(attribute_name)
-                if processor_attribute_data:
-                    attr["alias"] = processor_attribute_data.get("alias")
                 sorted_attributes.append(attr)
             else:
                 obsolete_fields_amt += 1
@@ -118,7 +307,7 @@ def sortRecordAttributes(
     if obsolete_fields_amt >= 10:
         _log.info(f"many obsolete fields found, this is probably a mistake.")
     ## only persist when the stored list is actually different from the sorted list
-    requires_db_update = sorted_attributes != attributes
+    requires_db_update = sorted_attributes != original_attributes
     _log.info(f"sorted attributes. requires_db_update: {requires_db_update}")
     return sorted_attributes, requires_db_update
 
@@ -349,8 +538,7 @@ def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
     try:
         attributes = document.get("attributesList") or []
 
-        # Check attributes for errors & locate target key values
-        for attr in attributes:
+        for attr, _ in iter_attribute_tree(attributes):
             if attr is None:
                 continue
 
@@ -361,18 +549,6 @@ def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
             if key_name in target_keys:
                 found_values[key_name] = attr.get("value")
 
-            # Check subattributes for errors & locate target key values
-            for sub in attr.get("subattributes") or []:
-                if sub is None:
-                    continue
-
-                if sub.get("cleaning_error", False):
-                    hasError = True
-
-                sub_key = sub.get("key")
-                if sub_key in target_keys:
-                    found_values[sub_key] = sub.get("value")
-
     except Exception as e:
         _log.info(
             f"unable to searchRecordForErrorsAndTargetKeys for document: {document.get('_id')}"
@@ -380,20 +556,6 @@ def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
         _log.info(f"e: {e}")
 
     return hasError, found_values
-
-
-def convert_processor_attributes_to_dict(attributes):
-    attributes_dict = {}
-    if attributes:
-        for attr in attributes:
-            key = attr["name"]
-            attributes_dict[key] = attr
-            subattributes = attr.get("subattributes", None)
-            if subattributes:
-                for subattribute in subattributes:
-                    sub_key = subattribute["name"]
-                    attributes_dict[f"{key}::{sub_key}"] = subattribute
-    return attributes_dict
 
 
 def convert_processor_list_to_dict(processor_list):
@@ -405,28 +567,52 @@ def convert_processor_list_to_dict(processor_list):
     return processor_dict
 
 
+def iter_processor_attribute_schema(attributes, parent_identifier=None):
+    for attr in attributes or []:
+        if not isinstance(attr, dict):
+            continue
+
+        name = attr.get("name")
+        if not name:
+            continue
+
+        identifier = combine_attribute_identifier(parent_identifier, name)
+        yield identifier, attr
+        yield from iter_processor_attribute_schema(
+            attr.get("subattributes") or [], identifier
+        )
+
+
 def convert_processor_attributes_to_dict(attributes):
     if not attributes:
-        return None
+        return {}
     attributes_dict = {}
-    for attr in attributes:
-        key = attr["name"]
-        attributes_dict[key] = attr
-        subattributes = attr.get("subattributes", None)
-        if subattributes:
-            for subattribute in subattributes:
-                sub_key = subattribute["name"]
-                attributes_dict[f"{key}::{sub_key}"] = subattribute
+    for identifier, attr in iter_processor_attribute_schema(attributes):
+        attributes_dict[identifier] = attr
     return attributes_dict
 
 
-def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
-    if subattributeKey:
-        attribute_key = subattributeKey
-    else:
-        attribute_key = attribute["key"]
-    unclean_val = attribute["value"]
+def create_processor_attribute_tree(attributes):
+    attribute_tree = {}
+    for identifier, _ in iter_processor_attribute_schema(attributes):
+        parts = split_attribute_identifier(identifier)
+        if len(parts) == 0:
+            continue
+        parent_identifier = (
+            ATTRIBUTE_PATH_SEPARATOR.join(parts[:-1]) if len(parts) > 1 else None
+        )
+        attribute_tree.setdefault(parent_identifier, [])
+        if parts[-1] not in attribute_tree[parent_identifier]:
+            attribute_tree[parent_identifier].append(parts[-1])
+    return attribute_tree
 
+
+def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
+    if not processor_attributes or not isinstance(attribute, dict):
+        return False
+
+    attribute_key = subattributeKey or get_attribute_identifier(attribute)
+    unclean_val = attribute.get("value")
     attribute_schema = processor_attributes.get(attribute_key)
     if attribute_schema:
         cleaning_function_name = attribute_schema.get("cleaning_function")
@@ -434,37 +620,52 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
             _log.debug(f"cleaning_function for {attribute_key} is empty string or none")
             attribute["cleaned"] = False
             attribute["cleaning_error"] = False
-            return False
-        cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
-        if cleaning_function:
-            try:
-                cleaned_val = cleaning_function(unclean_val)
-                _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
-                attribute["value"] = cleaned_val
-                attribute["normalized_value"] = cleaned_val
-                attribute["uncleaned_value"] = unclean_val
-                attribute["cleaned"] = True
-                attribute["cleaning_error"] = False
-                attribute["last_cleaned"] = time.time()
-                return True
-            except Exception as e:
-                _log.error(f"unable to clean {attribute_key}: {e}")
-                attribute["cleaning_error"] = f"{e}"
-                attribute["cleaned"] = False
         else:
-            _log.info(f"no cleaning function with name: {cleaning_function_name}")
-
-        subattributes = attribute.get("subattributes", None)
-        if subattributes:
-            for subattribute in subattributes:
-                subattribute_key = f"{attribute_key}::{subattribute['key']}"
-                cleanRecordAttribute(
-                    processor_attributes, subattribute, subattributeKey=subattribute_key
-                )
+            cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
+            if cleaning_function:
+                try:
+                    cleaned_val = cleaning_function(unclean_val)
+                    _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
+                    attribute["value"] = cleaned_val
+                    attribute["normalized_value"] = cleaned_val
+                    attribute["uncleaned_value"] = unclean_val
+                    attribute["cleaned"] = True
+                    attribute["cleaning_error"] = False
+                    attribute["last_cleaned"] = time.time()
+                except Exception as e:
+                    _log.error(f"unable to clean {attribute_key}: {e}")
+                    attribute["cleaning_error"] = f"{e}"
+                    attribute["cleaned"] = False
+            else:
+                _log.info(f"no cleaning function with name: {cleaning_function_name}")
 
     else:
         _log.info(f"no schema found for {attribute_key}")
+
+    for subattribute in attribute.get("subattributes") or []:
+        subattribute_key = get_attribute_identifier(subattribute, attribute_key)
+        cleanRecordAttribute(
+            processor_attributes, subattribute, subattributeKey=subattribute_key
+        )
     return False
+
+
+def summarize_attribute_for_cleaning(attribute, parent_identifier=None):
+    attribute_identifier = get_attribute_identifier(attribute, parent_identifier)
+    summary = {
+        "key": attribute.get("key"),
+        "value": attribute.get("value"),
+    }
+    if parent_identifier:
+        summary["subattribute_identifier"] = attribute_identifier
+
+    subattributes = attribute.get("subattributes") or []
+    if subattributes:
+        summary["subattributes"] = [
+            summarize_attribute_for_cleaning(subattribute, attribute_identifier)
+            for subattribute in subattributes
+        ]
+    return summary
 
 
 def cleanRecords(processor_attributes, documents):
@@ -474,53 +675,17 @@ def cleanRecords(processor_attributes, documents):
     attributes_list_before_and_after = {}
 
     for doc in documents:
-        attributes_list = doc["attributesList"]
+        attributes_list = normalize_record_attribute_tree(doc["attributesList"])
         current_attributes_list_before_and_after = {
             "attributesList_before": [],
             "attributesList_after": [],
         }
         for attr in attributes_list:
-            attribute_before_cleaning = {
-                "key": attr.get("key"),
-                "value": attr.get("value"),
-            }
+            attribute_before_cleaning = summarize_attribute_for_cleaning(attr)
             cleanRecordAttribute(
                 processor_attributes=processor_attributes, attribute=attr
             )
-            attribute_after_cleaning = {
-                "key": attr.get("key"),
-                "value": attr.get("value"),
-            }
-            subattributes = attr.get("subattributes", False)
-            if subattributes:
-                attribute_before_cleaning["subattributes"] = []
-                attribute_after_cleaning["subattributes"] = []
-                for subattr in subattributes:
-                    parentAttribute = subattr.get("topLevelAttribute", "")
-                    subattributeKey = subattr["key"]
-                    subattribute_identifier = f"{parentAttribute}::{subattributeKey}"
-                    subattribute_before_cleaning = {
-                        "key": subattr.get("key"),
-                        "value": subattr.get("value"),
-                        "subattribute_identifier": subattribute_identifier,
-                    }
-                    cleanRecordAttribute(
-                        processor_attributes=processor_attributes,
-                        attribute=subattr,
-                        subattributeKey=subattribute_identifier,
-                    )
-                    subattribute_after_cleaning = {
-                        "key": subattr.get("key"),
-                        "value": subattr.get("value"),
-                        "subattribute_identifier": subattribute_identifier,
-                    }
-                    attribute_before_cleaning["subattributes"].append(
-                        subattribute_before_cleaning
-                    )
-                    attribute_after_cleaning["subattributes"].append(
-                        subattribute_after_cleaning
-                    )
-
+            attribute_after_cleaning = summarize_attribute_for_cleaning(attr)
             current_attributes_list_before_and_after["attributesList_before"].append(
                 attribute_before_cleaning
             )
@@ -555,7 +720,7 @@ def createNewAttribute(
         "value": value,
         "normalized_vertices": coordinates,
         "normalized_value": normalized_value,
-        "subattributes": subattributes,
+        "subattributes": subattributes or [],
         "isSubattribute": False,
         "edited": False,
         "page": page,
