@@ -6,6 +6,7 @@ import sys
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 import requests
+from ogrre.internal import util
 
 _log = logging.getLogger(__name__)
 
@@ -56,6 +57,58 @@ def _get_page(entity, attribute):
     return page
 
 
+def _get_entity_value(entity):
+    normalized_value = entity.normalized_value.text
+    raw_text = entity.mention_text
+    if normalized_value:
+        return normalized_value
+    return raw_text
+
+
+def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=None):
+    raw_attribute = entity.type_
+    attribute = util.relative_attribute_key(raw_attribute, parent_identifier)
+    text_value = entity.text_anchor.content
+    normalized_value = entity.normalized_value.text
+    confidence = entity.confidence
+    raw_text = entity.mention_text
+    coordinates = _get_coordinates(entity, attribute)
+    page = _get_page(entity, attribute)
+    is_subattribute = top_level_attribute is not None
+
+    new_attribute = {
+        "key": attribute,
+        "ai_confidence": confidence,
+        "confidence": confidence,
+        "raw_text": raw_text,
+        "text_value": text_value,
+        "value": _get_entity_value(entity),
+        "normalized_vertices": coordinates,
+        "normalized_value": normalized_value,
+        "subattributes": [],
+        "isSubattribute": is_subattribute,
+        "edited": False,
+        "page": page,
+    }
+    if is_subattribute:
+        new_attribute["topLevelAttribute"] = top_level_attribute
+        new_attribute["parentAttribute"] = parent_identifier
+
+    attribute_identifier = util.combine_attribute_identifier(
+        parent_identifier, attribute
+    )
+    for prop in entity.properties:
+        new_attribute["subattributes"].append(
+            _entity_to_attribute(
+                prop,
+                top_level_attribute=top_level_attribute or attribute,
+                parent_identifier=attribute_identifier,
+            )
+        )
+
+    return new_attribute
+
+
 def process_document_content(
     image_content,
     mime_type,
@@ -92,67 +145,7 @@ def process_document_content(
     attributes_list = []
 
     for entity in document_entities:
-        attribute = entity.type_
-        text_value = entity.text_anchor.content
-        normalized_value = entity.normalized_value.text
-        confidence = entity.confidence
-        raw_text = entity.mention_text
-        if normalized_value:
-            value = normalized_value
-        else:
-            value = raw_text
-        coordinates = _get_coordinates(entity, attribute)
-
-        page = _get_page(entity, attribute)
-        subattributes_list = []
-        for prop in entity.properties:
-            sub_text_value = prop.text_anchor.content
-            sub_normalized_value = prop.normalized_value.text
-            sub_attribute = prop.type_
-            sub_confidence = prop.confidence
-            sub_raw_text = prop.mention_text
-            sub_coordinates = _get_coordinates(prop, sub_attribute)
-            sub_page = _get_page(prop, sub_attribute)
-            if sub_normalized_value:
-                sub_value = sub_normalized_value
-            else:
-                sub_value = sub_raw_text
-            original_sub_attribute = sub_attribute
-
-            new_subattribute = {
-                "key": original_sub_attribute,
-                "ai_confidence": confidence,
-                "confidence": sub_confidence,
-                "raw_text": sub_raw_text,
-                "text_value": sub_text_value,
-                "value": sub_value,
-                "normalized_vertices": sub_coordinates,
-                "normalized_value": sub_normalized_value,
-                "isSubattribute": True,
-                "topLevelAttribute": attribute,
-                "edited": False,
-                "page": sub_page,
-            }
-            subattributes_list.append(new_subattribute)
-
-        if len(subattributes_list) == 0:
-            subattributes_list = None
-
-        new_attribute = {
-            "key": attribute,
-            "ai_confidence": confidence,
-            "confidence": confidence,
-            "raw_text": raw_text,
-            "text_value": text_value,
-            "value": value,
-            "normalized_vertices": coordinates,
-            "normalized_value": normalized_value,
-            "subattributes": subattributes_list,
-            "isSubattribute": False,
-            "edited": False,
-            "page": page,
-        }
-        attributes_list.append(new_attribute)
+        attributes_list.append(_entity_to_attribute(entity))
 
     return attributes_list
 
@@ -180,11 +173,11 @@ def _process_document_content_custom(
     response.raise_for_status()
     data = response.json()
     if isinstance(data, list):
-        return data
+        return util.normalize_record_attribute_tree(data)
     attributes_list = data.get("attributes_list")
     if attributes_list is None:
         raise ValueError("custom document ai response missing attributes_list")
-    return attributes_list
+    return util.normalize_record_attribute_tree(attributes_list)
 
 
 def deploy_processor(rg_id, data_manager):
