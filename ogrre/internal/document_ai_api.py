@@ -109,6 +109,61 @@ def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=Non
     return new_attribute
 
 
+def document_to_attributes(document_object, using_default_processor=False):
+    document_entities = document_object.entities
+    if using_default_processor:
+        if not document_entities:
+            return []
+        _log.info("generic processor, diving into properties")
+        document_entities = document_entities[0].properties
+
+    attributes_list = []
+
+    for entity in document_entities:
+        attributes_list.append(_entity_to_attribute(entity))
+
+    return attributes_list
+
+
+def process_document_json(document_json, using_default_processor=False):
+    if isinstance(document_json, bytes):
+        document_json = document_json.decode("utf-8")
+    document_object = documentai.Document.from_json(
+        document_json, ignore_unknown_fields=True
+    )
+    return document_to_attributes(
+        document_object, using_default_processor=using_default_processor
+    )
+
+
+def batch_process_documents(
+    input_documents,
+    output_gcs_uri,
+    processor_id,
+    model_id,
+    skip_human_review=False,
+):
+    if DOCUMENT_AI_BACKEND != "google":
+        raise ValueError("Batch Document AI processing requires the google backend")
+
+    docai_client = _get_docai_client()
+    resource_name = docai_client.processor_version_path(
+        PROJECT_ID, LOCATION, processor_id, model_id
+    )
+
+    request = documentai.BatchProcessRequest(
+        name=resource_name,
+        input_documents=input_documents,
+        document_output_config=documentai.DocumentOutputConfig(
+            gcs_output_config=documentai.DocumentOutputConfig.GcsOutputConfig(
+                gcs_uri=output_gcs_uri
+            )
+        ),
+        skip_human_review=skip_human_review,
+    )
+    return docai_client.batch_process_documents(request=request)
+
+
 def process_document_content(
     image_content,
     mime_type,
