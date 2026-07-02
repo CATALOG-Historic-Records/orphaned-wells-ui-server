@@ -1277,6 +1277,7 @@ async def get_download_size(
 
     filter_by = req.get("filter", {})
     sort_by = req.get("sort", ["dateCreated", 1])
+    document_types = req.get("document_types", [])
 
     json_fields_to_include = {
         "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
@@ -1304,6 +1305,16 @@ async def get_download_size(
     elif location == "team":
         records, _ = data_manager.fetchRecordsByTeam(
             user_info,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+    elif location == "documentType":
+        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+            user_info,
+            _id,
+            document_types,
             filter_by=filter_by,
             sort_by=sort_by,
             include_attribute_fields=json_fields_to_include,
@@ -1359,6 +1370,7 @@ async def download_records(
 
     filter_by = req.get("filter", {})
     sort_by = req.get("sort", ["dateCreated", 1])
+    document_types = req.get("document_types", [])
 
     json_fields_to_include = {
         "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
@@ -1417,9 +1429,19 @@ async def download_records(
             forDownload=True,
         )
         setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
+    elif location == "documentType":
+        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+            user_info,
+            _id,
+            document_types,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
     else:
         raise HTTPException(
-            status_code=400, detail=f"Location must be project, record_group, or team"
+            status_code=400, detail=f"Location must be project, record_group, documentType, or team"
         )
     try:
         filepaths = []
