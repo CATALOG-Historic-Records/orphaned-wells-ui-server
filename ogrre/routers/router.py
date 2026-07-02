@@ -25,6 +25,7 @@ from ogrre.internal.image_handling import (
     check_if_processor_is_deployed,
 )
 from ogrre.internal.storage_api import rotate_images_in_storage
+from ogrre.internal import batch_document_processing
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
     IdentityProviderError,
@@ -812,6 +813,146 @@ async def upload_document(
         except Exception as e:
             _log.error(f"unable to read image file: {e}")
             raise HTTPException(400, detail=f"Unable to process image file: {e}")
+
+
+@router.post("/batch_process_documents/{rg_id}")
+async def batch_process_documents(
+    rg_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    """Process documents from a GCS bucket/prefix with Document AI Batch API.
+
+    Request body:
+        {
+            "bucketName": "source-bucket-name",
+            "prefix": "optional/folder/path/",
+            "run_cleaning_functions": true,
+            "outputBucketName": "optional-output-bucket-name",
+            "outputPrefix": "optional/output/folder/"
+        }
+
+    Notes:
+        - bucketName is required. Send only the bucket name, not a gs:// URI.
+        - prefix is optional. Omit it or send "" to process the whole bucket.
+          When present, send only the folder path inside the bucket.
+          Trailing slash is optional; the backend normalizes it to a folder
+          boundary so "folder/name" does not also match "folder/name_extra".
+          Example: "incoming/well-records/".
+        - run_cleaning_functions defaults to true.
+        - outputBucketName/outputPrefix are optional and control where Document AI
+          batch JSON output is written. They do not control frontend display PNGs.
+        - The backend stores PNG display copies at:
+          uploads/{record-group-id}/{record-id}/{png-files}
+          and does not delete or modify source files in the request bucket.
+    """
+    if not REQUIRE_AUTH:
+        user_info = anonymous_user()
+
+    user_email = user_info["email"].lower()
+    if not data_manager.hasPermission(user_email, "upload_document"):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
+    if not project_is_valid:
+        raise HTTPException(404, detail="Project not found")
+
+    req = await request.json()
+    bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
+    prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
+    output_bucket_name = req.get("outputBucketName") or req.get("output_bucket_name")
+    output_prefix = req.get("outputPrefix") or req.get("output_prefix")
+    run_cleaning_functions = req.get(
+        "run_cleaning_functions", req.get("runCleaningFunctions", True)
+    )
+
+    if not bucket_name:
+        raise HTTPException(400, detail="bucketName is required")
+
+    job_id = batch_document_processing.create_batch_document_job(
+        rg_id=rg_id,
+        user_info=user_info,
+        bucket_name=bucket_name,
+        prefix=prefix,
+        output_bucket_name=output_bucket_name,
+        output_prefix=output_prefix,
+    )
+    background_tasks.add_task(
+        batch_document_processing.process_batch_document_job,
+        job_id=job_id,
+        rg_id=rg_id,
+        user_info=user_info,
+        data_manager=data_manager,
+        bucket_name=bucket_name,
+        prefix=prefix,
+        output_bucket_name=output_bucket_name,
+        output_prefix=output_prefix,
+        run_cleaning_functions=run_cleaning_functions,
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/batch_process_documents/{rg_id}/check_gcs_path")
+async def check_batch_process_documents_gcs_path(
+    rg_id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Count documents that would be submitted for a GCS batch request.
+
+    Request body matches /batch_process_documents/{rg_id}:
+        {
+            "bucketName": "source-bucket-name",
+            "prefix": "optional/folder/path/"
+        }
+
+    The backend applies the same prefix normalization and Document AI Toolbox
+    filtering as the batch processor, so totalFiles reflects the supported
+    documents that would be submitted.
+    """
+    if not REQUIRE_AUTH:
+        user_info = anonymous_user()
+
+    user_email = user_info["email"].lower()
+    if not data_manager.hasPermission(user_email, "upload_document"):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
+    if not project_is_valid:
+        raise HTTPException(404, detail="Project not found")
+
+    req = await request.json()
+    bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
+    prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
+
+    if not bucket_name:
+        raise HTTPException(400, detail="bucketName is required")
+
+    try:
+        return batch_document_processing.get_gcs_path_document_summary(
+            bucket_name=bucket_name, prefix=prefix
+        )
+    except Exception as e:
+        _log.error(f"unable to check GCS bucket/path: {e}")
+        raise HTTPException(400, detail=f"Unable to check GCS bucket/path: {e}")
+
+
+@router.get("/batch_process_documents/{job_id}/status")
+async def get_batch_process_documents_status(
+    job_id: str, user_info: dict = Depends(authenticate)
+):
+    """Return status for a batch Document AI processing job."""
+    job = batch_document_processing.get_batch_document_job(job_id)
+    if job is None:
+        raise HTTPException(404, detail="Batch document processing job not found")
+    return job
 
 
 @router.post("/deploy_processor/{rg_id}")
