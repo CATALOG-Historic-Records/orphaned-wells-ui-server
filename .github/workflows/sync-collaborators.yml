@@ -1,0 +1,59 @@
+name: Open PRs to collaborator branches
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  sync_collaborator_branches:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        base:
+          - newts
+          - isgs
+          - osage
+        #   - ca
+
+    env:
+        BASE_BRANCH: ${{ matrix.base }}
+
+    steps:
+      - name: Create PR if it doesn't exist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const base = process.env.BASE_BRANCH;
+
+            const head = `${owner}:main`; // head ref (same repo)
+            
+            // Check existing open PRs
+            const existing = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: "open",
+              head,
+              base,
+              per_page: 100
+            });
+
+            if (existing.data.length > 0) {
+              core.info(`PR already exists for base=${base}`);
+              return;
+            }
+
+            await github.rest.pulls.create({
+              owner,
+              repo,
+              head: "main",
+              base,
+              title: `Sync main → ${base}`,
+              body: `Automated PR created after updates to main.`,
+            });
