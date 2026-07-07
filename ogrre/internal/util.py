@@ -608,11 +608,15 @@ def create_processor_attribute_tree(attributes):
 
 
 def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
+    unclean_val = attribute.get("value")
+    ## regardless of whether we clean the value, we must update uncleaned value
+    _log.info(f"updating uncleaned value to {unclean_val}")
+    attribute["uncleaned_value"] = unclean_val
     if not processor_attributes or not isinstance(attribute, dict):
+        attribute["cleaned"] = False
         return False
 
     attribute_key = subattributeKey or get_attribute_identifier(attribute)
-    unclean_val = attribute.get("value")
     attribute_schema = processor_attributes.get(attribute_key)
     if attribute_schema:
         cleaning_function_name = attribute_schema.get("cleaning_function")
@@ -628,7 +632,6 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
                     _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
                     attribute["value"] = cleaned_val
                     attribute["normalized_value"] = cleaned_val
-                    attribute["uncleaned_value"] = unclean_val
                     attribute["cleaned"] = True
                     attribute["cleaning_error"] = False
                     attribute["last_cleaned"] = time.time()
