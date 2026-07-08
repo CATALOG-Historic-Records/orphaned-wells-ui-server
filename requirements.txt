@@ -71,4 +71,4 @@ uvicorn==0.27.0
 wheel==0.42.0
 yarl==1.9.4
 zipstream==1.1.4
-ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@5192db061e983fca04a94a5212b1716963653989
+ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@c3cf5707e50339b238418d495a14ff33950a889f
