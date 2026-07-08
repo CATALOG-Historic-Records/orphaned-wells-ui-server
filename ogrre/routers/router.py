@@ -1610,6 +1610,17 @@ async def get_cleaning_functions(user_info: dict = Depends(authenticate)):
     return {"cleaning_functions": list(util.CLEANING_FUNCTIONS.keys())}
 
 
+@router.get("/get_ogrre_version")
+async def get_ogrre_version(user_info: dict = Depends(authenticate)):
+    """Get backend package and OGRRE data cleaning version metadata."""
+    if not data_manager.hasPermission(user_info.get("email"), "manage_schema"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
+        )
+    return util.build_ogrre_version_info()
+
+
 @router.post("/upload_processor_schema")
 async def upload_processor_schema(
     name: str = None,

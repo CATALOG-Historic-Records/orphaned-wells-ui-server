@@ -7,6 +7,10 @@ import zipstream
 import csv
 import json
 import copy
+from pathlib import Path
+import re
+import importlib.metadata as importlib_metadata
+import json
 
 import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
 from ogrre.internal import storage_api
@@ -24,6 +28,10 @@ CLEANING_FUNCTIONS = {
 _log = logging.getLogger(__name__)
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 ATTRIBUTE_PATH_SEPARATOR = "::"
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_PACKAGE_NAME = "orphaned-wells-ui-server"
+DATA_CLEANING_PACKAGE_NAME = "ogrre_data_cleaning"
 
 
 def split_attribute_identifier(identifier):
@@ -1269,3 +1277,105 @@ def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
     except Exception as e:
         _log.info(f"exception: {e}")
         return None
+
+
+def _get_distribution_metadata(package_name: str) -> dict:
+    package_info = {"name": package_name}
+    try:
+        package_info["version"] = importlib_metadata.version(package_name)
+    except importlib_metadata.PackageNotFoundError:
+        pass
+
+    try:
+        distribution = importlib_metadata.distribution(package_name)
+        direct_url_text = distribution.read_text("direct_url.json")
+    except importlib_metadata.PackageNotFoundError:
+        direct_url_text = None
+
+    if direct_url_text:
+        try:
+            direct_url = json.loads(direct_url_text)
+            source_url = direct_url.get("url")
+            if source_url:
+                package_info["source_url"] = source_url
+
+            vcs_info = direct_url.get("vcs_info") or {}
+            commit = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
+            if commit:
+                package_info["commit"] = commit
+            if vcs_info.get("requested_revision"):
+                package_info["requested_revision"] = vcs_info["requested_revision"]
+        except (TypeError, json.JSONDecodeError) as e:
+            _log.debug(
+                "unable to parse direct_url metadata for %s: %s", package_name, e
+            )
+
+    return package_info
+
+
+def _get_requirement_metadata(package_name: str) -> dict:
+    requirement_info = {}
+    requirements_path = PROJECT_ROOT / "requirements.txt"
+    normalized_package_name = package_name.lower().replace("-", "_")
+
+    try:
+        requirement_lines = requirements_path.read_text().splitlines()
+    except FileNotFoundError:
+        return requirement_info
+
+    for line in requirement_lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        normalized_line = line.lower().replace("-", "_")
+        if not normalized_line.startswith(normalized_package_name):
+            continue
+
+        requirement_info["requirement"] = line
+        if " @ git+" in line:
+            requirement_url = line.split("@ git+", 1)[1]
+            source_url, commit = requirement_url.rsplit("@", 1)
+            requirement_info["source_url"] = source_url
+            requirement_info["commit"] = commit.split("#", 1)[0]
+        elif "==" in line:
+            requirement_info["version"] = line.split("==", 1)[1]
+        break
+
+    return requirement_info
+
+
+def _get_setup_py_metadata() -> dict:
+    setup_info = {}
+    setup_path = PROJECT_ROOT / "setup.py"
+    try:
+        setup_text = setup_path.read_text()
+    except FileNotFoundError:
+        return setup_info
+
+    version_match = re.search(r"version\s*=\s*[\"']([^\"']+)[\"']", setup_text)
+    if version_match:
+        setup_info["version"] = version_match.group(1)
+
+    url_match = re.search(r"url\s*=\s*[\"']([^\"']+)[\"']", setup_text)
+    if url_match:
+        setup_info["source_url"] = url_match.group(1)
+
+    return setup_info
+
+
+def build_ogrre_version_info() -> dict:
+    data_cleaning_info = _get_distribution_metadata(DATA_CLEANING_PACKAGE_NAME)
+    for key, value in _get_requirement_metadata(DATA_CLEANING_PACKAGE_NAME).items():
+        data_cleaning_info.setdefault(key, value)
+
+    backend_info = _get_distribution_metadata(BACKEND_PACKAGE_NAME)
+    for key, value in _get_setup_py_metadata().items():
+        backend_info.setdefault(key, value)
+
+    return {
+        "packages": [
+            data_cleaning_info,
+            backend_info,
+        ]
+    }
