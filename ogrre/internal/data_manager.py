@@ -1081,8 +1081,8 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     @time_it
-    def fetchColumnData(self, location, _id):
-        if location == "project" or location == "team":
+    def fetchColumnData(self, location, _id, selected_record_groups=None):
+        if location == "project" or location == "team" or location == "documentType":
             columns = set()
             if location == "project":
                 # get project, set name and settings
@@ -1090,13 +1090,18 @@ class DataManager:
                 document["_id"] = _id
                 # get all record groups
                 record_groups = self.getProjectRecordGroupsList(_id)
-            else:
+            elif location == "team":
                 document = self.db.teams.find({"name": _id}).next()
                 document["_id"] = str(document["_id"])
                 ##TODO: fix object ids in team project list?
                 for i in range(len(document["project_list"])):
                     document["project_list"][i] = str(document["project_list"][i])
                 record_groups = self.getTeamRecordGroupsList(_id)
+            elif location == "documentType":
+                # get project, set name and settings
+                document = self.db.projects.find({"_id": ObjectId(_id)}).next()
+                document["_id"] = _id
+                record_groups = selected_record_groups or []
 
             rg_ids = []
             for rg in record_groups:

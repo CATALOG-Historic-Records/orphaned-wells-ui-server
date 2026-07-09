@@ -666,14 +666,14 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
 
 @router.get("/get_column_data/{location}/{_id}", response_model=dict or None)
 async def get_column_data(
-    location: str, _id: str, user_info: dict = Depends(authenticate)
+    location: str, _id: str, selected_record_groups: list[str]=None, user_info: dict = Depends(authenticate)
 ):
     """Fetch processor data for provided id.
 
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.fetchColumnData(location, _id)
+    resp = data_manager.fetchColumnData(location, _id, selected_record_groups=selected_record_groups)
     return resp
 
 
