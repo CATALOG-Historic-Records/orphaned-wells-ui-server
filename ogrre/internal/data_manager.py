@@ -1114,8 +1114,9 @@ class DataManager:
                 processor_ids.append(google_id)
             processors = self.getMongoProcessorsByIDs(processor_ids)
             for proc in processors:
-                for attr in proc.get("attributes"):
-                    columns.add(attr["name"])
+                if proc and "attributes" in proc:
+                    for attr in proc.get("attributes") or []:
+                        columns.add(attr["name"])
             if "projects" in document:
                 del document["projects"]
             return {"columns": list(columns), "obj": document}
@@ -1127,13 +1128,12 @@ class DataManager:
             rg_document["_id"] = _id
             google_id = rg_document["processorId"]
             processor = self.getProcessorByGoogleId(google_id)
-            if processor is None:
-                return None
-            for attr in processor["attributes"]:
-                attr_name = attr["name"]
-                if data_fusion and attr_name not in data_fusion:
-                    continue
-                columns.append(attr["name"])
+            if processor is not None and "attributes" in processor:
+                for attr in processor["attributes"] or []:
+                    attr_name = attr["name"]
+                    if data_fusion and attr_name not in data_fusion:
+                        continue
+                    columns.append(attr["name"])
             return {"columns": columns, "obj": rg_document}
         return None
 

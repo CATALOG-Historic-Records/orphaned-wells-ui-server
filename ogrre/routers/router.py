@@ -11,6 +11,7 @@ from fastapi import (
     UploadFile,
     BackgroundTasks,
     Depends,
+    Query,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -664,9 +665,12 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     return resp
 
 
-@router.get("/get_column_data/{location}/{_id}", response_model=dict or None)
+@router.get("/get_column_data/{location}/{_id}", response_model=Optional[dict])
 async def get_column_data(
-    location: str, _id: str, selected_record_groups: list[str]=None, user_info: dict = Depends(authenticate)
+    location: str,
+    _id: str,
+    selected_record_groups: list[str] = Query(None),
+    user_info: dict = Depends(authenticate),
 ):
     """Fetch processor data for provided id.
 
