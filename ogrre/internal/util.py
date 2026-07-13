@@ -1364,6 +1364,19 @@ def _get_setup_py_metadata() -> dict:
     return setup_info
 
 
+def _get_deployment_metadata() -> dict:
+    deployment_info = {
+        "image": os.getenv("OGRRE_BACKEND_IMAGE"),
+        "deploy_run_id": os.getenv("OGRRE_BACKEND_DEPLOY_RUN_ID"),
+        "deployed_at": os.getenv("OGRRE_BACKEND_DEPLOYED_AT"),
+    }
+    return {
+        key: value
+        for key, value in deployment_info.items()
+        if value is not None and value != ""
+    }
+
+
 def build_ogrre_version_info() -> dict:
     data_cleaning_info = _get_distribution_metadata(DATA_CLEANING_PACKAGE_NAME)
     for key, value in _get_requirement_metadata(DATA_CLEANING_PACKAGE_NAME).items():
@@ -1377,5 +1390,6 @@ def build_ogrre_version_info() -> dict:
         "packages": [
             data_cleaning_info,
             backend_info,
-        ]
+        ],
+        "deployment": _get_deployment_metadata(),
     }

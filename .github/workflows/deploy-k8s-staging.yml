@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-k8s-staging
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash -l {0}
@@ -41,7 +45,9 @@ jobs:
           context: .
           file: ./deployment/dockerfile
           push: true
-          tags: michaelpescelbl/orphaned-wells-ui-server:latest
+          tags: |
+            michaelpescelbl/orphaned-wells-ui-server:latest
+            michaelpescelbl/orphaned-wells-ui-server:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
   deploy_gke_staging:
@@ -50,5 +56,5 @@ jobs:
     uses: ./.github/workflows/deploy-k8s-dispatch.yml
     with:
       DEPLOY_ENV: staging
-      IMAGE_TAG: latest
+      IMAGE_TAG: ${{ github.sha }}
     secrets: inherit
