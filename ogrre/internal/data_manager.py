@@ -997,19 +997,19 @@ class DataManager:
             exclude_attribute_fields=exclude_attribute_fields,
             forDownload=forDownload,
         )
-    
+
     def fetchRecordsByProjectAndDocumentTypes(
-    self,
-    user,
-    project_id,
-    document_types,
-    page=None,
-    records_per_page=None,
-    sort_by=["dateCreated", 1],
-    filter_by={},
-    include_attribute_fields=None,
-    exclude_attribute_fields=None,
-    forDownload=False,
+        self,
+        user,
+        project_id,
+        document_types,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by={},
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
+        forDownload=False,
     ):
         # 1. Get all record group IDs for the project
         project_rg_ids = self.getProjectRecordGroupsList(project_id)
@@ -1018,7 +1018,7 @@ class DataManager:
         # 2. Filter record groups by allowed document types
         rg_query = {
             "_id": {"$in": project_rg_object_ids},
-            "documentType": {"$in": document_types}
+            "documentType": {"$in": document_types},
         }
         cursor = self.db.record_groups.find(rg_query)
         filtered_rg_ids = [str(doc["_id"]) for doc in cursor]

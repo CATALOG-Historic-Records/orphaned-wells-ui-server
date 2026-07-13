@@ -698,7 +698,9 @@ async def get_column_data(
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.fetchColumnData(location, _id, selected_record_groups=selected_record_groups)
+    resp = data_manager.fetchColumnData(
+        location, _id, selected_record_groups=selected_record_groups
+    )
     return resp
 
 
@@ -1507,7 +1509,8 @@ async def download_records(
         )
     else:
         raise HTTPException(
-            status_code=400, detail=f"Location must be project, record_group, documentType, or team"
+            status_code=400,
+            detail=f"Location must be project, record_group, documentType, or team",
         )
     try:
         filepaths = []
@@ -1555,7 +1558,10 @@ async def download_records(
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 
-@router.post("/download_project_records_by_document_types/{project_id}", response_class=StreamingResponse)
+@router.post(
+    "/download_project_records_by_document_types/{project_id}",
+    response_class=StreamingResponse,
+)
 async def download_project_records_by_document_types(
     project_id: str,
     request: Request,
@@ -1590,7 +1596,7 @@ async def download_project_records_by_document_types(
     output_file_id = util.last4_before_decimal()
 
     keep_all_columns = len(selectedColumns) == 0
-    
+
     # Fetch records filtered by project and document types
     records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
         user_info,
@@ -1601,7 +1607,7 @@ async def download_project_records_by_document_types(
         include_attribute_fields=json_fields_to_include,
         forDownload=True,
     )
-    
+
     try:
         filepaths = []
         if export_csv:
@@ -1633,7 +1639,7 @@ async def download_project_records_by_document_types(
             documents = util.compileDocumentImageList(records)
         else:
             documents = []
-            
+
         download_log_file = f"zip_log_{output_file_id}.txt"
         z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
 
@@ -1643,6 +1649,7 @@ async def download_project_records_by_document_types(
         return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
+
 
 @router.get("/get_users")
 async def get_users(user_info: dict = Depends(authenticate)):
