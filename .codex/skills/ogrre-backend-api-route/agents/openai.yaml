@@ -1,0 +1,4 @@
+interface:
+  display_name: "OGRRE Backend API"
+  short_description: "Add FastAPI routes using OGRRE data_manager"
+  default_prompt: "Use $ogrre-backend-api-route to add a FastAPI route and data_manager behavior in the OGRRE backend."

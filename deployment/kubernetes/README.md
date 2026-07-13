@@ -151,7 +151,7 @@ Keep `COLLABORATOR` in the environment secret when the backend needs it.
 
 ## GitHub Actions deployment
 
-The staging workflow builds and pushes `michaelpescelbl/orphaned-wells-ui-server:latest`, then deploys staging:
+The staging workflow builds and pushes both `michaelpescelbl/orphaned-wells-ui-server:latest` and an immutable commit-SHA tag, then deploys staging with the SHA tag. The `latest` tag remains available for environment-specific backend deployments that run later:
 
 ```bash
 gh workflow run deploy-k8s-staging.yml \

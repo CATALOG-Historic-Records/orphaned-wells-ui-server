@@ -5,6 +5,19 @@ Handles the file storage for uploaded documents through OGRRE.
 Supports configurations for google cloud storage and local file storage.
 
 Also includes utilities for rotating images stored in either backend.
+
+Storage keys are relative paths inside the configured backend. For Google
+Cloud Storage, keys are blob names in STORAGE_BUCKET_NAME. For local storage,
+keys are paths under LOCAL_STORAGE_ROOT.
+
+Record display images use this canonical layout:
+    uploads/{record-group-id}/{record-id}/{image-files}
+
+When a record is deleted, its whole record image directory is moved to:
+    deleted/{record-id}/{image-files}
+
+Keep record-image path changes centralized in this module so callers do not
+need to know the storage backend or key layout.
 """
 
 import datetime
@@ -40,6 +53,9 @@ LOCAL_STORAGE_ROOT = os.path.expanduser(
 LOCAL_STORAGE_URL_BASE = os.getenv(
     "LOCAL_STORAGE_URL_BASE", "http://localhost:8001/local-storage"
 ).rstrip("/")
+
+UPLOADS_PREFIX = "uploads"
+DELETED_PREFIX = "deleted"
 
 
 def _storage_path(key):
@@ -175,6 +191,106 @@ def delete_directory(prefix, bucket_name=BUCKET_NAME):
     return True
 
 
+def move_directory(prefix, destination_prefix, bucket_name=BUCKET_NAME):
+    """
+    Move all files under one storage key prefix to another prefix.
+
+    GCS does not have real directories, so this performs copy-then-delete for
+    every blob under the source prefix. Local storage performs the equivalent
+    filesystem move while preserving paths below the source directory.
+    """
+    source_prefix = prefix.strip("/")
+    target_prefix = destination_prefix.strip("/")
+
+    if not source_prefix or not target_prefix:
+        raise ValueError("source and destination storage prefixes are required")
+
+    if _is_local():
+        source = _storage_path(source_prefix)
+        destination = _storage_path(target_prefix)
+        if not os.path.exists(source):
+            _log.info(f"local storage prefix not found: {source}")
+            return False
+
+        if os.path.isfile(source):
+            files_to_move = [(source, os.path.basename(source))]
+            cleanup_root = os.path.dirname(source)
+        else:
+            files_to_move = []
+            cleanup_root = source
+            for root, _, files in os.walk(source):
+                for name in files:
+                    source_file = os.path.join(root, name)
+                    relative_path = os.path.relpath(source_file, source)
+                    files_to_move.append((source_file, relative_path))
+
+        moved_files = 0
+        for source_file, relative_path in files_to_move:
+            destination_file = os.path.join(destination, relative_path)
+            _ensure_local_dir(destination_file)
+            os.replace(source_file, destination_file)
+            moved_files += 1
+
+        for root, _, _ in os.walk(cleanup_root, topdown=False):
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+
+        return moved_files > 0
+
+    _log.info(
+        f"moving storage prefix {source_prefix} to {target_prefix} in google storage"
+    )
+    _, bucket = _get_bucket(bucket_name=bucket_name)
+    source_prefix = f"{source_prefix.rstrip('/')}/"
+    target_prefix = f"{target_prefix.rstrip('/')}/"
+    blobs = list(bucket.list_blobs(prefix=source_prefix))
+    moved_files = 0
+
+    for blob in blobs:
+        relative_path = blob.name[len(source_prefix) :]
+        if not relative_path:
+            continue
+        destination_name = f"{target_prefix}{relative_path}"
+        bucket.copy_blob(blob, bucket, destination_name)
+        blob.delete()
+        moved_files += 1
+
+    return moved_files > 0
+
+
+def get_record_image_directory(record_group_id, record_id):
+    """
+    Return the storage prefix for display images generated for one record:
+        uploads/{record-group-id}/{record-id}
+    """
+    return f"{UPLOADS_PREFIX}/{record_group_id}/{record_id}"
+
+
+def get_deleted_record_image_directory(record_id):
+    """
+    Return the storage prefix for display images moved out of active uploads:
+        deleted/{record-id}
+    """
+    return f"{DELETED_PREFIX}/{record_id}"
+
+
+def move_record_images_to_deleted(record_group_id, record_id, bucket_name=BUCKET_NAME):
+    """
+    Move a record's display-image directory from active uploads to deleted
+    storage. This is the record-delete archive path; callers should not build
+    record image keys themselves.
+    """
+    source_prefix = get_record_image_directory(record_group_id, record_id)
+    destination_prefix = get_deleted_record_image_directory(record_id)
+    return move_directory(
+        source_prefix,
+        destination_prefix,
+        bucket_name=bucket_name,
+    )
+
+
 def get_file_url(key, bucket_name=BUCKET_NAME):
     if _is_local():
         return f"{LOCAL_STORAGE_URL_BASE}/{quote(key, safe='/')}"
@@ -194,7 +310,7 @@ def get_file_url(key, bucket_name=BUCKET_NAME):
 
 
 def get_document_image(rg_id, record_id, filename, bucket_name=BUCKET_NAME):
-    path = f"uploads/{rg_id}/{record_id}/{filename}"
+    path = f"{get_record_image_directory(rg_id, record_id)}/{filename}"
     return get_file_url(path, bucket_name=bucket_name)
 
 

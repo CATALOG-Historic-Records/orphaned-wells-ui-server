@@ -331,7 +331,9 @@ jobs:
               | shasum -a 256 \
               | awk '{print $1}'
           )"
+          DEPLOYED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           export RUNTIME_CONFIG_SHA
+          export DEPLOYED_AT
           envsubst < deployment/kubernetes/backend.yaml > deployment/kubernetes/rendered/backend.yaml
 
       - name: Apply Kubernetes manifest

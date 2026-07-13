@@ -49,19 +49,20 @@ ACCESS_COOKIE = "ogrre_session"
 REFRESH_COOKIE = "ogrre_refresh_session"
 CSRF_COOKIE = "ogrre_csrf"
 CSRF_HEADER = "X-CSRF-Token"
+ANONYMOUS_TEAM_COOKIE = "ogrre_anonymous_team"
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", "3600"))
 REFRESH_COOKIE_MAX_AGE_SECONDS = int(
     os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", "2592000")
 )
 
 
-def anonymous_user():
+def anonymous_user(default_team: Optional[str] = None):
     return {
         "email": "anonymous",
         "roles": {},
         "permissions": [],
         "anonymous": True,
-        "default_team": DEFAULT_UNAUTHENTICATED_TEAM["name"],
+        "default_team": default_team or DEFAULT_UNAUTHENTICATED_TEAM["name"],
     }
 
 
@@ -95,6 +96,26 @@ def _set_csrf_cookie(response: JSONResponse, csrf_token: Optional[str] = None) -
     )
     response.headers[CSRF_HEADER] = csrf_token
     return csrf_token
+
+
+def _get_anonymous_team_from_request(request: Request) -> str:
+    team = (request.cookies.get(ANONYMOUS_TEAM_COOKIE) or "").strip()
+    if team and team in data_manager.fetchTeams():
+        return team
+    return DEFAULT_UNAUTHENTICATED_TEAM["name"]
+
+
+def _set_anonymous_team_cookie(response: JSONResponse, team: str):
+    response.set_cookie(
+        key=ANONYMOUS_TEAM_COOKIE,
+        value=team,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=REFRESH_COOKIE_MAX_AGE_SECONDS,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
 
 
 def _set_auth_cookies(
@@ -211,7 +232,7 @@ async def authenticate(request: Request, token: str = Depends(oauth2_scheme)):
         user account information
     """
     if not REQUIRE_AUTH:
-        return anonymous_user()
+        return anonymous_user(_get_anonymous_team_from_request(request))
     token_to_verify = get_bearer_or_session_token(request, token)
     if not token_to_verify:
         raise HTTPException(status_code=401, detail="missing authentication token")
@@ -375,7 +396,7 @@ async def check_authorization(
     else:
         environment = os.environ.get("ENVIRONMENT", None)
     if not REQUIRE_AUTH:
-        user = anonymous_user()
+        user = user_info
     else:
         user = data_manager.getUser(email)
         if user is None:
@@ -660,7 +681,7 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.getProcessorByGoogleId(google_id)
+    resp = data_manager.getProcessorById(google_id)
     return resp
 
 
@@ -684,7 +705,7 @@ async def get_team_info(user_info: dict = Depends(authenticate)):
     Returns:
         Dictionary containing team information
     """
-    resp = data_manager.fetchTeamInfo(user_info["email"])
+    resp = data_manager.fetchTeamInfo(user_info["email"], user_info.get("default_team"))
     return resp
 
 
@@ -753,7 +774,7 @@ async def upload_document(
     """
     user_email = user_email.lower()
     if not REQUIRE_AUTH:
-        user_info = anonymous_user()
+        user_info = anonymous_user(_get_anonymous_team_from_request(request))
     elif not data_manager.hasPermission(user_email, "upload_document"):
         raise HTTPException(
             403,
@@ -848,7 +869,7 @@ async def batch_process_documents(
           and does not delete or modify source files in the request bucket.
     """
     if not REQUIRE_AUTH:
-        user_info = anonymous_user()
+        user_info = anonymous_user(_get_anonymous_team_from_request(request))
 
     user_email = user_info["email"].lower()
     if not data_manager.hasPermission(user_email, "upload_document"):
@@ -915,7 +936,7 @@ async def check_batch_process_documents_gcs_path(
     documents that would be submitted.
     """
     if not REQUIRE_AUTH:
-        user_info = anonymous_user()
+        user_info = anonymous_user(_get_anonymous_team_from_request(request))
 
     user_email = user_info["email"].lower()
     if not data_manager.hasPermission(user_email, "upload_document"):
@@ -1188,6 +1209,47 @@ async def delete_record_group(
             detail=f"You are not authorized to delete record groups. Please contact a team lead or project manager.",
         )
     data_manager.deleteRecordGroup(rg_id, background_tasks, user_info)
+    return {"response": "success"}
+
+
+@router.post("/delete_record_group_records/{rg_id}")
+async def delete_record_group_records(
+    rg_id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Delete records in a record group, optionally scoped by current filters.
+
+    Args:
+        rg_id: record group identifier
+        request.filter: Optional record filter
+
+    Returns:
+        Success response
+    """
+    if not data_manager.hasPermission(user_info["email"], "delete"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
+        )
+
+    try:
+        req = await request.json()
+    except Exception:
+        req = {}
+
+    filter_by = req.get("filter", {})
+    if not isinstance(filter_by, dict):
+        raise HTTPException(400, detail=f"Filter must be an object.")
+
+    _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
+    if rg_data is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
+
+    data_manager.deleteRecordsByRecordGroup(rg_id, filter_by, user_info)
     return {"response": "success"}
 
 
@@ -1842,6 +1904,59 @@ async def update_default_team(
     Returns:
         result
     """
+    if REQUIRE_AUTH and not data_manager.hasPermission(
+        user_info["email"], "manage_system"
+    ):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to perform this action. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+    if not isinstance(req, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new team in the request body",
+        )
+
+    new_team = req.get("new_team", None)
+
+    if isinstance(new_team, str):
+        if not REQUIRE_AUTH:
+            team = new_team.strip()
+            if team == "":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Please provide a new team in the request body",
+                )
+            if team not in data_manager.fetchTeams():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Team not found",
+                )
+            response = JSONResponse(
+                {
+                    "team": team,
+                    "created_team": False,
+                    "added_to_team": False,
+                }
+            )
+            _set_anonymous_team_cookie(response, team)
+            return response
+        try:
+            return data_manager.changeUserTeam(user_info["email"], new_team)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new team in the request body",
+        )
+
+
+@router.post("/change_team")
+async def change_team(request: Request, user_info: dict = Depends(authenticate)):
+    """Change the current user's default team, creating membership if needed."""
     require_authenticated_admin_route()
     if not data_manager.hasPermission(user_info["email"], "manage_system"):
         raise HTTPException(
@@ -1850,16 +1965,23 @@ async def update_default_team(
         )
 
     req = await request.json()
-    new_team = req.get("new_team", None)
-
-    if new_team:
-        data_manager.updateDefaultTeam(user_info["email"], new_team)
-        return new_team
-    else:
+    if not isinstance(req, dict):
         raise HTTPException(
             status_code=400,
             detail=f"Please provide a new team in the request body",
         )
+
+    new_team = req.get("new_team", None)
+    if not isinstance(new_team, str):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new team in the request body",
+        )
+
+    try:
+        return data_manager.changeUserTeam(user_info["email"], new_team)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/fetch_roles", response_model=list)
@@ -1885,18 +2007,19 @@ async def fetch_roles(request: Request, user_info: dict = Depends(authenticate))
 
 @router.get("/fetch_teams", response_model=list)
 async def fetch_teams(user_info: dict = Depends(authenticate)):
-    """Fetch all teams that a user is on.
+    """Fetch all available teams.
 
     Returns:
         List containing teams
     """
-    require_authenticated_admin_route()
-    if not data_manager.hasPermission(user_info["email"], "manage_system"):
+    if REQUIRE_AUTH and not data_manager.hasPermission(
+        user_info["email"], "manage_system"
+    ):
         raise HTTPException(
             403,
             detail=f"You are not authorized to manage system. Please contact a team lead or project manager.",
         )
-    resp = data_manager.fetchTeams(user_info)
+    resp = data_manager.fetchTeams()
     return resp
 
 
