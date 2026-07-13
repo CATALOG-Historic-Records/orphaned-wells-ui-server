@@ -51,6 +51,12 @@ spec:
               value: ${DEPLOY_ENV}
             - name: BACKEND_URL
               value: https://${HOSTNAME}
+            - name: OGRRE_BACKEND_IMAGE
+              value: "${IMAGE}"
+            - name: OGRRE_BACKEND_DEPLOY_RUN_ID
+              value: "${DEPLOY_RUN_ID}"
+            - name: OGRRE_BACKEND_DEPLOYED_AT
+              value: "${DEPLOYED_AT}"
             - name: LOG_DIR
               value: /logs
             - name: LOCAL_STORAGE_ROOT
