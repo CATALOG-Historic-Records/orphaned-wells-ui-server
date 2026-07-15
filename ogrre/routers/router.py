@@ -1507,6 +1507,7 @@ async def download_records(
             include_attribute_fields=json_fields_to_include,
             forDownload=True,
         )
+        setsOfRecords[output_name] = records
     else:
         raise HTTPException(
             status_code=400,

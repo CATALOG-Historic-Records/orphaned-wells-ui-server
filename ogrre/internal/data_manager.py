@@ -1006,11 +1006,20 @@ class DataManager:
         page=None,
         records_per_page=None,
         sort_by=["dateCreated", 1],
-        filter_by={},
+        filter_by=None,
         include_attribute_fields=None,
         exclude_attribute_fields=None,
         forDownload=False,
     ):
+        if filter_by is None:
+            filter_by = {}
+        else:
+            filter_by = filter_by.copy()
+
+        # Remove documentType filter because records collection doesn't contain this field
+        if "documentType" in filter_by:
+            filter_by.pop("documentType")
+
         # 1. Get all record group IDs for the project
         project_rg_ids = self.getProjectRecordGroupsList(project_id)
         project_rg_object_ids = [ObjectId(rg) for rg in project_rg_ids]
@@ -1023,8 +1032,13 @@ class DataManager:
         cursor = self.db.record_groups.find(rg_query)
         filtered_rg_ids = [str(doc["_id"]) for doc in cursor]
 
-        # 3. Add to filter_by
-        filter_by["record_group_id"] = {"$in": filtered_rg_ids}
+        # 3. Add or intersect record_group_id in filter_by
+        if "record_group_id" in filter_by:
+            frontend_rg_ids = filter_by["record_group_id"].get("$in", [])
+            intersected_rg_ids = list(set(frontend_rg_ids) & set(filtered_rg_ids))
+            filter_by["record_group_id"] = {"$in": intersected_rg_ids}
+        else:
+            filter_by["record_group_id"] = {"$in": filtered_rg_ids}
 
         # 4. Fetch the records
         return self.fetchRecords(
@@ -2093,7 +2107,7 @@ class DataManager:
                         else:
                             attribute_name = attribute_key
 
-                        if attribute_key in selectedColumns or keep_all_columns:
+                        if document_attribute["key"] in selectedColumns or keep_all_columns:
                             field_schema = (
                                 rg_attribute_map.get(record_group_id, {}).get(
                                     attribute_name
