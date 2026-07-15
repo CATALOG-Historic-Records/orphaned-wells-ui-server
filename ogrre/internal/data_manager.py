@@ -2107,7 +2107,10 @@ class DataManager:
                         else:
                             attribute_name = attribute_key
 
-                        if document_attribute["key"] in selectedColumns or keep_all_columns:
+                        if (
+                            document_attribute["key"] in selectedColumns
+                            or keep_all_columns
+                        ):
                             field_schema = (
                                 rg_attribute_map.get(record_group_id, {}).get(
                                     attribute_name
