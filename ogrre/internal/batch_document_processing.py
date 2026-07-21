@@ -1,4 +1,6 @@
 import io
+import copy
+from collections import Counter
 import logging
 import mimetypes
 import os
@@ -31,6 +33,17 @@ DETECT_WHITESPACE = os.getenv("DETECT_WHITESPACE", "true").lower() in (
     "true",
     "yes",
 )
+MONITORED_DUPLICATE_FIELD_KEYS = {
+    field.strip().lower()
+    for field in os.getenv(
+        "DOCUMENT_AI_BATCH_DUPLICATE_FIELD_KEYS",
+        "project_name,client_name,client_address",
+    ).split(",")
+    if field.strip()
+}
+LOG_BLOB_NAME_SAMPLE_LIMIT = int(
+    os.getenv("DOCUMENT_AI_BATCH_LOG_BLOB_NAME_SAMPLE_LIMIT", "20")
+)
 
 _batch_jobs = {}
 _batch_jobs_lock = threading.Lock()
@@ -50,6 +63,41 @@ def _new_summary():
         "total_failed": 0,
         "failed_document_uris": [],
     }
+
+
+def _target_attribute_counts(attributes):
+    counts = Counter()
+    if not MONITORED_DUPLICATE_FIELD_KEYS:
+        return counts
+
+    for attribute in attributes or []:
+        if not isinstance(attribute, dict):
+            continue
+        key = attribute.get("key")
+        normalized_key = str(key).lower()
+        if normalized_key not in MONITORED_DUPLICATE_FIELD_KEYS:
+            continue
+        counts[normalized_key] += 1
+    return counts
+
+
+def _target_attribute_duplicates(attributes):
+    return {
+        key: count
+        for key, count in _target_attribute_counts(attributes).items()
+        if count > 1
+    }
+
+
+def _sample_values(values, limit):
+    values = list(values)
+    if len(values) <= limit:
+        return values
+    return values[:limit] + [f"... {len(values) - limit} more"]
+
+
+def _sample_blob_names(blobs):
+    return _sample_values((blob.name for blob in blobs), LOG_BLOB_NAME_SAMPLE_LIMIT)
 
 
 def create_batch_document_job(
@@ -211,6 +259,18 @@ def _process_batch_documents(
     total_documents = sum(len(_get_gcs_documents(batch)) for batch in batches)
     _set_job_fields(job_id, batches_total=len(batches))
     _increment_job_summary(job_id, total_submitted=total_documents)
+    _log.info(
+        "batch document job started job_id=%s rg_id=%s bucket=%s prefix=%s "
+        "output_bucket=%s output_prefix=%s batches=%s documents=%s",
+        job_id,
+        rg_id,
+        bucket_name,
+        prefix,
+        output_bucket_name,
+        output_prefix,
+        len(batches),
+        total_documents,
+    )
 
     if total_documents == 0:
         _log.info(f"no batch documents found in gs://{bucket_name}/{prefix}")
@@ -293,7 +353,13 @@ def _process_one_batch(
                 )
             )
         except Exception as e:
-            _log.exception(f"unable to prepare batch document {gcs_document.gcs_uri}")
+            _log.exception(
+                "unable to prepare batch document job_id=%s batch_index=%s "
+                "source_uri=%s",
+                job_id,
+                batch_index,
+                gcs_document.gcs_uri,
+            )
             partial_summary["total_failed"] += 1
             partial_summary["failed_document_uris"].append(gcs_document.gcs_uri)
 
@@ -352,6 +418,25 @@ def _process_one_batch(
         status.input_gcs_source: status
         for status in metadata.individual_process_statuses
     }
+    output_destination_counts = Counter(
+        status.output_gcs_destination
+        for status in metadata.individual_process_statuses
+        if status.output_gcs_destination
+    )
+    duplicate_destinations = {
+        destination: count
+        for destination, count in output_destination_counts.items()
+        if count > 1
+    }
+    if duplicate_destinations:
+        _log.warning(
+            "batch Document AI reported shared output destinations job_id=%s "
+            "batch_index=%s destinations=%s",
+            job_id,
+            batch_index,
+            duplicate_destinations,
+        )
+
     for prepared in prepared_documents:
         process_status = status_by_source.get(prepared.source_uri)
         if process_status is None:
@@ -382,6 +467,10 @@ def _process_one_batch(
             attributes_list = _read_output_attributes(
                 process_status.output_gcs_destination,
                 using_default_processor=data_manager.using_default_processor,
+                job_id=job_id,
+                batch_index=batch_index,
+                record_id=prepared.record_id,
+                source_uri=prepared.source_uri,
             )
             _update_record_with_attributes(
                 data_manager=data_manager,
@@ -550,28 +639,94 @@ def _update_whitespace_results(data_manager, record_id, png_files):
     data_manager.updateRecordInternal(record_id, "image_whitespace", whitespace_results)
 
 
-def _read_output_attributes(output_gcs_destination, using_default_processor=False):
+def _read_output_attributes(
+    output_gcs_destination,
+    using_default_processor=False,
+    job_id=None,
+    batch_index=None,
+    record_id=None,
+    source_uri=None,
+):
     location = storage_api.parse_gcs_url(output_gcs_destination)
     _, bucket = storage_api._get_bucket(bucket_name=location.bucket)
     attributes_list = []
-    json_blobs = [
+    raw_json_blobs = [
         blob
         for blob in bucket.list_blobs(prefix=location.blob_path)
-        if blob.name.endswith(".json") or blob.content_type == "application/json"
+        if _is_json_blob(blob)
+    ]
+    json_blobs = [
+        blob
+        for blob in raw_json_blobs
+        if _is_blob_inside_output_destination(blob.name, location.blob_path)
+    ]
+    json_blobs.sort(key=lambda blob: blob.name)
+    selected_blob_names = {blob.name for blob in json_blobs}
+    ignored_blobs = [
+        blob for blob in raw_json_blobs if blob.name not in selected_blob_names
     ]
     if not json_blobs:
         raise ValueError(
             f"no Document AI JSON output found at {output_gcs_destination}"
+        )
+    if ignored_blobs:
+        _log.warning(
+            "ignored sibling Document AI JSON blobs outside bounded destination "
+            "job_id=%s batch_index=%s record_id=%s source_uri=%s "
+            "output_gcs_destination=%s destination_blob_path=%s ignored_count=%s "
+            "ignored_blob_names=%s selected_blob_names=%s",
+            job_id,
+            batch_index,
+            record_id,
+            source_uri,
+            output_gcs_destination,
+            location.blob_path,
+            len(ignored_blobs),
+            _sample_blob_names(ignored_blobs),
+            _sample_blob_names(json_blobs),
         )
 
     for blob in json_blobs:
         document_json = blob.download_as_text()
         attributes_list.extend(
             document_ai_api.process_document_json(
-                document_json, using_default_processor=using_default_processor
+                document_json,
+                using_default_processor=using_default_processor,
             )
         )
+
+    aggregate_duplicates = _target_attribute_duplicates(attributes_list)
+    if aggregate_duplicates:
+        _log.warning(
+            "Document AI output contains repeated monitored fields "
+            "job_id=%s batch_index=%s record_id=%s source_uri=%s "
+            "output_gcs_destination=%s selected_json_count=%s duplicate_counts=%s",
+            job_id,
+            batch_index,
+            record_id,
+            source_uri,
+            output_gcs_destination,
+            len(json_blobs),
+            aggregate_duplicates,
+        )
     return attributes_list
+
+
+def _is_json_blob(blob):
+    return blob.name.endswith(".json") or blob.content_type == "application/json"
+
+
+def _is_blob_inside_output_destination(blob_name, destination_blob_path):
+    destination_blob_path = destination_blob_path.strip("/")
+    if not destination_blob_path:
+        return True
+    if destination_blob_path.endswith(".json"):
+        return blob_name == destination_blob_path
+    return (
+        blob_name == destination_blob_path
+        or blob_name.startswith(f"{destination_blob_path}/")
+        or blob_name == f"{destination_blob_path}.json"
+    )
 
 
 def _update_record_with_attributes(
@@ -585,12 +740,14 @@ def _update_record_with_attributes(
 ):
     if not processor_attributes:
         processor_attributes = []
+    processor_attributes = copy.deepcopy(processor_attributes)
     if run_cleaning_functions:
         processor_attributes_dictionary = util.convert_processor_attributes_to_dict(
             processor_attributes
         )
 
     attributes_list = util.normalize_record_attribute_tree(attributes_list)
+
     for attribute in attributes_list:
         if run_cleaning_functions:
             util.cleanRecordAttribute(
@@ -603,6 +760,15 @@ def _update_record_with_attributes(
         {"attributes": processor_attributes},
         keep_all_attributes=True,
     )
+    final_duplicate_targets = _target_attribute_duplicates(sorted_attributes_list)
+    if final_duplicate_targets:
+        _log.warning(
+            "batch record attributes contain repeated monitored fields before db "
+            "update record_id=%s file_name=%s duplicate_counts=%s",
+            record_id,
+            file_name,
+            final_duplicate_targets,
+        )
 
     record = {
         "record_group_id": rg_id,

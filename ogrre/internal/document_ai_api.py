@@ -65,6 +65,16 @@ def _get_entity_value(entity):
     return raw_text
 
 
+def _get_document_entities(document_object, using_default_processor=False):
+    document_entities = document_object.entities
+    if using_default_processor:
+        if not document_entities:
+            return []
+        _log.info("generic processor, diving into properties")
+        return document_entities[0].properties
+    return document_entities
+
+
 def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=None):
     raw_attribute = entity.type_
     attribute = util.relative_attribute_key(raw_attribute, parent_identifier)
@@ -109,20 +119,20 @@ def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=Non
     return new_attribute
 
 
-def document_to_attributes(document_object, using_default_processor=False):
-    document_entities = document_object.entities
-    if using_default_processor:
-        if not document_entities:
-            return []
-        _log.info("generic processor, diving into properties")
-        document_entities = document_entities[0].properties
-
+def _entities_to_attributes(document_entities):
     attributes_list = []
 
     for entity in document_entities:
         attributes_list.append(_entity_to_attribute(entity))
 
     return attributes_list
+
+
+def document_to_attributes(document_object, using_default_processor=False):
+    document_entities = _get_document_entities(
+        document_object, using_default_processor=using_default_processor
+    )
+    return _entities_to_attributes(document_entities)
 
 
 def process_document_json(document_json, using_default_processor=False):
@@ -190,12 +200,9 @@ def process_document_content(
     result = docai_client.process_document(request=request)
     document_object = result.document
 
-    document_entities = document_object.entities
-    if using_default_processor:
-        if not document_entities:
-            return []
-        _log.info("generic processor, diving into properties")
-        document_entities = document_entities[0].properties
+    document_entities = _get_document_entities(
+        document_object, using_default_processor=using_default_processor
+    )
 
     attributes_list = []
 
