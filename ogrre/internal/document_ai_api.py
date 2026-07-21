@@ -242,13 +242,15 @@ def _process_document_content_custom(
     return util.normalize_record_attribute_tree(attributes_list)
 
 
-def deploy_processor(rg_id, data_manager):
+def deploy_processor(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping deploy")
         return "DEPLOYED"
     from ogrre.internal.google_processor_manager import deploy_processor_version
 
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
 
     docai_client = _get_docai_client()
     resource_name = docai_client.processor_version_path(
@@ -260,13 +262,15 @@ def deploy_processor(rg_id, data_manager):
     return deployment
 
 
-def undeploy_processor(rg_id, data_manager):
+def undeploy_processor(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping undeploy")
         return True
     from ogrre.internal.google_processor_manager import undeploy_processor_version
 
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
 
     docai_client = _get_docai_client()
     resource_name = docai_client.processor_version_path(
@@ -276,11 +280,14 @@ def undeploy_processor(rg_id, data_manager):
     return True
 
 
-def check_if_processor_is_deployed(rg_id, data_manager):
+def check_if_processor_is_deployed(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; returning deployed")
         return 1
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
+    _log.info(f"checking deployment status of {processor_id} : {model_id}")
 
     client = _get_docai_client()
     parent = client.processor_path(PROJECT_ID, LOCATION, processor_id)

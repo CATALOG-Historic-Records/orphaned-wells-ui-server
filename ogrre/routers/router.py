@@ -50,19 +50,25 @@ REFRESH_COOKIE = "ogrre_refresh_session"
 CSRF_COOKIE = "ogrre_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 ANONYMOUS_TEAM_COOKIE = "ogrre_anonymous_team"
+ANONYMOUS_COLLABORATOR_COOKIE = "ogrre_anonymous_collaborator"
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("SESSION_COOKIE_MAX_AGE_SECONDS", "3600"))
 REFRESH_COOKIE_MAX_AGE_SECONDS = int(
     os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", "2592000")
 )
 
 
-def anonymous_user(default_team: Optional[str] = None):
+def anonymous_user(
+    default_team: Optional[str] = None, collaborator: Optional[str] = None
+):
     return {
         "email": "anonymous",
         "roles": {},
         "permissions": [],
         "anonymous": True,
         "default_team": default_team or DEFAULT_UNAUTHENTICATED_TEAM["name"],
+        "collaborator": data_manager.getCollaboratorForUser(
+            {"collaborator": collaborator}
+        ),
     }
 
 
@@ -105,10 +111,35 @@ def _get_anonymous_team_from_request(request: Request) -> str:
     return DEFAULT_UNAUTHENTICATED_TEAM["name"]
 
 
+def _get_anonymous_collaborator_from_request(request: Request) -> str:
+    collaborator = (request.cookies.get(ANONYMOUS_COLLABORATOR_COOKIE) or "").strip()
+    return data_manager.getCollaboratorForUser({"collaborator": collaborator})
+
+
+def _get_anonymous_user_from_request(request: Request):
+    return anonymous_user(
+        _get_anonymous_team_from_request(request),
+        _get_anonymous_collaborator_from_request(request),
+    )
+
+
 def _set_anonymous_team_cookie(response: JSONResponse, team: str):
     response.set_cookie(
         key=ANONYMOUS_TEAM_COOKIE,
         value=team,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=REFRESH_COOKIE_MAX_AGE_SECONDS,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def _set_anonymous_collaborator_cookie(response: JSONResponse, collaborator: str):
+    response.set_cookie(
+        key=ANONYMOUS_COLLABORATOR_COOKIE,
+        value=collaborator,
         httponly=True,
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
@@ -232,7 +263,7 @@ async def authenticate(request: Request, token: str = Depends(oauth2_scheme)):
         user account information
     """
     if not REQUIRE_AUTH:
-        return anonymous_user(_get_anonymous_team_from_request(request))
+        return _get_anonymous_user_from_request(request)
     token_to_verify = get_bearer_or_session_token(request, token)
     if not token_to_verify:
         raise HTTPException(status_code=401, detail="missing authentication token")
@@ -529,7 +560,7 @@ async def get_processors(user_info: dict = Depends(authenticate)):
     Returns:
         List containing processors and metadata
     """
-    resp = data_manager.fetchProcessors(user_info.get("email", ""))
+    resp = data_manager.fetchProcessors(user_info)
     return resp
 
 
@@ -602,7 +633,7 @@ async def get_record_data(
 
     ## get record schema
     _, _, processor_attributes = data_manager.getProcessorByRecordGroupID(
-        record["rg_id"]
+        record["rg_id"], user=user_info
     )
     processor_attributes = util.convert_processor_attributes_to_dict(
         processor_attributes
@@ -681,7 +712,7 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.getProcessorById(google_id)
+    resp = data_manager.getProcessorById(google_id, user_info)
     return resp
 
 
@@ -694,7 +725,7 @@ async def get_column_data(
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.fetchColumnData(location, _id)
+    resp = data_manager.fetchColumnData(location, _id, user_info)
     return resp
 
 
@@ -774,7 +805,7 @@ async def upload_document(
     """
     user_email = user_email.lower()
     if not REQUIRE_AUTH:
-        user_info = anonymous_user(_get_anonymous_team_from_request(request))
+        user_info = _get_anonymous_user_from_request(request)
     elif not data_manager.hasPermission(user_email, "upload_document"):
         raise HTTPException(
             403,
@@ -850,6 +881,7 @@ async def batch_process_documents(
             "bucketName": "source-bucket-name",
             "prefix": "optional/folder/path/",
             "run_cleaning_functions": true,
+            "preventDuplicates": true,
             "outputBucketName": "optional-output-bucket-name",
             "outputPrefix": "optional/output/folder/"
         }
@@ -862,6 +894,8 @@ async def batch_process_documents(
           boundary so "folder/name" does not also match "folder/name_extra".
           Example: "incoming/well-records/".
         - run_cleaning_functions defaults to true.
+        - preventDuplicates defaults to false for API compatibility. When true,
+          files with names that already exist in the record group are skipped.
         - outputBucketName/outputPrefix are optional and control where Document AI
           batch JSON output is written. They do not control frontend display PNGs.
         - The backend stores PNG display copies at:
@@ -869,7 +903,7 @@ async def batch_process_documents(
           and does not delete or modify source files in the request bucket.
     """
     if not REQUIRE_AUTH:
-        user_info = anonymous_user(_get_anonymous_team_from_request(request))
+        user_info = _get_anonymous_user_from_request(request)
 
     user_email = user_info["email"].lower()
     if not data_manager.hasPermission(user_email, "upload_document"):
@@ -890,6 +924,9 @@ async def batch_process_documents(
     run_cleaning_functions = req.get(
         "run_cleaning_functions", req.get("runCleaningFunctions", True)
     )
+    prevent_duplicates = req.get(
+        "prevent_duplicates", req.get("preventDuplicates", False)
+    )
 
     if not bucket_name:
         raise HTTPException(400, detail="bucketName is required")
@@ -901,6 +938,7 @@ async def batch_process_documents(
         prefix=prefix,
         output_bucket_name=output_bucket_name,
         output_prefix=output_prefix,
+        prevent_duplicates=prevent_duplicates,
     )
     background_tasks.add_task(
         batch_document_processing.process_batch_document_job,
@@ -913,6 +951,7 @@ async def batch_process_documents(
         output_bucket_name=output_bucket_name,
         output_prefix=output_prefix,
         run_cleaning_functions=run_cleaning_functions,
+        prevent_duplicates=prevent_duplicates,
     )
     return {"job_id": job_id, "status": "queued"}
 
@@ -928,15 +967,15 @@ async def check_batch_process_documents_gcs_path(
     Request body matches /batch_process_documents/{rg_id}:
         {
             "bucketName": "source-bucket-name",
-            "prefix": "optional/folder/path/"
+            "prefix": "optional/folder/path/",
+            "preventDuplicates": true
         }
 
-    The backend applies the same prefix normalization and Document AI Toolbox
-    filtering as the batch processor, so totalFiles reflects the supported
-    documents that would be submitted.
+    The backend applies the same prefix normalization, Document AI Toolbox
+    filtering, and duplicate filename detection as the batch processor.
     """
     if not REQUIRE_AUTH:
-        user_info = anonymous_user(_get_anonymous_team_from_request(request))
+        user_info = _get_anonymous_user_from_request(request)
 
     user_email = user_info["email"].lower()
     if not data_manager.hasPermission(user_email, "upload_document"):
@@ -952,13 +991,20 @@ async def check_batch_process_documents_gcs_path(
     req = await request.json()
     bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
     prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
+    prevent_duplicates = req.get(
+        "prevent_duplicates", req.get("preventDuplicates", False)
+    )
 
     if not bucket_name:
         raise HTTPException(400, detail="bucketName is required")
 
     try:
         return batch_document_processing.get_gcs_path_document_summary(
-            bucket_name=bucket_name, prefix=prefix
+            bucket_name=bucket_name,
+            prefix=prefix,
+            rg_id=rg_id,
+            data_manager=data_manager,
+            prevent_duplicates=prevent_duplicates,
         )
     except Exception as e:
         _log.error(f"unable to check GCS bucket/path: {e}")
@@ -998,7 +1044,10 @@ async def deploy_processor(
         )
     try:
         background_tasks.add_task(
-            deployProcessor, rg_id=rg_id, data_manager=data_manager
+            deployProcessor,
+            rg_id=rg_id,
+            data_manager=data_manager,
+            user_info=user_info,
         )
         return 2
     except Exception as e:
@@ -1023,7 +1072,7 @@ async def undeploy_processor(rg_id: str, user_info: dict = Depends(authenticate)
             detail=f"You are not authorized to deploy processors. Please contact a team lead or project manager.",
         )
     try:
-        undeployed = undeployProcessor(rg_id, data_manager)
+        undeployed = undeployProcessor(rg_id, data_manager, user_info=user_info)
         if undeployed:
             return 3
         else:
@@ -1034,7 +1083,7 @@ async def undeploy_processor(rg_id: str, user_info: dict = Depends(authenticate)
 
 
 @router.get("/check_processor_status/{rg_id}")
-async def check_processor_status(rg_id: str):
+async def check_processor_status(rg_id: str, user_info: dict = Depends(authenticate)):
     """Check status of processor model.
 
     Args:
@@ -1044,7 +1093,7 @@ async def check_processor_status(rg_id: str):
         Boolean indicating deployed or not
     """
     try:
-        return check_if_processor_is_deployed(rg_id, data_manager)
+        return check_if_processor_is_deployed(rg_id, data_manager, user_info=user_info)
     except Exception as e:
         _log.error(f"unable to undeploy processor: {e}")
         return 10
@@ -1980,6 +2029,50 @@ async def change_team(request: Request, user_info: dict = Depends(authenticate))
 
     try:
         return data_manager.changeUserTeam(user_info["email"], new_team)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/change_collaborator")
+async def change_collaborator(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    """Change the current user's processor collaborator override."""
+    if REQUIRE_AUTH and not data_manager.hasPermission(
+        user_info["email"], "system_administration"
+    ):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to perform this action. Please contact a team lead or project manager.",
+        )
+
+    req = await request.json()
+    if not isinstance(req, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new collaborator in the request body",
+        )
+
+    new_collaborator = req.get("new_collaborator", None)
+    if not isinstance(new_collaborator, str):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Please provide a new collaborator in the request body",
+        )
+
+    if not REQUIRE_AUTH:
+        collaborator = new_collaborator.strip()
+        if collaborator == "":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Please provide a new collaborator in the request body",
+            )
+        response = JSONResponse({"collaborator": collaborator})
+        _set_anonymous_collaborator_cookie(response, collaborator)
+        return response
+
+    try:
+        return data_manager.changeUserCollaborator(user_info["email"], new_collaborator)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

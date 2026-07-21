@@ -199,7 +199,7 @@ def process_document(
         processor_id,
         model_id,
         processor_attributes,
-    ) = data_manager.getProcessorByRecordGroupID(rg_id)
+    ) = data_manager.getProcessorByRecordGroupID(rg_id, user=user_info)
 
     ## upload to cloud storage, detect whitespace
     def on_all_bytes_read(all_file_bytes):
@@ -468,10 +468,12 @@ def process_image(
     return record_id
 
 
-def deployProcessor(rg_id, data_manager):
+def deployProcessor(rg_id, data_manager, user_info=None):
     _log.debug(f"attempting to deploy processor for record group {rg_id}")
     start_time = time.time()
-    deployment = document_ai_api.deploy_processor(rg_id, data_manager)
+    deployment = document_ai_api.deploy_processor(
+        rg_id, data_manager, user_info=user_info
+    )
     if deployment != "DEPLOYED":
         finish_time = time.time()
         _log.error(
@@ -483,18 +485,20 @@ def deployProcessor(rg_id, data_manager):
     return True
 
 
-def undeployProcessor(rg_id, data_manager):
+def undeployProcessor(rg_id, data_manager, user_info=None):
     _log.debug(f"attempting to deploy processor for record group {rg_id}")
     start_time = time.time()
-    document_ai_api.undeploy_processor(rg_id, data_manager)
+    document_ai_api.undeploy_processor(rg_id, data_manager, user_info=user_info)
     finish_time = time.time()
     _log.debug(f"took {finish_time-start_time} seconds to undeploy")
     return True
 
 
-def check_if_processor_is_deployed(rg_id, data_manager):
+def check_if_processor_is_deployed(rg_id, data_manager, user_info=None):
     try:
-        return document_ai_api.check_if_processor_is_deployed(rg_id, data_manager)
+        return document_ai_api.check_if_processor_is_deployed(
+            rg_id, data_manager, user_info=user_info
+        )
     except Exception as e:
         print(f"unable to check processor status: {e}")
         return 10

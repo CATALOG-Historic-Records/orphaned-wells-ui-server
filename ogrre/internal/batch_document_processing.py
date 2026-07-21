@@ -61,7 +61,9 @@ def _new_summary():
         "total_submitted": 0,
         "total_succeeded": 0,
         "total_failed": 0,
+        "total_skipped_duplicates": 0,
         "failed_document_uris": [],
+        "skipped_duplicate_uris": [],
     }
 
 
@@ -100,6 +102,30 @@ def _sample_blob_names(blobs):
     return _sample_values((blob.name for blob in blobs), LOG_BLOB_NAME_SAMPLE_LIMIT)
 
 
+def _get_file_base_name(filename):
+    return os.path.splitext(os.path.basename(str(filename or "")))[0]
+
+
+def _get_gcs_document_source_filename(gcs_document):
+    location = storage_api.parse_gcs_url(gcs_document.gcs_uri)
+    return os.path.basename(location.blob_path)
+
+
+def _get_gcs_document_base_name(gcs_document):
+    return _get_file_base_name(_get_gcs_document_source_filename(gcs_document))
+
+
+def _get_duplicate_file_bases(gcs_documents, rg_id=None, data_manager=None):
+    if not data_manager or not rg_id or not gcs_documents:
+        return set()
+
+    source_filenames = [
+        _get_gcs_document_source_filename(gcs_document)
+        for gcs_document in gcs_documents
+    ]
+    return set(data_manager.checkIfRecordsExist(source_filenames, rg_id))
+
+
 def create_batch_document_job(
     rg_id,
     user_info,
@@ -107,6 +133,7 @@ def create_batch_document_job(
     prefix="",
     output_bucket_name=None,
     output_prefix=None,
+    prevent_duplicates=False,
 ):
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -128,6 +155,7 @@ def create_batch_document_job(
             "summary": _new_summary(),
             "error": None,
             "user_email": user_info.get("email"),
+            "prevent_duplicates": prevent_duplicates,
         }
     return job_id
 
@@ -142,18 +170,55 @@ def get_batch_document_job(job_id):
         job_copy["summary"]["failed_document_uris"] = list(
             job["summary"]["failed_document_uris"]
         )
+        job_copy["summary"]["skipped_duplicate_uris"] = list(
+            job["summary"].get("skipped_duplicate_uris", [])
+        )
         return job_copy
 
 
-def get_gcs_path_document_summary(bucket_name, prefix=""):
+def get_gcs_path_document_summary(
+    bucket_name,
+    prefix="",
+    rg_id=None,
+    data_manager=None,
+    prevent_duplicates=False,
+):
     normalized_prefix = _normalize_prefix(prefix)
     batches = gcs_utilities.create_batches(
         gcs_bucket_name=bucket_name, gcs_prefix=normalized_prefix, batch_size=BATCH_SIZE
     )
-    total_documents = sum(len(_get_gcs_documents(batch)) for batch in batches)
+    batch_documents = [_get_gcs_documents(batch) for batch in batches]
+    all_documents = [
+        gcs_document for documents in batch_documents for gcs_document in documents
+    ]
+    total_documents = len(all_documents)
     total_batches = len(batches)
     total_lro_waves = (
         total_batches + MAX_CONCURRENT_BATCH_LROS - 1
+    ) // MAX_CONCURRENT_BATCH_LROS
+    duplicate_file_bases = _get_duplicate_file_bases(all_documents, rg_id, data_manager)
+    duplicate_document_count = sum(
+        1
+        for gcs_document in all_documents
+        if _get_gcs_document_base_name(gcs_document) in duplicate_file_bases
+    )
+    non_duplicate_document_count = total_documents - duplicate_document_count
+    non_duplicate_batches = sum(
+        1
+        for documents in batch_documents
+        if any(
+            _get_gcs_document_base_name(gcs_document) not in duplicate_file_bases
+            for gcs_document in documents
+        )
+    )
+    total_files_to_submit = (
+        non_duplicate_document_count if prevent_duplicates else total_documents
+    )
+    total_batches_to_submit = (
+        non_duplicate_batches if prevent_duplicates else total_batches
+    )
+    total_lro_waves_to_submit = (
+        total_batches_to_submit + MAX_CONCURRENT_BATCH_LROS - 1
     ) // MAX_CONCURRENT_BATCH_LROS
     return {
         "bucketName": bucket_name,
@@ -162,6 +227,13 @@ def get_gcs_path_document_summary(bucket_name, prefix=""):
         "totalFiles": total_documents,
         "totalBatches": total_batches,
         "totalLroWaves": total_lro_waves,
+        "duplicateFiles": sorted(duplicate_file_bases),
+        "duplicateCount": duplicate_document_count,
+        "nonDuplicateCount": non_duplicate_document_count,
+        "totalFilesToSubmit": total_files_to_submit,
+        "totalBatchesToSubmit": total_batches_to_submit,
+        "totalLroWavesToSubmit": total_lro_waves_to_submit,
+        "preventDuplicates": prevent_duplicates,
     }
 
 
@@ -179,9 +251,12 @@ def _increment_job_summary(
     total_submitted=0,
     total_succeeded=0,
     total_failed=0,
+    total_skipped_duplicates=0,
     failed_document_uris=None,
+    skipped_duplicate_uris=None,
 ):
     failed_document_uris = failed_document_uris or []
+    skipped_duplicate_uris = skipped_duplicate_uris or []
     with _batch_jobs_lock:
         job = _batch_jobs.get(job_id)
         if job is None:
@@ -190,7 +265,11 @@ def _increment_job_summary(
         summary["total_submitted"] += total_submitted
         summary["total_succeeded"] += total_succeeded
         summary["total_failed"] += total_failed
+        summary.setdefault("total_skipped_duplicates", 0)
+        summary.setdefault("skipped_duplicate_uris", [])
+        summary["total_skipped_duplicates"] += total_skipped_duplicates
         summary["failed_document_uris"].extend(failed_document_uris)
+        summary["skipped_duplicate_uris"].extend(skipped_duplicate_uris)
         job["updated_at"] = time.time()
 
 
@@ -213,6 +292,7 @@ def process_batch_document_job(
     output_bucket_name=None,
     output_prefix=None,
     run_cleaning_functions=True,
+    prevent_duplicates=False,
 ):
     _set_job_fields(job_id, status="running", started_at=time.time(), error=None)
     try:
@@ -226,6 +306,7 @@ def process_batch_document_job(
             output_bucket_name=output_bucket_name or bucket_name,
             output_prefix=output_prefix,
             run_cleaning_functions=run_cleaning_functions,
+            prevent_duplicates=prevent_duplicates,
         )
         job = get_batch_document_job(job_id)
         summary = job["summary"]
@@ -248,6 +329,7 @@ def _process_batch_documents(
     output_bucket_name=None,
     output_prefix=None,
     run_cleaning_functions=True,
+    prevent_duplicates=False,
 ):
     if document_ai_api.DOCUMENT_AI_BACKEND != "google":
         raise ValueError("Batch Document AI processing requires the google backend")
@@ -256,12 +338,23 @@ def _process_batch_documents(
     batches = gcs_utilities.create_batches(
         gcs_bucket_name=bucket_name, gcs_prefix=prefix, batch_size=BATCH_SIZE
     )
-    total_documents = sum(len(_get_gcs_documents(batch)) for batch in batches)
+    batch_documents = [_get_gcs_documents(batch) for batch in batches]
+    all_documents = [
+        gcs_document for documents in batch_documents for gcs_document in documents
+    ]
+    total_documents = len(all_documents)
+    duplicate_file_bases = _get_duplicate_file_bases(all_documents, rg_id, data_manager)
+    duplicate_document_count = sum(
+        1
+        for gcs_document in all_documents
+        if _get_gcs_document_base_name(gcs_document) in duplicate_file_bases
+    )
     _set_job_fields(job_id, batches_total=len(batches))
     _increment_job_summary(job_id, total_submitted=total_documents)
     _log.info(
         "batch document job started job_id=%s rg_id=%s bucket=%s prefix=%s "
-        "output_bucket=%s output_prefix=%s batches=%s documents=%s",
+        "output_bucket=%s output_prefix=%s batches=%s documents=%s "
+        "prevent_duplicates=%s duplicate_documents=%s",
         job_id,
         rg_id,
         bucket_name,
@@ -270,6 +363,8 @@ def _process_batch_documents(
         output_prefix,
         len(batches),
         total_documents,
+        prevent_duplicates,
+        duplicate_document_count,
     )
 
     if total_documents == 0:
@@ -280,7 +375,7 @@ def _process_batch_documents(
         processor_id,
         model_id,
         processor_attributes,
-    ) = data_manager.getProcessorByRecordGroupID(rg_id)
+    ) = data_manager.getProcessorByRecordGroupID(rg_id, user=user_info)
     if not processor_id or not model_id:
         raise ValueError(f"unable to find processor for record group {rg_id}")
 
@@ -305,6 +400,8 @@ def _process_batch_documents(
                     output_bucket_name=output_bucket_name,
                     output_prefix=output_prefix,
                     run_cleaning_functions=run_cleaning_functions,
+                    prevent_duplicates=prevent_duplicates,
+                    duplicate_file_bases=duplicate_file_bases,
                 )
                 future_to_batch[future] = batch
             for future in as_completed(future_to_batch):
@@ -316,9 +413,11 @@ def _process_batch_documents(
                     partial_summary = {
                         "total_succeeded": 0,
                         "total_failed": len(documents),
+                        "total_skipped_duplicates": 0,
                         "failed_document_uris": [
                             document.gcs_uri for document in documents
                         ],
+                        "skipped_duplicate_uris": [],
                     }
                 _increment_job_summary(job_id, **partial_summary)
                 _increment_batches_completed(job_id)
@@ -337,12 +436,24 @@ def _process_one_batch(
     output_bucket_name,
     output_prefix,
     run_cleaning_functions=True,
+    prevent_duplicates=False,
+    duplicate_file_bases=None,
 ):
     partial_summary = _new_summary()
     partial_summary.pop("total_submitted")
+    duplicate_file_bases = duplicate_file_bases or set()
 
     prepared_documents = []
     for gcs_document in _get_gcs_documents(input_config):
+        if (
+            prevent_duplicates
+            and _get_gcs_document_base_name(gcs_document) in duplicate_file_bases
+        ):
+            _log.info(f"skipping duplicate batch document {gcs_document.gcs_uri}")
+            partial_summary["total_skipped_duplicates"] += 1
+            partial_summary["skipped_duplicate_uris"].append(gcs_document.gcs_uri)
+            continue
+
         try:
             prepared_documents.append(
                 _prepare_document_for_batch(
