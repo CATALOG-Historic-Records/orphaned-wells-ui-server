@@ -730,7 +730,7 @@ async def get_column_data(
         Dictionary containing processor data
     """
     resp = data_manager.fetchColumnData(
-        location, _id, selected_record_groups=selected_record_groups, user_info
+        location, _id, user=user_info, selected_record_groups=selected_record_groups
     )
     return resp
 

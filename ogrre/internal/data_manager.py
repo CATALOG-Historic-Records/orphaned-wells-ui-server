@@ -1137,7 +1137,7 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     @time_it
-    def fetchColumnData(self, location, _id, selected_record_groups=None):
+    def fetchColumnData(self, location, _id, user=None, selected_record_groups=None):
         if location == "project" or location == "team" or location == "documentType":
             columns = set()
             if location == "project":
@@ -1162,7 +1162,6 @@ class DataManager:
             rg_ids = []
             for rg in record_groups:
                 rg_ids.append(ObjectId(rg))
-
             rg_documents = list(self.db.record_groups.find({"_id": {"$in": rg_ids}}))
             processor_ids = []
             for doc in rg_documents:
@@ -1183,7 +1182,7 @@ class DataManager:
             data_fusion = rg_document.get("data_fusion", None)
             rg_document["_id"] = _id
             google_id = rg_document["processorId"]
-            processor = self.getProcessorByGoogleId(google_id, user)
+            processor = self.getProcessorById(google_id, user)
             if processor is not None and "attributes" in processor:
                 for attr in processor["attributes"] or []:
                     attr_name = attr["name"]
