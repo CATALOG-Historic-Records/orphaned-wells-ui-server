@@ -339,6 +339,17 @@ class DataManager:
             processor = processor_api.get_processor_by_id(collaborator, google_id)
         return processor
 
+    def getProcessorsByIds(self, google_ids=None, user=None):
+        if USE_DB_PROCESSORS:
+            processors = self.getMongoProcessorByID(google_ids)
+        else:
+            collaborator = self.getCollaboratorForUser(user)
+            processors = []
+            for google_id in google_ids:
+                processor = processor_api.get_processor_by_id(collaborator, google_id)
+                processors.append(processor)
+        return processors
+
     def createProcessorsListFromDB(self):
         projection = {"_id": 0, "attributes": 0}
         projection = {"_id": 0}
@@ -1167,7 +1178,7 @@ class DataManager:
             for doc in rg_documents:
                 google_id = doc["processorId"]
                 processor_ids.append(google_id)
-            processors = self.getMongoProcessorsByIDs(processor_ids)
+            processors = self.getProcessorsByIds(processor_ids, user=user)
             for proc in processors:
                 if proc and "attributes" in proc:
                     for attr in proc.get("attributes") or []:
