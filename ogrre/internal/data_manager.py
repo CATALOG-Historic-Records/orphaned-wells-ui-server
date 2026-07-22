@@ -301,12 +301,54 @@ class DataManager:
         processors = list(self.db.processors.find(query, projection=projection))
         return processors
 
-    def getProcessorById(self, google_id=None):
+    def _normalizeCollaborator(self, collaborator):
+        if not isinstance(collaborator, str):
+            return None
+        collaborator = collaborator.strip()
+        return collaborator or None
+
+    def getCollaboratorForUser(self, user=None):
+        collaborator = None
+        email = None
+
+        if isinstance(user, dict):
+            collaborator = self._normalizeCollaborator(user.get("collaborator"))
+            email = user.get("email")
+        elif isinstance(user, str):
+            email = user
+
+        if collaborator:
+            return collaborator
+
+        if REQUIRE_AUTH and email and email != "anonymous":
+            user_document = self.getDocument("users", {"email": email})
+            if user_document is not None:
+                collaborator = self._normalizeCollaborator(
+                    user_document.get("collaborator")
+                )
+                if collaborator:
+                    return collaborator
+
+        return self._normalizeCollaborator(self.collaborator)
+
+    def getProcessorById(self, google_id=None, user=None):
         if USE_DB_PROCESSORS:
             processor = self.getMongoProcessorByID(google_id=google_id)
         else:
-            processor = processor_api.get_processor_by_id(self.collaborator, google_id)
+            collaborator = self.getCollaboratorForUser(user)
+            processor = processor_api.get_processor_by_id(collaborator, google_id)
         return processor
+
+    def getProcessorsByIds(self, google_ids=None, user=None):
+        if USE_DB_PROCESSORS:
+            processors = self.getMongoProcessorByID(google_ids)
+        else:
+            collaborator = self.getCollaboratorForUser(user)
+            processors = []
+            for google_id in google_ids:
+                processor = processor_api.get_processor_by_id(collaborator, google_id)
+                processors.append(processor)
+        return processors
 
     def createProcessorsListFromDB(self):
         projection = {"_id": 0, "attributes": 0}
@@ -314,21 +356,25 @@ class DataManager:
         processor_list = list(self.db.processors.find({}, projection=projection))
         return processor_list
 
-    def createProcessorsList(self):
+    def createProcessorsList(self, user=None, update_state=True):
         if USE_DB_PROCESSORS:
             _log.info(f"creating processor list using db")
             processor_list = self.createProcessorsListFromDB()
         else:
-            _log.info(f"creating processor list using processor_api")
-            processor_list = processor_api.get_processor_list(self.collaborator)
+            collaborator = self.getCollaboratorForUser(user)
+            _log.info(f"creating processor list using processor_api for {collaborator}")
+            processor_list = processor_api.get_processor_list(collaborator)
 
         if not processor_list:
             _log.info(f"no processors found, using default extractor")
             processor_list = DEFAULT_PROCESSORS
-            self.using_default_processor = True
+            using_default_processor = True
         else:
-            self.using_default_processor = False
-        self.processor_list = processor_list
+            using_default_processor = False
+
+        if update_state:
+            self.using_default_processor = using_default_processor
+            self.processor_list = processor_list
         return processor_list
 
     ## lock functions
@@ -564,6 +610,7 @@ class DataManager:
             user = document
             user["_id"] = str(user["_id"])
             user["permissions"] = self.getUserPermissions(user)
+            user["collaborator"] = self.getCollaboratorForUser(user)
             return user
         return None
 
@@ -625,6 +672,30 @@ class DataManager:
         }
         self.recordHistory(
             "changeUserTeam",
+            user=email,
+            query=response,
+        )
+        return response
+
+    def changeUserCollaborator(self, email, new_collaborator):
+        collaborator = self._normalizeCollaborator(new_collaborator)
+        if collaborator is None:
+            raise ValueError("Please provide a new collaborator in the request body")
+
+        user_doc = self.getDocument("users", {"email": email})
+        if user_doc is None:
+            raise ValueError(f"Unable to find user {email}")
+
+        self.db.users.update_one(
+            {"email": email},
+            {"$set": {"collaborator": collaborator}},
+        )
+
+        response = {
+            "collaborator": collaborator,
+        }
+        self.recordHistory(
+            "changeUserCollaborator",
             user=email,
             query=response,
         )
@@ -998,6 +1069,59 @@ class DataManager:
             forDownload=forDownload,
         )
 
+    def fetchRecordsByProjectAndDocumentTypes(
+        self,
+        user,
+        project_id,
+        document_types,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by=None,
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
+        forDownload=False,
+    ):
+        if filter_by is None:
+            filter_by = {}
+        else:
+            filter_by = filter_by.copy()
+
+        # Remove documentType filter because records collection doesn't contain this field
+        if "documentType" in filter_by:
+            filter_by.pop("documentType")
+
+        # 1. Get all record group IDs for the project
+        project_rg_ids = self.getProjectRecordGroupsList(project_id)
+        project_rg_object_ids = [ObjectId(rg) for rg in project_rg_ids]
+
+        # 2. Filter record groups by allowed document types
+        rg_query = {
+            "_id": {"$in": project_rg_object_ids},
+            "documentType": {"$in": document_types},
+        }
+        cursor = self.db.record_groups.find(rg_query)
+        filtered_rg_ids = [str(doc["_id"]) for doc in cursor]
+
+        # 3. Add or intersect record_group_id in filter_by
+        if "record_group_id" in filter_by:
+            frontend_rg_ids = filter_by["record_group_id"].get("$in", [])
+            intersected_rg_ids = list(set(frontend_rg_ids) & set(filtered_rg_ids))
+            filter_by["record_group_id"] = {"$in": intersected_rg_ids}
+        else:
+            filter_by["record_group_id"] = {"$in": filtered_rg_ids}
+
+        # 4. Fetch the records
+        return self.fetchRecords(
+            sort_by,
+            filter_by,
+            page,
+            records_per_page,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
+        )
+
     @time_it
     def fetchRecordGroups(self, project_id, user):
         project = self.fetchProject(project_id)
@@ -1024,8 +1148,8 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     @time_it
-    def fetchColumnData(self, location, _id):
-        if location == "project" or location == "team":
+    def fetchColumnData(self, location, _id, user=None, selected_record_groups=None):
+        if location == "project" or location == "team" or location == "documentType":
             columns = set()
             if location == "project":
                 # get project, set name and settings
@@ -1033,27 +1157,32 @@ class DataManager:
                 document["_id"] = _id
                 # get all record groups
                 record_groups = self.getProjectRecordGroupsList(_id)
-            else:
+            elif location == "team":
                 document = self.db.teams.find({"name": _id}).next()
                 document["_id"] = str(document["_id"])
                 ##TODO: fix object ids in team project list?
                 for i in range(len(document["project_list"])):
                     document["project_list"][i] = str(document["project_list"][i])
                 record_groups = self.getTeamRecordGroupsList(_id)
+            elif location == "documentType":
+                # get project, set name and settings
+                document = self.db.projects.find({"_id": ObjectId(_id)}).next()
+                document["_id"] = _id
+                record_groups = selected_record_groups or []
 
             rg_ids = []
             for rg in record_groups:
                 rg_ids.append(ObjectId(rg))
-
             rg_documents = list(self.db.record_groups.find({"_id": {"$in": rg_ids}}))
             processor_ids = []
             for doc in rg_documents:
                 google_id = doc["processorId"]
                 processor_ids.append(google_id)
-            processors = self.getMongoProcessorsByIDs(processor_ids)
+            processors = self.getProcessorsByIds(processor_ids, user=user)
             for proc in processors:
-                for attr in proc.get("attributes"):
-                    columns.add(attr["name"])
+                if proc and "attributes" in proc:
+                    for attr in proc.get("attributes") or []:
+                        columns.add(attr["name"])
             if "projects" in document:
                 del document["projects"]
             return {"columns": list(columns), "obj": document}
@@ -1064,21 +1193,21 @@ class DataManager:
             data_fusion = rg_document.get("data_fusion", None)
             rg_document["_id"] = _id
             google_id = rg_document["processorId"]
-            processor = self.getProcessorById(google_id)
-            if processor is None:
-                return None
-            for attr in processor["attributes"]:
-                attr_name = attr["name"]
-                if data_fusion and attr_name not in data_fusion:
-                    continue
-                columns.append(attr["name"])
+            processor = self.getProcessorById(google_id, user)
+            if processor is not None and "attributes" in processor:
+                for attr in processor["attributes"] or []:
+                    attr_name = attr["name"]
+                    if data_fusion and attr_name not in data_fusion:
+                        continue
+                    columns.append(attr["name"])
             return {"columns": columns, "obj": rg_document}
         return None
 
     def fetchProcessors(self, user):
-        processor_list = self.createProcessorsList()
+        processor_list = self.createProcessorsList(user, update_state=False)
         return {
             "USE_DB_PROCESSORS": USE_DB_PROCESSORS,
+            "collaborator": self.getCollaboratorForUser(user),
             "processor_list": processor_list,
         }
 
@@ -1194,7 +1323,7 @@ class DataManager:
         ## sort record attributes
         try:
             google_id = rg["processorId"]
-            processor_doc = self.getProcessorById(google_id)
+            processor_doc = self.getProcessorById(google_id, user_info)
             sorted_attributes, update_db = util.sortRecordAttributes(
                 document["attributesList"], processor_doc, data_fusion=data_fusion
             )
@@ -1291,13 +1420,13 @@ class DataManager:
 
         return document
 
-    def getProcessorByRecordGroupID(self, rg_id, returnNameOnly=False):
+    def getProcessorByRecordGroupID(self, rg_id, returnNameOnly=False, user=None):
         _id = ObjectId(rg_id)
         try:
             cursor = self.db.record_groups.find({"_id": _id})
             document = cursor.next()
             google_id = document.get("processorId", None)
-            processor_document = self.getProcessorById(google_id)
+            processor_document = self.getProcessorById(google_id, user)
             if not processor_document:
                 processor_document = DEFAULT_PROCESSORS[0]
             processor_attributes = processor_document.get("attributes", None)
@@ -1314,13 +1443,13 @@ class DataManager:
             _log.error(f"unable to find processor: {e}")
             return None, None, None
 
-    def getProcessorByRecordID(self, record_id):
+    def getProcessorByRecordID(self, record_id, user=None):
         _id = ObjectId(record_id)
         try:
             cursor = self.db.records.find({"_id": _id})
             document = cursor.next()
             rg_id = document["record_group_id"]
-            return self.getProcessorByRecordGroupID(rg_id)
+            return self.getProcessorByRecordGroupID(rg_id, user=user)
         except Exception as e:
             _log.error(f"unable to find processor id: {e}")
             return None, None, None
@@ -1485,7 +1614,11 @@ class DataManager:
                 ## call cleaning functions
                 if field_to_clean:
                     attributeToClean = new_data["v"]
-                    self.cleanAttribute(attributeToClean, record_id=record_id)
+                    self.cleanAttribute(
+                        attributeToClean,
+                        record_id=record_id,
+                        user_info=user_info,
+                    )
 
                 if update_type == "attribute":
                     v = new_data.get("v", None)
@@ -2049,7 +2182,10 @@ class DataManager:
                         else:
                             attribute_name = attribute_key
 
-                        if attribute_key in selectedColumns or keep_all_columns:
+                        if (
+                            document_attribute["key"] in selectedColumns
+                            or keep_all_columns
+                        ):
                             field_schema = (
                                 rg_attribute_map.get(record_group_id, {}).get(
                                     attribute_name
@@ -2161,35 +2297,26 @@ class DataManager:
 
     @time_it
     def checkIfRecordExists(self, filename, rg_id):
-        ## remove file extension
-        filename = filename.split(".")[0]
-
-        ## query database
-        query = {"filename": {"$regex": f"^{filename}$"}, "record_group_id": rg_id}
-        found_document = self.db.records.count_documents(query)
-        if found_document > 0:
-            return True
-        else:
-            return False
+        return len(self.checkIfRecordsExist([filename], rg_id)) > 0
 
     @time_it
     def checkIfRecordsExist(self, filenames, rg_id):
-        # Convert filenames into regex patterns
+        bases = {self.getFilenameBase(f) for f in filenames if self.getFilenameBase(f)}
+        if not bases:
+            return []
 
-        bases = [f.split(".")[0] for f in filenames]
-
-        query = {
-            "record_group_id": rg_id,
-            "$expr": {
-                "$in": [{"$arrayElemAt": [{"$split": ["$filename", "."]}, 0]}, bases]
-            },
-        }
-
-        record_cursor = self.db.records.find(query, {"filename": 1})
+        record_cursor = self.db.records.find(
+            {"record_group_id": rg_id}, {"filename": 1}
+        )
         duplicate_records = set()
         for document in record_cursor:
-            duplicate_records.add(document["filename"].split(".")[0])
+            filename_base = self.getFilenameBase(document.get("filename", ""))
+            if filename_base in bases:
+                duplicate_records.add(filename_base)
         return list(duplicate_records)
+
+    def getFilenameBase(self, filename):
+        return os.path.splitext(os.path.basename(str(filename or "")))[0]
 
     def checkRecordGroupValidity(self, rg_id):
         try:
@@ -2360,13 +2487,17 @@ class DataManager:
         except Exception as e:
             _log.error(f"unable to record bulk history items: {e}")
 
-    def cleanAttribute(self, attribute, record_id=None, rg_id=None):
+    def cleanAttribute(self, attribute, record_id=None, rg_id=None, user_info=None):
         if record_id is None and rg_id is None:
             return None
         if rg_id is not None:
-            _, _, processor_attributes = self.getProcessorByRecordGroupID(rg_id)
+            _, _, processor_attributes = self.getProcessorByRecordGroupID(
+                rg_id, user=user_info
+            )
         else:
-            _, _, processor_attributes = self.getProcessorByRecordID(record_id)
+            _, _, processor_attributes = self.getProcessorByRecordID(
+                record_id, user=user_info
+            )
 
         ## convert processor attributes to dict
         processor_attributes = util.convert_processor_attributes_to_dict(
@@ -2390,13 +2521,17 @@ class DataManager:
         try:
             if location == "record":
                 _log.info(f"cleaning record {_id}")
-                _, _, processor_attributes = self.getProcessorByRecordID(_id)
+                _, _, processor_attributes = self.getProcessorByRecordID(
+                    _id, user=user_info
+                )
                 object_id = ObjectId(_id)
                 query = {"_id": object_id}
                 documents.append(self.db.records.find(query).next())
             elif location == "record_group":
                 _log.info(f"cleaning record group {_id}")
-                _, _, processor_attributes = self.getProcessorByRecordGroupID(_id)
+                _, _, processor_attributes = self.getProcessorByRecordGroupID(
+                    _id, user=user_info
+                )
                 cursor = self.db.records.find({"record_group_id": _id})
                 for each in cursor:
                     documents.append(each)

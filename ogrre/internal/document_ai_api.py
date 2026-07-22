@@ -65,6 +65,16 @@ def _get_entity_value(entity):
     return raw_text
 
 
+def _get_document_entities(document_object, using_default_processor=False):
+    document_entities = document_object.entities
+    if using_default_processor:
+        if not document_entities:
+            return []
+        _log.info("generic processor, diving into properties")
+        return document_entities[0].properties
+    return document_entities
+
+
 def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=None):
     raw_attribute = entity.type_
     attribute = util.relative_attribute_key(raw_attribute, parent_identifier)
@@ -109,20 +119,20 @@ def _entity_to_attribute(entity, top_level_attribute=None, parent_identifier=Non
     return new_attribute
 
 
-def document_to_attributes(document_object, using_default_processor=False):
-    document_entities = document_object.entities
-    if using_default_processor:
-        if not document_entities:
-            return []
-        _log.info("generic processor, diving into properties")
-        document_entities = document_entities[0].properties
-
+def _entities_to_attributes(document_entities):
     attributes_list = []
 
     for entity in document_entities:
         attributes_list.append(_entity_to_attribute(entity))
 
     return attributes_list
+
+
+def document_to_attributes(document_object, using_default_processor=False):
+    document_entities = _get_document_entities(
+        document_object, using_default_processor=using_default_processor
+    )
+    return _entities_to_attributes(document_entities)
 
 
 def process_document_json(document_json, using_default_processor=False):
@@ -190,12 +200,9 @@ def process_document_content(
     result = docai_client.process_document(request=request)
     document_object = result.document
 
-    document_entities = document_object.entities
-    if using_default_processor:
-        if not document_entities:
-            return []
-        _log.info("generic processor, diving into properties")
-        document_entities = document_entities[0].properties
+    document_entities = _get_document_entities(
+        document_object, using_default_processor=using_default_processor
+    )
 
     attributes_list = []
 
@@ -235,13 +242,15 @@ def _process_document_content_custom(
     return util.normalize_record_attribute_tree(attributes_list)
 
 
-def deploy_processor(rg_id, data_manager):
+def deploy_processor(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping deploy")
         return "DEPLOYED"
     from ogrre.internal.google_processor_manager import deploy_processor_version
 
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
 
     docai_client = _get_docai_client()
     resource_name = docai_client.processor_version_path(
@@ -253,13 +262,15 @@ def deploy_processor(rg_id, data_manager):
     return deployment
 
 
-def undeploy_processor(rg_id, data_manager):
+def undeploy_processor(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; skipping undeploy")
         return True
     from ogrre.internal.google_processor_manager import undeploy_processor_version
 
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
 
     docai_client = _get_docai_client()
     resource_name = docai_client.processor_version_path(
@@ -269,11 +280,14 @@ def undeploy_processor(rg_id, data_manager):
     return True
 
 
-def check_if_processor_is_deployed(rg_id, data_manager):
+def check_if_processor_is_deployed(rg_id, data_manager, user_info=None):
     if DOCUMENT_AI_BACKEND != "google":
         _log.info("custom document ai backend selected; returning deployed")
         return 1
-    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(rg_id)
+    processor_id, model_id, _ = data_manager.getProcessorByRecordGroupID(
+        rg_id, user=user_info
+    )
+    _log.info(f"checking deployment status of {processor_id} : {model_id}")
 
     client = _get_docai_client()
     parent = client.processor_path(PROJECT_ID, LOCATION, processor_id)
