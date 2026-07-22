@@ -11,6 +11,7 @@ from fastapi import (
     UploadFile,
     BackgroundTasks,
     Depends,
+    Query,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -716,16 +717,21 @@ async def get_processor_data(google_id: str, user_info: dict = Depends(authentic
     return resp
 
 
-@router.get("/get_column_data/{location}/{_id}", response_model=dict or None)
+@router.get("/get_column_data/{location}/{_id}", response_model=Optional[dict])
 async def get_column_data(
-    location: str, _id: str, user_info: dict = Depends(authenticate)
+    location: str,
+    _id: str,
+    selected_record_groups: list[str] = Query(None),
+    user_info: dict = Depends(authenticate),
 ):
     """Fetch processor data for provided id.
 
     Returns:
         Dictionary containing processor data
     """
-    resp = data_manager.fetchColumnData(location, _id, user_info)
+    resp = data_manager.fetchColumnData(
+        location, _id, user=user_info, selected_record_groups=selected_record_groups
+    )
     return resp
 
 
@@ -1388,6 +1394,7 @@ async def get_download_size(
 
     filter_by = req.get("filter", {})
     sort_by = req.get("sort", ["dateCreated", 1])
+    document_types = req.get("document_types", [])
 
     json_fields_to_include = {
         "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
@@ -1415,6 +1422,16 @@ async def get_download_size(
     elif location == "team":
         records, _ = data_manager.fetchRecordsByTeam(
             user_info,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+    elif location == "documentType":
+        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+            user_info,
+            _id,
+            document_types,
             filter_by=filter_by,
             sort_by=sort_by,
             include_attribute_fields=json_fields_to_include,
@@ -1470,6 +1487,7 @@ async def download_records(
 
     filter_by = req.get("filter", {})
     sort_by = req.get("sort", ["dateCreated", 1])
+    document_types = req.get("document_types", [])
 
     json_fields_to_include = {
         "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
@@ -1528,9 +1546,21 @@ async def download_records(
             forDownload=True,
         )
         setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
+    elif location == "documentType":
+        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+            user_info,
+            _id,
+            document_types,
+            filter_by=filter_by,
+            sort_by=sort_by,
+            include_attribute_fields=json_fields_to_include,
+            forDownload=True,
+        )
+        setsOfRecords[output_name] = records
     else:
         raise HTTPException(
-            status_code=400, detail=f"Location must be project, record_group, or team"
+            status_code=400,
+            detail=f"Location must be project, record_group, documentType, or team",
         )
     try:
         filepaths = []
@@ -1573,6 +1603,99 @@ async def download_records(
         background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
         headers = {"Content-Disposition": "attachment; filename=records.zip"}
         # _log.info(f"returning streaming response")
+        return StreamingResponse(z, media_type="application/zip", headers=headers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
+
+
+@router.post(
+    "/download_project_records_by_document_types/{project_id}",
+    response_class=StreamingResponse,
+)
+async def download_project_records_by_document_types(
+    project_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    export_csv: bool = True,
+    export_json: bool = False,
+    export_images: bool = False,
+    output_name: str = None,
+    user_info: dict = Depends(authenticate),
+):
+    req = await request.json()
+
+    request_origin = request.headers.get("origin")
+    selectedColumns = req.get("columns", [])
+    document_types = req.get("document_types", [])
+
+    filter_by = req.get("filter", {})
+    sort_by = req.get("sort", ["dateCreated", 1])
+
+    json_fields_to_include = {
+        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "attributesList": [
+            "key",
+            "value",
+            "normalized_vertices",
+            "subattributes",
+            "page",
+        ],
+        "subattributes": ["key", "value", "normalized_vertices", "page"],
+    }
+
+    output_file_id = util.last4_before_decimal()
+
+    keep_all_columns = len(selectedColumns) == 0
+
+    # Fetch records filtered by project and document types
+    records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
+        user_info,
+        project_id,
+        document_types,
+        filter_by=filter_by,
+        sort_by=sort_by,
+        include_attribute_fields=json_fields_to_include,
+        forDownload=True,
+    )
+
+    try:
+        filepaths = []
+        if export_csv:
+            csv_file = data_manager.downloadRecords(
+                records,
+                "csv",
+                user_info,
+                project_id,
+                "project",
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=f"{output_name or 'records'}_{output_file_id}",
+                request_origin=request_origin,
+            )
+            filepaths.append(csv_file)
+        if export_json:
+            json_file = data_manager.downloadRecords(
+                records,
+                "json",
+                user_info,
+                project_id,
+                "project",
+                selectedColumns=selectedColumns,
+                keep_all_columns=keep_all_columns,
+                output_filename=f"{output_name or 'records'}_{output_file_id}",
+            )
+            filepaths.append(json_file)
+        if export_images:
+            documents = util.compileDocumentImageList(records)
+        else:
+            documents = []
+
+        download_log_file = f"zip_log_{output_file_id}.txt"
+        z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
+
+        filepaths.append(download_log_file)
+        background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
+        headers = {"Content-Disposition": "attachment; filename=records.zip"}
         return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {e}")

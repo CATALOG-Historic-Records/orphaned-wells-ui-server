@@ -339,6 +339,17 @@ class DataManager:
             processor = processor_api.get_processor_by_id(collaborator, google_id)
         return processor
 
+    def getProcessorsByIds(self, google_ids=None, user=None):
+        if USE_DB_PROCESSORS:
+            processors = self.getMongoProcessorByID(google_ids)
+        else:
+            collaborator = self.getCollaboratorForUser(user)
+            processors = []
+            for google_id in google_ids:
+                processor = processor_api.get_processor_by_id(collaborator, google_id)
+                processors.append(processor)
+        return processors
+
     def createProcessorsListFromDB(self):
         projection = {"_id": 0, "attributes": 0}
         projection = {"_id": 0}
@@ -1058,6 +1069,59 @@ class DataManager:
             forDownload=forDownload,
         )
 
+    def fetchRecordsByProjectAndDocumentTypes(
+        self,
+        user,
+        project_id,
+        document_types,
+        page=None,
+        records_per_page=None,
+        sort_by=["dateCreated", 1],
+        filter_by=None,
+        include_attribute_fields=None,
+        exclude_attribute_fields=None,
+        forDownload=False,
+    ):
+        if filter_by is None:
+            filter_by = {}
+        else:
+            filter_by = filter_by.copy()
+
+        # Remove documentType filter because records collection doesn't contain this field
+        if "documentType" in filter_by:
+            filter_by.pop("documentType")
+
+        # 1. Get all record group IDs for the project
+        project_rg_ids = self.getProjectRecordGroupsList(project_id)
+        project_rg_object_ids = [ObjectId(rg) for rg in project_rg_ids]
+
+        # 2. Filter record groups by allowed document types
+        rg_query = {
+            "_id": {"$in": project_rg_object_ids},
+            "documentType": {"$in": document_types},
+        }
+        cursor = self.db.record_groups.find(rg_query)
+        filtered_rg_ids = [str(doc["_id"]) for doc in cursor]
+
+        # 3. Add or intersect record_group_id in filter_by
+        if "record_group_id" in filter_by:
+            frontend_rg_ids = filter_by["record_group_id"].get("$in", [])
+            intersected_rg_ids = list(set(frontend_rg_ids) & set(filtered_rg_ids))
+            filter_by["record_group_id"] = {"$in": intersected_rg_ids}
+        else:
+            filter_by["record_group_id"] = {"$in": filtered_rg_ids}
+
+        # 4. Fetch the records
+        return self.fetchRecords(
+            sort_by,
+            filter_by,
+            page,
+            records_per_page,
+            include_attribute_fields=include_attribute_fields,
+            exclude_attribute_fields=exclude_attribute_fields,
+            forDownload=forDownload,
+        )
+
     @time_it
     def fetchRecordGroups(self, project_id, user):
         project = self.fetchProject(project_id)
@@ -1084,8 +1148,8 @@ class DataManager:
         return {"project": project, "record_groups": record_groups}
 
     @time_it
-    def fetchColumnData(self, location, _id, user=None):
-        if location == "project" or location == "team":
+    def fetchColumnData(self, location, _id, user=None, selected_record_groups=None):
+        if location == "project" or location == "team" or location == "documentType":
             columns = set()
             if location == "project":
                 # get project, set name and settings
@@ -1093,27 +1157,32 @@ class DataManager:
                 document["_id"] = _id
                 # get all record groups
                 record_groups = self.getProjectRecordGroupsList(_id)
-            else:
+            elif location == "team":
                 document = self.db.teams.find({"name": _id}).next()
                 document["_id"] = str(document["_id"])
                 ##TODO: fix object ids in team project list?
                 for i in range(len(document["project_list"])):
                     document["project_list"][i] = str(document["project_list"][i])
                 record_groups = self.getTeamRecordGroupsList(_id)
+            elif location == "documentType":
+                # get project, set name and settings
+                document = self.db.projects.find({"_id": ObjectId(_id)}).next()
+                document["_id"] = _id
+                record_groups = selected_record_groups or []
 
             rg_ids = []
             for rg in record_groups:
                 rg_ids.append(ObjectId(rg))
-
             rg_documents = list(self.db.record_groups.find({"_id": {"$in": rg_ids}}))
             processor_ids = []
             for doc in rg_documents:
                 google_id = doc["processorId"]
                 processor_ids.append(google_id)
-            processors = self.getMongoProcessorsByIDs(processor_ids)
+            processors = self.getProcessorsByIds(processor_ids, user=user)
             for proc in processors:
-                for attr in proc.get("attributes"):
-                    columns.add(attr["name"])
+                if proc and "attributes" in proc:
+                    for attr in proc.get("attributes") or []:
+                        columns.add(attr["name"])
             if "projects" in document:
                 del document["projects"]
             return {"columns": list(columns), "obj": document}
@@ -1125,13 +1194,12 @@ class DataManager:
             rg_document["_id"] = _id
             google_id = rg_document["processorId"]
             processor = self.getProcessorById(google_id, user)
-            if processor is None:
-                return None
-            for attr in processor["attributes"]:
-                attr_name = attr["name"]
-                if data_fusion and attr_name not in data_fusion:
-                    continue
-                columns.append(attr["name"])
+            if processor is not None and "attributes" in processor:
+                for attr in processor["attributes"] or []:
+                    attr_name = attr["name"]
+                    if data_fusion and attr_name not in data_fusion:
+                        continue
+                    columns.append(attr["name"])
             return {"columns": columns, "obj": rg_document}
         return None
 
@@ -2114,7 +2182,10 @@ class DataManager:
                         else:
                             attribute_name = attribute_key
 
-                        if attribute_key in selectedColumns or keep_all_columns:
+                        if (
+                            document_attribute["key"] in selectedColumns
+                            or keep_all_columns
+                        ):
                             field_schema = (
                                 rg_attribute_map.get(record_group_id, {}).get(
                                     attribute_name
