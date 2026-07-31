@@ -18,6 +18,7 @@ jobs:
           - newts
           - isgs
           - osage
+          - rrc
         #   - ca
 
     env:

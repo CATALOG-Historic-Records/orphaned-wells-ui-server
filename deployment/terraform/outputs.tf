@@ -1,8 +1,6 @@
-# module "backend_vms" {
-#   for_each = local.collaborators
-# }
-
 output "server_ips" {
+  description = "Legacy VM external IPs. GKE backend IPs are exposed separately by gke_backend_static_ips."
+
   value = {
     for name, vm in module.backend_vms :
     name => vm.ip
@@ -10,14 +8,22 @@ output "server_ips" {
 }
 
 output "isgs_ip" {
+  description = "Legacy ISGS VM external IP."
+
   value = module.backend_vms["isgs"].ip
 }
 
 output "dns_names" {
-  value = {
+  description = "Primary backend DNS records, including GKE-owned records and any remaining legacy VM-owned records."
+
+  value = merge({
     for name, vm in module.backend_vms :
     name => vm.dns_name
-  }
+    if vm.dns_name != null
+    }, var.enable_gke ? {
+    for name, dns in google_dns_record_set.gke_backend_primary :
+    name => dns.name
+  } : {})
 }
 
 output "gke_cluster_name" {
@@ -35,9 +41,16 @@ output "gke_backend_static_ips" {
   } : {}
 }
 
-output "gke_test_dns_names" {
+output "gke_primary_dns_names" {
   value = var.enable_gke ? {
-    for name, backend in local.gke_backends :
+    for name, dns in google_dns_record_set.gke_backend_primary :
+    name => dns.name
+  } : {}
+}
+
+output "gke_test_dns_names" {
+  value = var.enable_gke && var.create_gke_test_dns_records ? {
+    for name, backend in local.gke_test_dns_backends :
     name => "${backend.test_hostname}."
   } : {}
 }

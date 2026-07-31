@@ -2,7 +2,7 @@
 
 This directory contains the Kubernetes deployment template used to run each backend environment on GKE. Terraform owns the cloud infrastructure, and the GitHub Actions workflows render and apply this Kubernetes template for each backend environment.
 
-The existing Compute Engine VM resources are still managed by Terraform. They can remain stopped in GCP while the Kubernetes deployment serves traffic.
+Existing Compute Engine VM resources are still managed by Terraform through the legacy VM map. New GKE backends do not need a VM entry.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ Terraform in `deployment/terraform` creates:
 - one shared GKE Autopilot cluster
 - one global static IP per backend environment
 - optional `<env>-k8s-server.uow-carbon.org` test DNS records
-- optional primary DNS records, such as `staging-server.uow-carbon.org`, pointing to the GKE static IP
+- primary DNS records, such as `staging-server.uow-carbon.org`, pointing to the GKE static IP
 - `kubernetes_deploy_targets`, the JSON map consumed by GitHub Actions
 
 Kubernetes creates one namespace per backend environment:
@@ -81,8 +81,8 @@ From the Terraform directory:
 ```bash
 cd orphaned-wells-ui-server/deployment/terraform
 terraform init
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
+terraform plan
+terraform apply
 ```
 
 `enable_gke` defaults to `true`, so the GKE cluster, static IPs, and related GKE resources are included unless explicitly disabled.
@@ -90,7 +90,7 @@ terraform apply -var-file=terraform.tfvars
 To explicitly disable GKE planning:
 
 ```bash
-terraform plan -var-file=terraform.tfvars -var='enable_gke=false'
+terraform plan -var='enable_gke=false'
 ```
 
 ## Derive `K8S_DEPLOY_TARGETS`
@@ -138,6 +138,7 @@ Each backend environment also needs an environment-file secret:
 - `ISGS_ENV`
 - `NEWTS_ENV`
 - `OSAGE_ENV`
+- `RRC_ENV`
 
 The environment-file secret should contain the same key/value pairs used by the VM `.env` file. The workflow overrides these Kubernetes-owned values:
 
@@ -427,50 +428,55 @@ GKE Autopilot does not expose a normal "restart the cluster" operation like rest
 
 ## Adding a new collaborator backend
 
-1. Add the collaborator to `local.collaborators` in `deployment/terraform/main.tf`.
+1. Add the collaborator to `gke_backend_overrides` in `deployment/terraform/terraform.tfvars`, or add it to the default `gke_backends` map in `variables.tf` when the collaborator should be part of the shared defaults.
 
-2. Add its canonical hostname if it should use a primary backend hostname:
+For a standard GKE-only collaborator, the override is enough:
 
 ```hcl
-gke_backend_hostnames = {
-  staging = "staging-server.uow-carbon.org"
-  newts   = "newts-server.uow-carbon.org"
-  boots   = "boots-server.uow-carbon.org"
+gke_backend_overrides = {
+  boots = {}
 }
 ```
 
-3. Add it to `primary_dns_to_gke_backends` when the primary DNS record should point to GKE:
+Optional per-backend settings can be added in the same map:
 
 ```hcl
-primary_dns_to_gke_backends = ["staging", "newts", "boots"]
+gke_backend_overrides = {
+  boots = {
+    replicas             = 1
+    memory_request       = "8Gi"
+    memory_limit         = "8Gi"
+    persistent_disk_size = "20Gi"
+  }
+}
 ```
 
-4. Apply Terraform:
+2. Apply Terraform:
 
 ```bash
 cd orphaned-wells-ui-server/deployment/terraform
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
+terraform plan
+terraform apply
 ```
 
-5. Export and update `K8S_DEPLOY_TARGETS`:
+3. Export and update `K8S_DEPLOY_TARGETS`:
 
 ```bash
 terraform output -json kubernetes_deploy_targets | jq -c .
 ```
 
-6. Add a GitHub environment-file secret for the collaborator, for example `BOOTS_ENV`.
+4. Add a GitHub environment-file secret for the collaborator, for example `BOOTS_ENV`.
 
-7. Update `.github/workflows/deploy-k8s-dispatch.yml`:
+5. Update `.github/workflows/deploy-k8s-dispatch.yml`:
 
 - add the new environment to `workflow_dispatch.inputs.DEPLOY_ENV.options`
 - add the new environment secret to `workflow_call.secrets`
 - add the secret to the `Prepare runtime env file` env block
 - add a case branch that maps the new `DEPLOY_ENV` to that secret
 
-8. Optionally add a dedicated workflow like `.github/workflows/deploy-k8s-boots.yml`.
+6. Optionally add a dedicated workflow like `.github/workflows/deploy-k8s-boots.yml`.
 
-9. Deploy the new backend and verify:
+7. Deploy the new backend and verify:
 
 ```bash
 kubectl -n uow-boots get deployment backend
