@@ -53,6 +53,8 @@ on:
         required: false
       OSAGE_ENV:
         required: false
+      RRC_ENV:
+        required: false
 
 defaults:
   run:
@@ -177,6 +179,7 @@ jobs:
           ISGS_ENV_CONTENT: ${{ secrets.ISGS_ENV }}
           NEWTS_ENV_CONTENT: ${{ secrets.NEWTS_ENV }}
           OSAGE_ENV_CONTENT: ${{ secrets.OSAGE_ENV }}
+          RRC_ENV_CONTENT: ${{ secrets.RRC_ENV }}
         run: |
           case "$DEPLOY_ENV" in
             staging) runtime_env="$STAGING_ENV_CONTENT" ;;
@@ -184,6 +187,7 @@ jobs:
             isgs) runtime_env="$ISGS_ENV_CONTENT" ;;
             newts) runtime_env="$NEWTS_ENV_CONTENT" ;;
             osage) runtime_env="$OSAGE_ENV_CONTENT" ;;
+            rrc) runtime_env="$RRC_ENV_CONTENT" ;;
             *)
               echo "::error::Unsupported DEPLOY_ENV: ${DEPLOY_ENV}"
               exit 1

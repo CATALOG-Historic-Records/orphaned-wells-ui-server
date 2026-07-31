@@ -1,20 +1,107 @@
 variable "project_id" {
-  type = string
+  type        = string
+  default     = "tidy-outlet-412020"
+  description = "Google Cloud project that owns the OGRRE infrastructure."
 }
 
 variable "region" {
-  type    = string
-  default = "us-central1"
+  type        = string
+  default     = "us-central1"
+  description = "Default Google Cloud region for regional resources."
 }
 
-variable "zone" {
-  type    = string
-  default = "us-central1-a"
+variable "dns_managed_zone" {
+  type        = string
+  default     = "uow-carbon-org"
+  description = "Cloud DNS managed zone used for OGRRE public DNS records."
 }
 
-variable "machine_type" {
-  type    = string
-  default = "e2-medium"
+variable "backend_dns_domain" {
+  type        = string
+  default     = "uow-carbon.org"
+  description = "Base DNS domain for backend hostnames, without a trailing dot."
+}
+
+variable "legacy_backend_vms" {
+  type = map(object({
+    enable_startup_script  = bool
+    zone                   = string
+    machine_type           = string
+    boot_image             = string
+    boot_disk_size         = number
+    boot_resource_policies = list(string)
+    boot_disk_device_name  = string
+  }))
+
+  default = {
+    isgs = {
+      enable_startup_script  = false
+      zone                   = "us-central1-a"
+      machine_type           = "e2-standard-2"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20240515"
+      boot_disk_size         = 20
+      boot_resource_policies = []
+      boot_disk_device_name  = "isgs-uow-server"
+    }
+
+    osage = {
+      enable_startup_script = false
+      zone                  = "us-central1-f"
+      machine_type          = "e2-standard-2"
+      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20250910"
+      boot_disk_size        = 20
+      boot_resource_policies = [
+        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
+      ]
+      boot_disk_device_name = "osage-uow-server"
+    }
+
+    ca = {
+      enable_startup_script  = false
+      zone                   = "us-central1-f"
+      machine_type           = "e2-medium"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20241009"
+      boot_disk_size         = 10
+      boot_resource_policies = []
+      boot_disk_device_name  = "ca-uow-server"
+    }
+
+    newts = {
+      enable_startup_script = false
+      zone                  = "us-central1-b"
+      machine_type          = "e2-standard-2"
+      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
+      boot_disk_size        = 20
+      boot_resource_policies = [
+        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
+      ]
+      boot_disk_device_name = "newts-ogrre-server"
+    }
+
+    staging = {
+      enable_startup_script  = false
+      zone                   = "us-central1-a"
+      machine_type           = "e2-custom-medium-6400"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-11-bullseye-v20240110"
+      boot_disk_size         = 20
+      boot_resource_policies = []
+      boot_disk_device_name  = "oprhaned-wells-ui-server-v0"
+    }
+
+    rrc = {
+      enable_startup_script = false
+      zone                  = "us-central1-b"
+      machine_type          = "e2-standard-2"
+      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
+      boot_disk_size        = 20
+      boot_resource_policies = [
+        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
+      ]
+      boot_disk_device_name = "rrc-ogrre-server"
+    }
+  }
+
+  description = "Legacy Compute Engine VM backends. Add entries here only when intentionally managing a VM."
 }
 
 variable "enable_gke" {
@@ -70,22 +157,54 @@ variable "gke_subnetwork" {
   description = "VPC subnetwork used by the GKE cluster."
 }
 
-variable "gke_backend_names" {
-  type        = set(string)
-  default     = []
-  description = "Backend names to provision GKE ingress IPs, test DNS records, and Kubernetes deploy targets for."
+variable "gke_backends" {
+  type = map(object({
+    namespace                 = optional(string)
+    hostname                  = optional(string)
+    test_hostname             = optional(string)
+    static_ip_name            = optional(string)
+    replicas                  = optional(number)
+    cpu_request               = optional(string)
+    memory_request            = optional(string)
+    cpu_limit                 = optional(string)
+    memory_limit              = optional(string)
+    persistent_disk_size      = optional(string)
+    create_primary_dns_record = optional(bool)
+    create_test_dns_record    = optional(bool)
+    dns_ttl                   = optional(number)
+  }))
+
+  default = {
+    staging = {}
+    osage   = {}
+    isgs    = {}
+    newts   = {}
+    ca      = {}
+    rrc     = {}
+  }
+
+  description = "Default GKE backend definitions. Keys are collaborator names; omitted attributes use OGRRE naming defaults."
 }
 
-variable "gke_backend_hostnames" {
-  type        = map(string)
+variable "gke_backend_overrides" {
+  type = map(object({
+    namespace                 = optional(string)
+    hostname                  = optional(string)
+    test_hostname             = optional(string)
+    static_ip_name            = optional(string)
+    replicas                  = optional(number)
+    cpu_request               = optional(string)
+    memory_request            = optional(string)
+    cpu_limit                 = optional(string)
+    memory_limit              = optional(string)
+    persistent_disk_size      = optional(string)
+    create_primary_dns_record = optional(bool)
+    create_test_dns_record    = optional(bool)
+    dns_ttl                   = optional(number)
+  }))
+
   default     = {}
-  description = "Optional canonical hostnames used by Kubernetes Ingress per backend, without a trailing dot. Defaults to <env>-k8s-server.uow-carbon.org."
-}
-
-variable "primary_dns_to_gke_backends" {
-  type        = list(string)
-  default     = []
-  description = "Backend names whose existing <env>-server.uow-carbon.org DNS record should point to the GKE load balancer IP instead of the VM IP."
+  description = "Additional GKE backends or per-backend overrides merged over gke_backends. Use this from terraform.tfvars for local additions."
 }
 
 variable "create_gke_test_dns_records" {

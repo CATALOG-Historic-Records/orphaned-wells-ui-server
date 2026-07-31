@@ -1,0 +1,31 @@
+# Defaults for the shared OGRRE project live in variables.tf.
+# Copy this file to terraform.tfvars only when you need local overrides.
+
+# Add a GKE-only collaborator without creating a legacy Compute Engine VM:
+#
+# gke_backend_overrides = {
+#   boots = {}
+# }
+
+# Override per-backend GKE settings when defaults are not enough:
+#
+# gke_backend_overrides = {
+#   boots = {
+#     hostname             = "boots-server.uow-carbon.org"
+#     replicas             = 1
+#     cpu_request          = "2"
+#     memory_request       = "8Gi"
+#     cpu_limit            = "2"
+#     memory_limit         = "8Gi"
+#     persistent_disk_size = "20Gi"
+#   }
+# }
+
+# Set create_test_dns_record = false if you do not want
+# boots-k8s-server.uow-carbon.org created for a backend:
+#
+# gke_backend_overrides = {
+#   boots = {
+#     create_test_dns_record = false
+#   }
+# }

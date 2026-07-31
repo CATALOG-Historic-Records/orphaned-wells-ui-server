@@ -12,78 +12,8 @@ provider "google" {
   region  = var.region
 }
 
-locals {
-  collaborators = {
-    isgs = {
-      enable_startup_script  = false
-      zone                   = "us-central1-a"
-      machine_type           = "e2-standard-2"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20240515"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "isgs-uow-server"
-    }
-
-    osage = {
-      enable_startup_script = false
-      zone                  = "us-central1-f"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20250910"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "osage-uow-server"
-    }
-
-    ca = {
-      enable_startup_script  = false
-      zone                   = "us-central1-f"
-      machine_type           = "e2-medium"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20241009"
-      boot_disk_size         = 10
-      boot_resource_policies = []
-      boot_disk_device_name  = "ca-uow-server"
-    }
-
-    newts = {
-      enable_startup_script = false
-      zone                  = "us-central1-b"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "newts-ogrre-server"
-    }
-
-    staging = {
-      enable_startup_script  = false
-      zone                   = "us-central1-a"
-      machine_type           = "e2-custom-medium-6400"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-11-bullseye-v20240110"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "oprhaned-wells-ui-server-v0"
-    }
-
-    rrc = {
-      enable_startup_script = false
-      zone                  = "us-central1-b"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "rrc-ogrre-server"
-    }
-  }
-}
-
 module "backend_vms" {
-  for_each = local.collaborators
+  for_each = var.legacy_backend_vms
 
   source = "./modules/backend_vm"
 
@@ -98,11 +28,9 @@ module "backend_vms" {
 
   enable_startup_script = each.value.enable_startup_script
 
-  dns_rrdatas_override = (
-    var.enable_gke && contains(var.primary_dns_to_gke_backends, each.key)
-    ? [google_compute_global_address.gke_backend[each.key].address]
-    : null
-  )
+  backend_dns_domain = var.backend_dns_domain
+  dns_managed_zone   = var.dns_managed_zone
+  create_dns_record  = !(var.enable_gke && try(local.gke_backends[each.key].create_primary_dns_record, false))
 }
 
 resource "google_compute_firewall" "backend_http_https" {

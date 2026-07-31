@@ -14,13 +14,15 @@ BACKEND_VMS_ONLY=false
 RESET_STATE=false
 COLLABORATOR_FILTERS=()
 
-PROJECT_ID=""
+PROJECT_ID="tidy-outlet-412020"
 REGION="us-central1"
 ENABLE_GKE="true"
 MANAGE_PROJECT_SERVICES="true"
 GKE_CLUSTER_NAME="uow-backend-gke"
 GKE_LOCATION="us-central1"
 CREATE_GKE_TEST_DNS_RECORDS="true"
+DNS_MANAGED_ZONE="uow-carbon-org"
+BACKEND_DNS_DOMAIN="uow-carbon.org"
 GKE_REQUIRED_SERVICES=(
   "compute.googleapis.com"
   "container.googleapis.com"
@@ -32,10 +34,10 @@ usage() {
 Import existing Google Cloud infrastructure into the selected Terraform workspace.
 
 The import manifest is generated from this repo's Terraform configuration and
-naming conventions. The script parses terraform.tfvars plus collaborator zones
-from main.tf, then attempts to import each resource that the configuration
-manages. It does not use terraform console, so manifest generation does not
-depend on decoding existing Terraform state.
+naming conventions. The script parses variables.tf plus optional terraform.tfvars
+overrides, then attempts to import each resource that the configuration manages.
+It does not use terraform console, so manifest generation does not depend on
+decoding existing Terraform state.
 
 Resources already present in the target state are skipped. Failed imports are
 reported and do not stop the script unless --strict is used.
@@ -47,7 +49,8 @@ Options:
   --target-workspace NAME    Workspace to import into. If omitted, uses the
                              currently selected workspace.
   --var-file PATH            Terraform variable file to parse.
-                             Default: terraform.tfvars.
+                             Default: terraform.tfvars. Missing files are
+                             treated as no local overrides.
   --backend-vms-only         Import only module.backend_vms resources.
   --reset-state              Move the selected local workspace state file aside
                              before importing. This affects Terraform state
@@ -124,6 +127,11 @@ tfvars_scalar() {
   local default_value="$2"
   local value
 
+  if [[ ! -f "${VAR_FILE}" ]]; then
+    printf '%s\n' "${default_value}"
+    return
+  fi
+
   value="$(
     awk -v key="${key}" '
       function trim_value(value) {
@@ -154,7 +162,121 @@ tfvars_scalar() {
   fi
 }
 
-parse_collaborators() {
+parse_variable_default_map_keys() {
+  local variable_name="$1"
+
+  awk -v variable_name="${variable_name}" '
+    function strip_comment(line) {
+      sub(/[[:space:]]*#.*/, "", line)
+      return line
+    }
+
+    function count_open_braces(line, tmp) {
+      tmp = line
+      return gsub(/\{/, "{", tmp)
+    }
+
+    function count_close_braces(line, tmp) {
+      tmp = line
+      return gsub(/\}/, "}", tmp)
+    }
+
+    BEGIN {
+      in_variable = 0
+      in_default = 0
+      depth = 0
+    }
+
+    {
+      line = strip_comment($0)
+
+      if (!in_variable) {
+        if (line ~ "^[[:space:]]*variable[[:space:]]+\"" variable_name "\"[[:space:]]*{") {
+          in_variable = 1
+        }
+        next
+      }
+
+      if (!in_default) {
+        if (line ~ /^[[:space:]]*default[[:space:]]*=[[:space:]]*{/) {
+          in_default = 1
+          depth = count_open_braces(line) - count_close_braces(line)
+        }
+        next
+      }
+
+      if (depth == 1 && line ~ /^[[:space:]]*"?[A-Za-z0-9_-]+"?[[:space:]]*=/) {
+        key = line
+        sub(/^[[:space:]]*/, "", key)
+        sub(/[[:space:]]*=.*/, "", key)
+        gsub(/"/, "", key)
+        print key
+      }
+
+      depth += count_open_braces(line) - count_close_braces(line)
+
+      if (depth <= 0) {
+        exit
+      }
+    }
+  ' variables.tf
+}
+
+parse_tfvars_map_keys() {
+  local key_name="$1"
+
+  [[ -f "${VAR_FILE}" ]] || return
+
+  awk -v key_name="${key_name}" '
+    function strip_comment(line) {
+      sub(/[[:space:]]*#.*/, "", line)
+      return line
+    }
+
+    function count_open_braces(line, tmp) {
+      tmp = line
+      return gsub(/\{/, "{", tmp)
+    }
+
+    function count_close_braces(line, tmp) {
+      tmp = line
+      return gsub(/\}/, "}", tmp)
+    }
+
+    BEGIN {
+      in_map = 0
+      depth = 0
+    }
+
+    {
+      line = strip_comment($0)
+
+      if (!in_map) {
+        if (line ~ "^[[:space:]]*" key_name "[[:space:]]*=[[:space:]]*{") {
+          in_map = 1
+          depth = count_open_braces(line) - count_close_braces(line)
+        }
+        next
+      }
+
+      if (depth == 1 && line ~ /^[[:space:]]*"?[A-Za-z0-9_-]+"?[[:space:]]*=/) {
+        key = line
+        sub(/^[[:space:]]*/, "", key)
+        sub(/[[:space:]]*=.*/, "", key)
+        gsub(/"/, "", key)
+        print key
+      }
+
+      depth += count_open_braces(line) - count_close_braces(line)
+
+      if (depth <= 0) {
+        exit
+      }
+    }
+  ' "${VAR_FILE}"
+}
+
+parse_legacy_backend_vms() {
   awk '
     function strip_comment(line) {
       sub(/[[:space:]]*#.*/, "", line)
@@ -172,7 +294,8 @@ parse_collaborators() {
     }
 
     BEGIN {
-      in_collaborators = 0
+      in_variable = 0
+      in_default = 0
       depth = 0
       current = ""
     }
@@ -180,10 +303,17 @@ parse_collaborators() {
     {
       line = strip_comment($0)
 
-      if (!in_collaborators) {
-        if (line ~ /^[[:space:]]*collaborators[[:space:]]*=[[:space:]]*{/) {
-          in_collaborators = 1
-          depth = 1
+      if (!in_variable) {
+        if (line ~ /^[[:space:]]*variable[[:space:]]+"legacy_backend_vms"[[:space:]]*{/) {
+          in_variable = 1
+        }
+        next
+      }
+
+      if (!in_default) {
+        if (line ~ /^[[:space:]]*default[[:space:]]*=[[:space:]]*{/) {
+          in_default = 1
+          depth = count_open_braces(line) - count_close_braces(line)
         }
         next
       }
@@ -212,7 +342,7 @@ parse_collaborators() {
         exit
       }
     }
-  ' main.tf
+  ' variables.tf
 }
 
 state_file_for_workspace() {
@@ -250,8 +380,36 @@ add_manifest_entry() {
   printf '%s\t%s\t%s\n' "${category}" "${address}" "${import_id}" >>"${MANIFEST_FILE}"
 }
 
+append_unique_gke_backend() {
+  local backend="$1"
+  local existing
+
+  [[ -n "${backend}" ]] || return
+
+  for existing in "${GKE_BACKENDS[@]}"; do
+    if [[ "${existing}" == "${backend}" ]]; then
+      return
+    fi
+  done
+
+  GKE_BACKENDS+=("${backend}")
+}
+
+gke_backend_is_configured() {
+  local backend="$1"
+  local existing
+
+  for existing in "${GKE_BACKENDS[@]}"; do
+    if [[ "${existing}" == "${backend}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 build_manifest() {
-  local collaborator
+  local backend
   local zone
   local service
 
@@ -272,21 +430,27 @@ build_manifest() {
     fi
   fi
 
-  for i in "${!COLLABORATORS[@]}"; do
-    collaborator="${COLLABORATORS[$i]}"
-    zone="${COLLABORATOR_ZONES[$i]}"
-
-    if [[ "${ENABLE_GKE}" == "true" && "${BACKEND_VMS_ONLY}" != true ]]; then
-      add_manifest_entry "gke-backend" "google_compute_global_address.gke_backend[\"${collaborator}\"]" "projects/${PROJECT_ID}/global/addresses/${collaborator}-uow-gke-ip"
+  if [[ "${ENABLE_GKE}" == "true" && "${BACKEND_VMS_ONLY}" != true ]]; then
+    for backend in "${GKE_BACKENDS[@]}"; do
+      add_manifest_entry "gke-backend" "google_compute_global_address.gke_backend[\"${backend}\"]" "projects/${PROJECT_ID}/global/addresses/${backend}-uow-gke-ip"
+      add_manifest_entry "gke-dns" "google_dns_record_set.gke_backend_primary[\"${backend}\"]" "projects/${PROJECT_ID}/managedZones/${DNS_MANAGED_ZONE}/rrsets/${backend}-server.${BACKEND_DNS_DOMAIN}./A"
 
       if [[ "${CREATE_GKE_TEST_DNS_RECORDS}" == "true" ]]; then
-        add_manifest_entry "gke-dns" "google_dns_record_set.gke_backend_test[\"${collaborator}\"]" "projects/${PROJECT_ID}/managedZones/uow-carbon-org/rrsets/${collaborator}-k8s-server.uow-carbon.org./A"
+        add_manifest_entry "gke-dns" "google_dns_record_set.gke_backend_test[\"${backend}\"]" "projects/${PROJECT_ID}/managedZones/${DNS_MANAGED_ZONE}/rrsets/${backend}-k8s-server.${BACKEND_DNS_DOMAIN}./A"
       fi
-    fi
+    done
+  fi
 
-    add_manifest_entry "backend-vm" "module.backend_vms[\"${collaborator}\"].google_compute_address.ip" "projects/${PROJECT_ID}/regions/${REGION}/addresses/${collaborator}-static-ip-address"
-    add_manifest_entry "backend-vm" "module.backend_vms[\"${collaborator}\"].google_compute_instance.vm" "projects/${PROJECT_ID}/zones/${zone}/instances/${collaborator}-uow-server"
-    add_manifest_entry "backend-vm" "module.backend_vms[\"${collaborator}\"].google_dns_record_set.dns" "projects/${PROJECT_ID}/managedZones/uow-carbon-org/rrsets/${collaborator}-server.uow-carbon.org./A"
+  for i in "${!LEGACY_VMS[@]}"; do
+    backend="${LEGACY_VMS[$i]}"
+    zone="${LEGACY_VM_ZONES[$i]}"
+
+    add_manifest_entry "backend-vm" "module.backend_vms[\"${backend}\"].google_compute_address.ip" "projects/${PROJECT_ID}/regions/${REGION}/addresses/${backend}-static-ip-address"
+    add_manifest_entry "backend-vm" "module.backend_vms[\"${backend}\"].google_compute_instance.vm" "projects/${PROJECT_ID}/zones/${zone}/instances/${backend}-uow-server"
+
+    if ! gke_backend_is_configured "${backend}"; then
+      add_manifest_entry "backend-vm" "module.backend_vms[\"${backend}\"].google_dns_record_set.dns[0]" "projects/${PROJECT_ID}/managedZones/${DNS_MANAGED_ZONE}/rrsets/${backend}-server.${BACKEND_DNS_DOMAIN}./A"
+    fi
   done
 }
 
@@ -369,8 +533,7 @@ require_command grep
 
 cd "${TERRAFORM_DIR}" || exit 1
 
-[[ -f "${VAR_FILE}" ]] || fail "Terraform variable file not found: ${VAR_FILE}"
-[[ -f "main.tf" ]] || fail "main.tf not found in ${TERRAFORM_DIR}"
+[[ -f "variables.tf" ]] || fail "variables.tf not found in ${TERRAFORM_DIR}"
 
 unset GOOGLE_APPLICATION_CREDENTIALS
 unset GOOGLE_AUTHORIZED_USER_CREDENTIALS
@@ -378,6 +541,8 @@ unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
 
 PROJECT_ID="$(tfvars_scalar "project_id" "${PROJECT_ID}")"
 REGION="$(tfvars_scalar "region" "${REGION}")"
+DNS_MANAGED_ZONE="$(tfvars_scalar "dns_managed_zone" "${DNS_MANAGED_ZONE}")"
+BACKEND_DNS_DOMAIN="$(tfvars_scalar "backend_dns_domain" "${BACKEND_DNS_DOMAIN}")"
 ENABLE_GKE="$(normalize_bool "enable_gke" "$(tfvars_scalar "enable_gke" "${ENABLE_GKE}")")"
 MANAGE_PROJECT_SERVICES="$(normalize_bool "manage_project_services" "$(tfvars_scalar "manage_project_services" "${MANAGE_PROJECT_SERVICES}")")"
 GKE_CLUSTER_NAME="$(tfvars_scalar "gke_cluster_name" "${GKE_CLUSTER_NAME}")"
@@ -386,23 +551,42 @@ CREATE_GKE_TEST_DNS_RECORDS="$(normalize_bool "create_gke_test_dns_records" "$(t
 
 [[ -n "${PROJECT_ID}" ]] || fail "project_id must be set in ${VAR_FILE}"
 
-COLLABORATORS=()
-COLLABORATOR_ZONES=()
-while IFS=$'\t' read -r collaborator zone; do
-  [[ -n "${collaborator}" && -n "${zone}" ]] || continue
-
-  if collaborator_is_requested "${collaborator}"; then
-    COLLABORATORS+=("${collaborator}")
-    COLLABORATOR_ZONES+=("${zone}")
+GKE_BACKENDS=()
+while IFS= read -r backend; do
+  if collaborator_is_requested "${backend}"; then
+    append_unique_gke_backend "${backend}"
   fi
-done < <(parse_collaborators)
+done < <(parse_variable_default_map_keys "gke_backends")
 
-if [[ "${#COLLABORATORS[@]}" -eq 0 ]]; then
+while IFS= read -r backend; do
+  if collaborator_is_requested "${backend}"; then
+    append_unique_gke_backend "${backend}"
+  fi
+done < <(parse_tfvars_map_keys "gke_backends")
+
+while IFS= read -r backend; do
+  if collaborator_is_requested "${backend}"; then
+    append_unique_gke_backend "${backend}"
+  fi
+done < <(parse_tfvars_map_keys "gke_backend_overrides")
+
+LEGACY_VMS=()
+LEGACY_VM_ZONES=()
+while IFS=$'\t' read -r backend zone; do
+  [[ -n "${backend}" && -n "${zone}" ]] || continue
+
+  if collaborator_is_requested "${backend}"; then
+    LEGACY_VMS+=("${backend}")
+    LEGACY_VM_ZONES+=("${zone}")
+  fi
+done < <(parse_legacy_backend_vms)
+
+if [[ "${#GKE_BACKENDS[@]}" -eq 0 && "${#LEGACY_VMS[@]}" -eq 0 ]]; then
   if [[ "${#COLLABORATOR_FILTERS[@]}" -gt 0 ]]; then
-    fail "No matching collaborators found in main.tf for filter: ${COLLABORATOR_FILTERS[*]}"
+    fail "No matching GKE backends or legacy VMs found for filter: ${COLLABORATOR_FILTERS[*]}"
   fi
 
-  fail "No collaborators with zones were found in main.tf"
+  fail "No GKE backends or legacy VMs were found in variables.tf"
 fi
 
 STATE_LIST_FILE="$(mktemp)"
@@ -430,7 +614,9 @@ if [[ "${RESET_STATE}" == true ]]; then
 fi
 
 IMPORT_ARGS=(-input=false -no-color)
-IMPORT_ARGS+=("-var-file=${VAR_FILE}")
+if [[ -f "${VAR_FILE}" ]]; then
+  IMPORT_ARGS+=("-var-file=${VAR_FILE}")
+fi
 
 if [[ ! -f "$(state_file_for_workspace)" ]]; then
   : >"${STATE_LIST_FILE}"
@@ -447,11 +633,16 @@ matched=0
 FAILED_IMPORTS=()
 
 echo "Terraform target workspace: ${CURRENT_WORKSPACE}"
-echo "Terraform variable file: ${VAR_FILE}"
+if [[ -f "${VAR_FILE}" ]]; then
+  echo "Terraform variable file: ${VAR_FILE}"
+else
+  echo "Terraform variable file: ${VAR_FILE} (not found; using defaults)"
+fi
 echo "Import manifest source: parsed Terraform files and repo naming conventions"
 echo "Project: ${PROJECT_ID}"
 echo "Region: ${REGION}"
-echo "Collaborators: $(join_list ", " "${COLLABORATORS[@]}")"
+echo "GKE backends: $(join_list ", " "${GKE_BACKENDS[@]}")"
+echo "Legacy VM backends: $(join_list ", " "${LEGACY_VMS[@]}")"
 if [[ "${ENABLE_GKE}" == "true" ]]; then
   echo "GKE imports: enabled"
 else
