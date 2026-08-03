@@ -18,7 +18,7 @@ from ogrre.internal.util import time_it
 
 _log = logging.getLogger(__name__)
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "true").lower() in ("1", "true", "yes")
-COLLABORATORS = ["isgs", "calgem", "osage"]
+
 DEFAULT_UNAUTHENTICATED_TEAM = {
     "name": "default",
     "display_name": "Default",
@@ -305,6 +305,10 @@ class DataManager:
         if not isinstance(collaborator, str):
             return None
         collaborator = collaborator.strip()
+
+        ## There is a naming convention disparity between OGRRE (rrc) and OGRRE data cleaning (texas_rrc)
+        if collaborator == "rrc":
+            collaborator = "texas_rrc"
         return collaborator or None
 
     def getCollaboratorForUser(self, user=None):
