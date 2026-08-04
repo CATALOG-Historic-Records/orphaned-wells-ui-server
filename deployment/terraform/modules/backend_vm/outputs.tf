@@ -7,5 +7,5 @@ output "vm_name" {
 }
 
 output "dns_name" {
-  value = google_dns_record_set.dns.name
+  value = try(google_dns_record_set.dns[0].name, null)
 }

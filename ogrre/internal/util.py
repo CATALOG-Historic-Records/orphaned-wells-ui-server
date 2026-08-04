@@ -23,6 +23,9 @@ CLEANING_FUNCTIONS = {
     "clean_date": OGRRE_cleaning_functions.clean_date,
     "convert_hole_size_to_decimal": OGRRE_cleaning_functions.convert_hole_size_to_decimal,
     "llm_clean": OGRRE_cleaning_functions.llm_clean,
+    "clean_depth": OGRRE_cleaning_functions.clean_depth,
+    "newts_clean_units": OGRRE_cleaning_functions.newts_clean_units,
+    "newts_clean_epa_methods": OGRRE_cleaning_functions.newts_clean_epa_methods,
 }
 
 _log = logging.getLogger(__name__)
