@@ -12,8 +12,15 @@ provider "google" {
   region  = var.region
 }
 
+locals {
+  managed_legacy_backend_vms = {
+    for name in var.enabled_legacy_backend_vms :
+    name => var.legacy_backend_vms[name]
+  }
+}
+
 module "backend_vms" {
-  for_each = var.legacy_backend_vms
+  for_each = local.managed_legacy_backend_vms
 
   source = "./modules/backend_vm"
 
