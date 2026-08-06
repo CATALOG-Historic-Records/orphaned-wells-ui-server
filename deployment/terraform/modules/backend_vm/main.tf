@@ -4,7 +4,7 @@ resource "google_compute_address" "ip" {
   # count = var.enable_gke ? 0 : 1
   lifecycle {
     prevent_destroy = true
-    ignore_changes = all # TODO: if we disable gke, remove this line
+    ignore_changes  = all # TODO: if we disable gke, remove this line
   }
 }
 
@@ -67,18 +67,20 @@ resource "google_compute_instance" "vm" {
 }
 
 resource "google_dns_record_set" "dns" {
-  name = "${var.collaborator}-server.uow-carbon.org."
+  count = var.create_dns_record ? 1 : 0
+
+  name = "${var.collaborator}-server.${var.backend_dns_domain}."
   type = "A"
   ttl  = 300
 
-  managed_zone = "uow-carbon-org"
+  managed_zone = var.dns_managed_zone
 
-  rrdatas = var.dns_rrdatas_override != null ? var.dns_rrdatas_override : [
+  rrdatas = [
     google_compute_address.ip.address
   ]
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes = all # TODO: if we disable gke, remove this line
+    ignore_changes  = all # TODO: if we disable gke, remove this line
   }
 }
