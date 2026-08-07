@@ -345,7 +345,7 @@ class DataManager:
 
     def getProcessorsByIds(self, google_ids=None, user=None):
         if USE_DB_PROCESSORS:
-            processors = self.getMongoProcessorByID(google_ids)
+            processors = self.getMongoProcessorsByIDs(google_ids)
         else:
             collaborator = self.getCollaboratorForUser(user)
             processors = []
@@ -1530,6 +1530,16 @@ class DataManager:
         user = user_info.get("email", None)
         ## add timestamp to project
         record["dateCreated"] = time.time()
+
+        # Atomically increment the counter and get the next number
+        next_doc = self.db.counters.find_one_and_update(
+            {"_id": "records"},
+            {"$inc": {"record_number": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        record["record_number"] = next_doc["record_number"]
+
         ## add record to db collection
         db_response = self.db.records.insert_one(record)
         new_id = db_response.inserted_id
