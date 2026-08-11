@@ -114,6 +114,7 @@ jobs:
           namespace="$(field namespace)"
           host="$(field host)"
           static_ip_name="$(field static_ip_name)"
+          storage_bucket_name="$(field storage_bucket_name)"
           replicas="$(field replicas)"
           cpu_request="$(field cpu_request)"
           memory_request="$(field memory_request)"
@@ -146,6 +147,7 @@ jobs:
             "namespace:$namespace"
             "host:$host"
             "static_ip_name:$static_ip_name"
+            "storage_bucket_name:$storage_bucket_name"
           )
           for item in "${required[@]}"; do
             key="${item%%:*}"
@@ -162,6 +164,7 @@ jobs:
             echo "namespace=$namespace"
             echo "host=$host"
             echo "static_ip_name=$static_ip_name"
+            echo "storage_bucket_name=$storage_bucket_name"
             echo "replicas=$replicas"
             echo "cpu_request=$cpu_request"
             echo "memory_request=$memory_request"
@@ -174,6 +177,7 @@ jobs:
         env:
           DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
           HOSTNAME: ${{ steps.target.outputs.host }}
+          STORAGE_BUCKET_NAME: ${{ steps.target.outputs.storage_bucket_name }}
           STAGING_ENV_CONTENT: ${{ secrets.STAGING_ENV }}
           CA_ENV_CONTENT: ${{ secrets.CA_ENV }}
           ISGS_ENV_CONTENT: ${{ secrets.ISGS_ENV }}
@@ -225,7 +229,7 @@ jobs:
               value="${value:1:${#value}-2}"
             fi
             case "$key" in
-              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE)
+              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME)
                 continue
                 ;;
             esac
@@ -238,6 +242,7 @@ jobs:
             echo "LOG_DIR=/logs"
             echo "LOCAL_STORAGE_ROOT=/data/local-storage"
             echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
+            echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
           } >> "$k8s_env_file"
 
           required_runtime_keys=(

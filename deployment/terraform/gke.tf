@@ -3,9 +3,20 @@ locals {
     "compute.googleapis.com",
     "container.googleapis.com",
     "dns.googleapis.com",
+    "storage.googleapis.com",
   ])
 
-  gke_backend_definitions = merge(var.gke_backends, var.gke_backend_overrides)
+  gke_backend_definitions = {
+    for name in setunion(keys(var.gke_backends), keys(var.gke_backend_overrides)) :
+    name => merge(
+      try(var.gke_backends[name], {}),
+      {
+        for key, value in try(var.gke_backend_overrides[name], {}) :
+        key => value
+        if value != null
+      }
+    )
+  }
 
   gke_backends = {
     for name, backend in local.gke_backend_definitions : name => {
@@ -13,6 +24,8 @@ locals {
       hostname                  = trimsuffix(coalesce(try(backend.hostname, null), "${name}-server.${var.backend_dns_domain}"), ".")
       test_hostname             = trimsuffix(coalesce(try(backend.test_hostname, null), "${name}-k8s-server.${var.backend_dns_domain}"), ".")
       static_ip_name            = coalesce(try(backend.static_ip_name, null), "${name}-uow-gke-ip")
+      upload_bucket_name        = coalesce(try(backend.upload_bucket_name, null), "${name}_uploads")
+      upload_bucket_location    = coalesce(try(backend.upload_bucket_location, null), var.upload_bucket_location)
       replicas                  = coalesce(try(backend.replicas, null), 2)
       cpu_request               = coalesce(try(backend.cpu_request, null), "2")
       memory_request            = coalesce(try(backend.memory_request, null), "12Gi")
@@ -33,6 +46,17 @@ locals {
   gke_test_dns_backends = {
     for name, backend in local.gke_backends : name => backend
     if backend.create_test_dns_record
+  }
+
+  gke_upload_buckets = {
+    for bucket_name in toset([
+      for backend in values(local.gke_backends) : backend.upload_bucket_name
+      ]) : bucket_name => {
+      location = one(toset([
+        for backend in values(local.gke_backends) : backend.upload_bucket_location
+        if backend.upload_bucket_name == bucket_name
+      ]))
+    }
   }
 }
 
