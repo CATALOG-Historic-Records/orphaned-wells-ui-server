@@ -1,0 +1,46 @@
+# Defaults for the shared OGRRE project live in variables.tf.
+# Copy this file to terraform.tfvars only when you need local overrides.
+
+# Legacy Compute Engine VMs are disabled by default. Re-enable specific
+# legacy VMs by listing names from legacy_backend_vms:
+#
+# enabled_legacy_backend_vms = ["isgs"]
+#
+# Add a GKE-only collaborator without creating a legacy Compute Engine VM:
+#
+# gke_backend_overrides = {
+#   boots = {}
+# }
+
+# The default upload bucket name is <collaborator>_uploads.
+# Override it only for existing buckets or intentional shared buckets:
+#
+# gke_backend_overrides = {
+#   boots = {
+#     upload_bucket_name = "custom_upload_bucket"
+#   }
+# }
+#
+# Override per-backend GKE settings when defaults are not enough:
+#
+# gke_backend_overrides = {
+#   boots = {
+#     hostname             = "boots-server.uow-carbon.org"
+#     upload_bucket_name   = "boots_uploads"
+#     replicas             = 1
+#     cpu_request          = "2"
+#     memory_request       = "8Gi"
+#     cpu_limit            = "2"
+#     memory_limit         = "8Gi"
+#     persistent_disk_size = "20Gi"
+#   }
+# }
+
+# Set create_test_dns_record = false if you do not want
+# boots-k8s-server.uow-carbon.org created for a backend:
+#
+# gke_backend_overrides = {
+#   boots = {
+#     create_test_dns_record = false
+#   }
+# }

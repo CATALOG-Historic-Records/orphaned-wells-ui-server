@@ -2,7 +2,7 @@
 
 This directory contains the Kubernetes deployment template used to run each backend environment on GKE. Terraform owns the cloud infrastructure, and the GitHub Actions workflows render and apply this Kubernetes template for each backend environment.
 
-The existing Compute Engine VM resources are still managed by Terraform. They can remain stopped in GCP while the Kubernetes deployment serves traffic.
+Legacy Compute Engine VM definitions remain in Terraform, but VMs are disabled unless explicitly listed in `enabled_legacy_backend_vms`. New GKE backends do not need a VM entry.
 
 ## Architecture
 
@@ -10,8 +10,9 @@ Terraform in `deployment/terraform` creates:
 
 - one shared GKE Autopilot cluster
 - one global static IP per backend environment
+- one Cloud Storage upload bucket per unique backend bucket name
 - optional `<env>-k8s-server.uow-carbon.org` test DNS records
-- optional primary DNS records, such as `staging-server.uow-carbon.org`, pointing to the GKE static IP
+- primary DNS records, such as `staging-server.uow-carbon.org`, pointing to the GKE static IP
 - `kubernetes_deploy_targets`, the JSON map consumed by GitHub Actions
 
 Kubernetes creates one namespace per backend environment:
@@ -45,6 +46,7 @@ Each namespace contains:
 - `IMAGE`
 - `HOSTNAME`
 - `STATIC_IP_NAME`
+- `STORAGE_BUCKET_NAME`
 - CPU and memory requests/limits
 
 The rendered file is an ephemeral deployment artifact:
@@ -64,15 +66,17 @@ Required APIs:
 - Kubernetes Engine API: `container.googleapis.com`
 - Compute Engine API: `compute.googleapis.com`
 - Cloud DNS API: `dns.googleapis.com`
+- Cloud Storage API: `storage.googleapis.com`
 
-The identity running Terraform needs permissions to manage GKE, Compute addresses, and Cloud DNS. A practical setup is:
+The identity running Terraform needs permissions to manage GKE, Compute addresses, Cloud DNS, and Cloud Storage buckets. A practical setup is:
 
 - `roles/container.admin`
 - `roles/compute.networkAdmin`
 - `roles/dns.admin`
+- `roles/storage.admin`
 - `roles/serviceusage.serviceUsageAdmin` if Terraform manages project services
 
-The GitHub Actions service account in `SERVICE_KEY_JSON` needs enough access to fetch GKE credentials and apply Kubernetes resources. `roles/container.admin` is sufficient for the current deployment path.
+The GitHub Actions service account in `SERVICE_KEY_JSON` needs enough access to fetch GKE credentials, apply Kubernetes resources, and read/write upload bucket objects. `roles/container.admin` plus bucket/project storage object permissions is sufficient for the current deployment path.
 
 ## Deploy or update GKE infrastructure
 
@@ -81,8 +85,8 @@ From the Terraform directory:
 ```bash
 cd orphaned-wells-ui-server/deployment/terraform
 terraform init
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
+terraform plan
+terraform apply
 ```
 
 `enable_gke` defaults to `true`, so the GKE cluster, static IPs, and related GKE resources are included unless explicitly disabled.
@@ -90,7 +94,7 @@ terraform apply -var-file=terraform.tfvars
 To explicitly disable GKE planning:
 
 ```bash
-terraform plan -var-file=terraform.tfvars -var='enable_gke=false'
+terraform plan -var='enable_gke=false'
 ```
 
 ## Derive `K8S_DEPLOY_TARGETS`
@@ -105,6 +109,7 @@ terraform output -json kubernetes_deploy_targets | jq -c .
 Store that exact JSON as the GitHub repository secret:
 
 ```bash
+gh auth login
 gh secret set K8S_DEPLOY_TARGETS \
   --repo CATALOG-Historic-Records/orphaned-wells-ui-server \
   --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
@@ -130,6 +135,7 @@ Keep the existing deployment secrets:
 - `DOCKERHUB_ACCESS_TOKEN`
 - `CREDS_JSON`
 - `SERVICE_KEY_JSON`
+- `K8S_DEPLOY_TARGETS`
 
 Each backend environment also needs an environment-file secret:
 
@@ -138,6 +144,7 @@ Each backend environment also needs an environment-file secret:
 - `ISGS_ENV`
 - `NEWTS_ENV`
 - `OSAGE_ENV`
+- `RRC_ENV`
 
 The environment-file secret should contain the same key/value pairs used by the VM `.env` file. The workflow overrides these Kubernetes-owned values:
 
@@ -146,6 +153,7 @@ The environment-file secret should contain the same key/value pairs used by the 
 - `LOG_DIR`
 - `LOCAL_STORAGE_ROOT`
 - `LOCAL_STORAGE_URL_BASE`
+- `STORAGE_BUCKET_NAME`
 
 Keep `COLLABORATOR` in the environment secret when the backend needs it.
 
@@ -214,6 +222,7 @@ TARGETS_JSON="$(cd deployment/terraform && terraform output -json kubernetes_dep
 NAMESPACE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].namespace' <<< "$TARGETS_JSON")"
 HOSTNAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].host' <<< "$TARGETS_JSON")"
 STATIC_IP_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].static_ip_name' <<< "$TARGETS_JSON")"
+STORAGE_BUCKET_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].storage_bucket_name' <<< "$TARGETS_JSON")"
 REPLICAS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].replicas // 1' <<< "$TARGETS_JSON")"
 CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_request // "2"' <<< "$TARGETS_JSON")"
 MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // "6Gi"' <<< "$TARGETS_JSON")"
@@ -256,7 +265,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:${#value}-2}"
   [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:${#value}-2}"
   case "$key" in
-    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE) continue ;;
+    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME) continue ;;
   esac
   printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
 done < "$raw_env_file"
@@ -267,6 +276,7 @@ done < "$raw_env_file"
   echo "LOG_DIR=/logs"
   echo "LOCAL_STORAGE_ROOT=/data/local-storage"
   echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
+  echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
 } >> "$k8s_env_file"
 ```
 
@@ -303,7 +313,7 @@ RUNTIME_CONFIG_SHA="$(
     | awk '{print $1}'
 )"
 
-export DEPLOY_ENV NAMESPACE HOSTNAME STATIC_IP_NAME REPLICAS CPU_REQUEST MEMORY_REQUEST CPU_LIMIT MEMORY_LIMIT PERSISTENT_DISK_SIZE IMAGE DEPLOY_RUN_ID RUNTIME_CONFIG_SHA
+export DEPLOY_ENV NAMESPACE HOSTNAME STATIC_IP_NAME STORAGE_BUCKET_NAME REPLICAS CPU_REQUEST MEMORY_REQUEST CPU_LIMIT MEMORY_LIMIT PERSISTENT_DISK_SIZE IMAGE DEPLOY_RUN_ID RUNTIME_CONFIG_SHA
 envsubst < deployment/kubernetes/backend.yaml > deployment/kubernetes/rendered/backend.yaml
 kubectl apply -f deployment/kubernetes/rendered/backend.yaml
 kubectl -n "$NAMESPACE" rollout status deployment/backend --timeout=10m
@@ -427,50 +437,59 @@ GKE Autopilot does not expose a normal "restart the cluster" operation like rest
 
 ## Adding a new collaborator backend
 
-1. Add the collaborator to `local.collaborators` in `deployment/terraform/main.tf`.
+1. Add the collaborator to `gke_backend_overrides` in `deployment/terraform/terraform.tfvars`, or add it to the default `gke_backends` map in `variables.tf` when the collaborator should be part of the shared defaults.
 
-2. Add its canonical hostname if it should use a primary backend hostname:
+For a standard GKE-only collaborator, the override is enough:
 
 ```hcl
-gke_backend_hostnames = {
-  staging = "staging-server.uow-carbon.org"
-  newts   = "newts-server.uow-carbon.org"
-  boots   = "boots-server.uow-carbon.org"
+gke_backend_overrides = {
+  boots = {}
 }
 ```
 
-3. Add it to `primary_dns_to_gke_backends` when the primary DNS record should point to GKE:
+Optional per-backend settings can be added in the same map:
 
 ```hcl
-primary_dns_to_gke_backends = ["staging", "newts", "boots"]
+gke_backend_overrides = {
+  boots = {
+    # Only set this when the bucket cannot use the default "boots_uploads" name.
+    upload_bucket_name   = "existing-bucket-name"
+    replicas             = 1
+    memory_request       = "8Gi"
+    memory_limit         = "8Gi"
+    persistent_disk_size = "20Gi"
+  }
+}
 ```
 
-4. Apply Terraform:
+2. Apply Terraform:
 
 ```bash
 cd orphaned-wells-ui-server/deployment/terraform
-terraform plan -var-file=terraform.tfvars
-terraform apply -var-file=terraform.tfvars
+terraform plan
+terraform apply
 ```
 
-5. Export and update `K8S_DEPLOY_TARGETS`:
+3. Export and update `K8S_DEPLOY_TARGETS`. Run `gh auth login` first if this machine has not been authenticated:
 
 ```bash
-terraform output -json kubernetes_deploy_targets | jq -c .
+gh secret set K8S_DEPLOY_TARGETS \
+  --repo CATALOG-Historic-Records/orphaned-wells-ui-server \
+  --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
 ```
 
-6. Add a GitHub environment-file secret for the collaborator, for example `BOOTS_ENV`.
+4. Add a GitHub environment-file secret for the collaborator, for example `BOOTS_ENV`.
 
-7. Update `.github/workflows/deploy-k8s-dispatch.yml`:
+5. Update `.github/workflows/deploy-k8s-dispatch.yml`:
 
 - add the new environment to `workflow_dispatch.inputs.DEPLOY_ENV.options`
 - add the new environment secret to `workflow_call.secrets`
 - add the secret to the `Prepare runtime env file` env block
 - add a case branch that maps the new `DEPLOY_ENV` to that secret
 
-8. Optionally add a dedicated workflow like `.github/workflows/deploy-k8s-boots.yml`.
+6. Optionally add a dedicated workflow like `.github/workflows/deploy-k8s-boots.yml`.
 
-9. Deploy the new backend and verify:
+7. Deploy the new backend and verify:
 
 ```bash
 kubectl -n uow-boots get deployment backend
