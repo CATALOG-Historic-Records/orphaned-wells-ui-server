@@ -638,7 +638,9 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
         else:
             cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
             if cleaning_function:
-                options = attribute_schema.get("options") or {} if attribute_schema else {}
+                options = (
+                    attribute_schema.get("options") or {} if attribute_schema else {}
+                )
                 try:
                     cleaned_val = cleaning_function(unclean_val, options=options)
                     _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
