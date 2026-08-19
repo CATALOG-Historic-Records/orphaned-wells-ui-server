@@ -39,6 +39,11 @@ Before editing, inspect the relevant local patterns:
 - `../orphaned-wells-ui` service callers when backend response shapes, endpoint
   names, permission names, auth behavior, upload behavior, or user-visible
   workflows change.
+- `../orphaned-wells-ui/docs/docs/**` and
+  `../orphaned-wells-ui/docs/README.md` when backend changes affect setup,
+  user workflows, auth/session behavior, import/export, API contracts,
+  deployment, environment variables, or validation expectations and the
+  frontend repo is available.
 - For route and data-manager endpoint work, also read
   `.agents/skills/ogrre-backend-api-route/SKILL.md`.
 
@@ -46,6 +51,13 @@ Prefer the backend's existing module boundaries and helper functions over new
 abstractions. Keep new logic close to the owning route, data-manager method,
 storage helper, processor integration, or auth boundary unless shared behavior
 is already clear.
+
+When refactoring, favor deeper modules over shallow pass-through wrappers: put
+complexity behind the smallest useful interface, keep callers from needing to
+know implementation details, and make the public interface the natural test
+surface. Apply the deletion test before adding a helper: if deleting it would
+only move one line elsewhere, inline it; if deleting it would spread repeated
+logic or hidden rules across routes, it is probably earning its place.
 
 ## Backend Shape
 
@@ -188,12 +200,19 @@ Backend changes must leave docs and tests coherent:
   deployment expectations change.
 - Update deployment docs/manifests when Kubernetes, Docker, nginx, Terraform,
   ports, health checks, storage, CORS, auth, or environment requirements change.
+- Update the frontend Docusaurus docs under `../orphaned-wells-ui/docs/docs/**`
+  when user-visible backend behavior, auth flows, import/export workflows,
+  processor/schema behavior, deployment steps, or API expectations change and
+  the frontend repo is available.
 - Add or update focused tests when practical for request parsing, permissions,
   auth/session/CSRF behavior, data-manager rules, Mongo query construction,
   storage behavior, Document AI fallbacks, error handling, and regression-prone
   record workflows.
-- Prefer deterministic unit tests around pure helpers and data-manager behavior.
-  Use integration or smoke checks when real dependency behavior is the risk.
+- Prefer deterministic tests through stable seams such as route handlers,
+  request/response helpers, pure import/export helpers, Mongo query builders,
+  and data-manager methods. Avoid tests that are coupled to private helper
+  structure when behavior can be verified through the owning interface.
+- Use integration or smoke checks when real dependency behavior is the risk.
 
 ## Validation
 

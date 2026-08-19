@@ -786,12 +786,13 @@ class DataManager:
     def hasPermission(self, email, permission):
         if not REQUIRE_AUTH:
             return True
-        user_doc = self.getUser(email)
-        user_permissions = self.getUserPermissions(user_doc)
-        if permission in user_permissions:
-            return True
-        else:
+        if not email:
             return False
+        user_doc = self.getUser(email)
+        if user_doc is None:
+            return False
+        user_permissions = self.getUserPermissions(user_doc)
+        return permission in user_permissions
 
     def getUserInfo(self, email):
         user_document = self.getDocument("users", {"email": email}, clean_id=True)
@@ -921,6 +922,20 @@ class DataManager:
             return document
         return None
 
+    def _copyRecordFilter(self, filter_by=None):
+        if filter_by is None:
+            return {}
+        if not isinstance(filter_by, dict):
+            raise ValueError("Filter must be an object.")
+        return filter_by.copy()
+
+    def _normalizeRecordSort(self, sort_by=None):
+        if not isinstance(sort_by, (list, tuple)) or len(sort_by) < 2:
+            return ["dateCreated", 1]
+        sort_field = sort_by[0] if isinstance(sort_by[0], str) else "dateCreated"
+        sort_direction = sort_by[1] if sort_by[1] in (1, -1) else 1
+        return [sort_field, sort_direction]
+
     @time_it
     def fetchProjects(self, user):
         projects = []
@@ -962,8 +977,8 @@ class DataManager:
     @time_it
     def fetchRecords(
         self,
-        sort_by=["dateCreated", 1],
-        filter_by={},
+        sort_by=None,
+        filter_by=None,
         page=None,
         records_per_page=None,
         search_for_errors=True,
@@ -972,6 +987,8 @@ class DataManager:
         forDownload=False,
     ):
         records = []
+        sort_by = self._normalizeRecordSort(sort_by)
+        filter_by = self._copyRecordFilter(filter_by)
 
         pipeline = util.generate_mongo_records_pipeline(
             filter_by=filter_by,
@@ -1007,14 +1024,15 @@ class DataManager:
         user,
         page=None,
         records_per_page=None,
-        sort_by=["dateCreated", 1],
-        filter_by={},
+        sort_by=None,
+        filter_by=None,
         include_attribute_fields=None,
         exclude_attribute_fields=None,
         forDownload=False,
     ):
         team_info = self.fetchTeamInfo(user["email"], user.get("default_team"))
         rg_list = self.getTeamRecordGroupsList(team_info["name"])
+        filter_by = self._copyRecordFilter(filter_by)
         filter_by["record_group_id"] = {"$in": rg_list}
         return self.fetchRecords(
             sort_by,
@@ -1032,12 +1050,15 @@ class DataManager:
         rg_id,
         page=None,
         records_per_page=None,
-        sort_by=["dateCreated", 1],
-        filter_by={},
+        sort_by=None,
+        filter_by=None,
         include_attribute_fields=None,
         exclude_attribute_fields=None,
         forDownload=False,
     ):
+        if rg_id not in self.getUserRecordGroups(user):
+            return [], 0
+        filter_by = self._copyRecordFilter(filter_by)
         filter_by["record_group_id"] = rg_id
         return self.fetchRecords(
             sort_by,
@@ -1055,12 +1076,15 @@ class DataManager:
         project_id,
         page=None,
         records_per_page=None,
-        sort_by=["dateCreated", 1],
-        filter_by={},
+        sort_by=None,
+        filter_by=None,
         include_attribute_fields=None,
         exclude_attribute_fields=None,
         forDownload=False,
     ):
+        if not self.userCanAccessProject(project_id, user):
+            return [], 0
+        filter_by = self._copyRecordFilter(filter_by)
         ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
         if "record_group_id" not in filter_by:
             record_group_ids = self.getProjectRecordGroupsList(project_id)
@@ -1082,16 +1106,16 @@ class DataManager:
         document_types,
         page=None,
         records_per_page=None,
-        sort_by=["dateCreated", 1],
+        sort_by=None,
         filter_by=None,
         include_attribute_fields=None,
         exclude_attribute_fields=None,
         forDownload=False,
     ):
-        if filter_by is None:
-            filter_by = {}
-        else:
-            filter_by = filter_by.copy()
+        if not self.userCanAccessProject(project_id, user):
+            return [], 0
+        filter_by = self._copyRecordFilter(filter_by)
+        sort_by = self._normalizeRecordSort(sort_by)
 
         # Remove documentType filter because records collection doesn't contain this field
         if "documentType" in filter_by:
@@ -1130,6 +1154,8 @@ class DataManager:
 
     @time_it
     def fetchRecordGroups(self, project_id, user):
+        if isinstance(user, dict) and not self.userCanAccessProject(project_id, user):
+            return {}
         project = self.fetchProject(project_id)
         if project is None:
             _log.info(f"project {project_id} not found")
@@ -2240,6 +2266,9 @@ class DataManager:
         if default_team is None:
             _log.info(f"user {user_email} has no default team")
             return False
+        project_id = rg_info.get("project_id")
+        if project_id and not self.userCanAccessProject(project_id, user_info):
+            raise PermissionError("User does not have access to this project.")
 
         ## add user and timestamp to record group
         rg_info["creator"] = user_info
@@ -2263,7 +2292,8 @@ class DataManager:
 
         return str(new_rg_id)
 
-    def createRecord(self, record, user_info={}):
+    def createRecord(self, record, user_info=None):
+        user_info = user_info or {}
         user = user_info.get("email", None)
         ## add timestamp to project
         record["dateCreated"] = time.time()
@@ -2284,7 +2314,10 @@ class DataManager:
         return str(new_id)
 
     ## update functions
-    def updateProject(self, project_id, new_data, user_info={}):
+    def updateProject(self, project_id, new_data, user_info=None):
+        user_info = user_info or {}
+        if not self.userCanAccessProject(project_id, user_info):
+            raise PermissionError("User does not have access to this project.")
         user = user_info.get("email", None)
         _id = ObjectId(project_id)
         ## need to choose a subset of the data to update. can't update entire record because _id is immutable
@@ -2298,7 +2331,11 @@ class DataManager:
             return document
         return None
 
-    def updateRecordGroup(self, rg_id, new_data, user_info={}):
+    def updateRecordGroup(self, rg_id, new_data, user_info=None):
+        user_info = user_info or {}
+        _, record_group = self.fetchRecordGroupData(rg_id, user_info)
+        if record_group is None:
+            raise PermissionError("User does not have access to this record group.")
         user = user_info.get("email", None)
         _id = ObjectId(rg_id)
         ## need to choose a subset of the data to update. can't update entire record because _id is immutable
@@ -2424,6 +2461,12 @@ class DataManager:
         if user_info is None and not forceUpdate:
             return False
         elif user_info is not None:
+            if (
+                not forceUpdate
+                and self.fetchRecordForUser(record_id, user_info) is None
+            ):
+                _log.info(f"user does not have access to record {record_id}")
+                return None
             user = user_info.get("email", None)
             attained_lock = self.tryLockingRecord(record_id, user)
         if attained_lock or forceUpdate:
@@ -2713,8 +2756,9 @@ class DataManager:
         return update
 
     ## delete functions
-    def deleteProject(self, project_id, background_tasks, user_info):
-        ## TODO: check if user is a part of the team who owns this project
+    def deleteProject(self, project_id, user_info):
+        if not self.userCanAccessProject(project_id, user_info):
+            raise PermissionError("User does not have access to this project.")
         _log.info(f"deleting project {project_id}")
         _id = ObjectId(project_id)
         myquery = {"_id": _id}
@@ -2724,21 +2768,24 @@ class DataManager:
         project_document = project_cursor.next()
         project_document["deleted_by"] = user_info
         team = project_document.get("team", "")
-        self.db.deleted_projects.insert_one(project_document)
-
-        ## delete from projects collection
-        self.db.projects.delete_one(myquery)
-
-        ## delete record groups
         record_groups = project_document.get("record_groups", [])
-        self.deleteRecordGroups(record_groups=record_groups, deletedBy=user_info)
+        self.db.deleted_projects.replace_one(
+            {"_id": project_document["_id"]},
+            project_document,
+            upsert=True,
+        )
 
         ## add records to deleted records collection and remove from records collection
-        background_tasks.add_task(
-            self._deleteRecords,
+        self._deleteRecords(
             query={"record_group_id": {"$in": record_groups}},
             deletedBy=user_info,
         )
+
+        ## delete record groups
+        self.deleteRecordGroups(record_groups=record_groups, deletedBy=user_info)
+
+        ## delete from projects collection
+        self.db.projects.delete_one(myquery)
 
         self.recordHistory(
             "deleteProject", user_info.get("email", None), project_id=project_id
@@ -2747,7 +2794,10 @@ class DataManager:
         self.removeProjectFromTeam(_id, team)
         return "success"
 
-    def deleteRecordGroup(self, rg_id, background_tasks, user_info):
+    def deleteRecordGroup(self, rg_id, user_info):
+        _, record_group = self.fetchRecordGroupData(rg_id, user_info)
+        if record_group is None:
+            raise PermissionError("User does not have access to this record group.")
         _log.info(f"deleting record group {rg_id}")
         _id = ObjectId(rg_id)
         myquery = {"_id": _id}
@@ -2757,17 +2807,20 @@ class DataManager:
         record_group_doc = record_group_cursor.next()
         record_group_doc["deleted_by"] = user_info
         team = record_group_doc.get("team", "")
-        self.db.deleted_record_groups.insert_one(record_group_doc)
-
-        ## delete from record groups collection
-        self.db.record_groups.delete_one(myquery)
+        self.db.deleted_record_groups.replace_one(
+            {"_id": record_group_doc["_id"]},
+            record_group_doc,
+            upsert=True,
+        )
 
         ## add records to deleted records collection and remove from records collection
-        background_tasks.add_task(
-            self._deleteRecords,
+        self._deleteRecords(
             query={"record_group_id": rg_id},
             deletedBy=user_info,
         )
+
+        ## delete from record groups collection
+        self.db.record_groups.delete_one(myquery)
 
         self.recordHistory(
             "deleteRecordGroup", user_info.get("email", None), rg_id=rg_id
@@ -2781,7 +2834,10 @@ class DataManager:
 
     def deleteRecords(self, record_ids, user_info):
         _ids = [ObjectId(record_id) for record_id in record_ids]
-        myquery = {"_id": {"$in": _ids}}
+        myquery = {
+            "_id": {"$in": _ids},
+            "record_group_id": {"$in": self.getUserRecordGroups(user_info)},
+        }
         self._deleteRecords(query=myquery, deletedBy=user_info)
         self.recordHistory(
             "deleteRecords", user=user_info.get("email", None), notes=myquery
@@ -2789,7 +2845,9 @@ class DataManager:
         return "success"
 
     def deleteRecordsByRecordGroup(self, rg_id, filter_by, user_info):
-        query = dict(filter_by or {})
+        if rg_id not in self.getUserRecordGroups(user_info):
+            raise PermissionError("User does not have access to this record group.")
+        query = self._copyRecordFilter(filter_by)
         query["record_group_id"] = rg_id
         self._deleteRecords(query=query, deletedBy=user_info)
         self.recordHistory(
@@ -2830,20 +2888,24 @@ class DataManager:
     def _deleteRecords(self, query, deletedBy):
         user = deletedBy.get("email", None)
         _log.info(f"deleting records with query: {query}")
-        ## add records to deleted records collection
-        record_cursor = self.db.records.find(query)
-        try:
-            for record_document in record_cursor:
-                record_document["deleted_by"] = user
-                self.db.deleted_records.insert_one(record_document)
-                # Storage key layout is owned by storage_api.
-                self._moveDeletedRecordImages(record_document)
-        except Exception as e:
-            _log.error(f"unable to move all deleted records: {e}")
+        record_documents = list(self.db.records.find(query))
+        archived_record_ids = []
+        for record_document in record_documents:
+            record_document["deleted_by"] = user
+            self.db.deleted_records.replace_one(
+                {"_id": record_document["_id"]},
+                record_document,
+                upsert=True,
+            )
+            archived_record_ids.append(str(record_document["_id"]))
+            # Storage key layout is owned by storage_api.
+            self._moveDeletedRecordImages(record_document)
 
         ## Delete active records after archiving their documents and images.
         resp = self.db.records.delete_many(query)
-        _log.info(f"delete resp = {resp}")
+        _log.info(
+            f"deleted {resp.deleted_count} active records after archiving {len(archived_record_ids)} records"
+        )
 
         return "success"
 
@@ -2859,7 +2921,11 @@ class DataManager:
         try:
             for document in cursor:
                 document["deleted_by"] = deletedBy
-                self.db.deleted_record_groups.insert_one(document)
+                self.db.deleted_record_groups.replace_one(
+                    {"_id": document["_id"]},
+                    document,
+                    upsert=True,
+                )
         except Exception as e:
             _log.error(f"unable to move all deleted record groups: {e}")
 
@@ -2907,11 +2973,15 @@ class DataManager:
         user_info,
         _id,
         location,
-        selectedColumns=[],
+        selectedColumns=None,
         keep_all_columns=False,
         output_filename=None,
         request_origin="",
     ):
+        if selectedColumns is None:
+            selectedColumns = []
+        if exportType not in {"csv", "json"}:
+            raise ValueError("exportType must be csv or json")
         ## TODO: Should we use aliases for export?
         USE_ALIASES = True
         user = user_info.get("email", None)
@@ -2919,9 +2989,10 @@ class DataManager:
         today = time.time()
         output_dir = self.app_settings.export_dir
         if output_filename is None:
-            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+            filename = util.safe_filename(f"{_id}_{today}.{exportType}", "records")
         else:
-            output_file = f"{output_filename}.{exportType}"
+            filename = util.safe_filename(f"{output_filename}.{exportType}", "records")
+        output_file = os.path.join(output_dir, filename)
         attributes = ["file"]
         subattributes = []
         record_attributes = []

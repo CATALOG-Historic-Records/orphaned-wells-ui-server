@@ -11,8 +11,9 @@ description: Add or update OGRRE backend API behavior. Use when implementing Fas
 2. Keep routes thin: authenticate, check permission, parse/validate request data, call `data_manager`, and return a small JSON response.
 3. Add business logic to `data_manager` using the existing collection and history patterns.
 4. Use `Depends(authenticate)` and `data_manager.hasPermission(user_info["email"], "<permission>")` for protected mutations.
-5. Raise `HTTPException` with existing status-code conventions and user-facing detail strings.
-6. Validate touched Python files with `python -m py_compile ...`; run backend tests if present.
+5. Treat permission checks and resource-scope checks as separate requirements: a user may have a permission but still not own or belong to the requested project, record group, record, team, or processor scope.
+6. Raise `HTTPException` with existing status-code conventions and user-facing detail strings.
+7. Validate touched Python files with `python -m py_compile ...`; run backend tests if present.
 
 ## Route Patterns
 
@@ -20,7 +21,9 @@ description: Add or update OGRRE backend API behavior. Use when implementing Fas
 - Use snake_case endpoint paths matching existing names, usually `POST` for mutations.
 - Read JSON bodies with `await request.json()` and default defensively when a body is optional.
 - Validate incoming body types before passing them to data-manager methods.
+- Sanitize user-controlled filenames before writing temporary uploads, exports, or generated files.
 - Keep permission names consistent with the frontend and roles data, such as `delete`, `manage_project`, `review_record`, or `clean_record`.
+- Extract repeated route logic only when it hides real policy or parsing rules behind a smaller interface. Avoid helper functions that only rename a single call.
 
 ## Data Manager Patterns
 
@@ -28,6 +31,7 @@ description: Add or update OGRRE backend API behavior. Use when implementing Fas
 - Use server-side constraints for scope-sensitive operations. Apply trusted constraints, such as `record_group_id`, after reading client-provided filters so the client cannot widen the query.
 - Preserve delete behavior by moving documents into the relevant `deleted_*` collection before deleting from the active collection.
 - Record mutations with `recordHistory(...)` using the established action names and metadata fields.
+- Copy caller-provided filters or payloads before adding server-owned constraints; avoid mutating request dictionaries that may be reused by the caller.
 - Avoid broad refactors while adding a route. Keep behavior scoped to the requested endpoint.
 
 ## Record Filters

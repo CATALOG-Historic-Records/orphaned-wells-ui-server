@@ -168,6 +168,14 @@ def last4_before_decimal(ts=None):
     return int(ts) % 10000
 
 
+def safe_filename(filename, fallback="file"):
+    filename = os.path.basename(str(filename or "")).strip()
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", filename).strip(" .")
+    fallback = os.path.basename(str(fallback or "file")).strip()
+    fallback = re.sub(r"[^A-Za-z0-9._ -]", "_", fallback).strip(" .") or "file"
+    return filename or fallback
+
+
 def time_it(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -416,7 +424,7 @@ def compute_total_size(local_file_paths, gcs_paths):
 
 
 @time_it
-def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
+def zip_files_stream(local_file_paths, documents=None, log_to_file="zip_log.txt"):
     """
     Streams a ZIP file directly without writing to temp files.
     Includes optional local files (JSON and/or csv), skips missing ones gracefully.
@@ -502,13 +510,17 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
         zs.write_iter(arcname, gcs_yield_chunks(arcname, gcs_path, i))
 
     def streaming_generator():
-        for chunk in zs:
-            yield chunk
-        elapsed_total = time.time() - start_total
-        logg(
-            f"{len(documents)} files streamed in {elapsed_total:.2f} seconds",
-            level="info",
-        )
+        try:
+            for chunk in zs:
+                yield chunk
+            elapsed_total = time.time() - start_total
+            logg(
+                f"{len(documents)} files streamed in {elapsed_total:.2f} seconds",
+                level="info",
+            )
+        finally:
+            if log_file:
+                log_file.close()
 
     return streaming_generator()
 

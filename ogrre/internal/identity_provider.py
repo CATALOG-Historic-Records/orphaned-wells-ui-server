@@ -213,7 +213,7 @@ class CilogonIdentityProvider(BaseIdentityProvider):
             "code": code,
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "redirect_uri": "postmessage",
+            "redirect_uri": "exchange_authorization_code",  # TODO: use env var for this
             "grant_type": "authorization_code",
         }
         response = requests.post(self.token_uri, data=data)

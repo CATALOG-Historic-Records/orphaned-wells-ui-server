@@ -36,6 +36,13 @@ from ogrre.internal.identity_provider import (
     build_identity_provider,
     get_bearer_or_session_token,
 )
+from ogrre.routers.route_helpers import (
+    fetch_records_for_location as _fetch_records_for_location,
+    get_filter_from_request_body as _get_filter_from_request_body,
+    normalize_sort_by as _normalize_sort_by,
+    read_json_object as _read_json_object,
+    require_permission as _require_permission,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -310,7 +317,7 @@ async def auth_login(request: Request):
 
     if email is None or email == "":
         _log.info(f"User account does not provide email")
-        data_manager.recordHistory("login", user=user, notes="denied access")
+        data_manager.recordHistory("login", user=email, notes="denied access")
         raise HTTPException(
             status_code=403,
             detail=_build_auth_failure(
@@ -460,12 +467,17 @@ async def logout(request: Request):
     refresh_token = request.cookies.get(REFRESH_COOKIE)
     logout_status = 200
     if refresh_token:
-        response = requests.post(
-            "https://oauth2.googleapis.com/revoke",
-            params={"token": refresh_token},
-            headers={"content-type": "application/x-www-form-urlencoded"},
-        )
-        logout_status = response.status_code
+        try:
+            response = requests.post(
+                "https://oauth2.googleapis.com/revoke",
+                params={"token": refresh_token},
+                headers={"content-type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            )
+            logout_status = response.status_code
+        except requests.RequestException as e:
+            _log.info(f"unable to revoke refresh token during logout: {e}")
+            logout_status = 502
     json_response = JSONResponse({"logout_status": logout_status})
     _clear_auth_cookies(json_response, request)
     return json_response
@@ -490,7 +502,12 @@ async def get_record_groups(project_id: str, user_info: dict = Depends(authentic
     Returns:
         List containing record groups and metadata
     """
-    resp = data_manager.fetchRecordGroups(project_id, user_info.get("email", ""))
+    if not data_manager.userCanAccessProject(project_id, user_info):
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
+    resp = data_manager.fetchRecordGroups(project_id, user_info)
     return resp
 
 
@@ -510,17 +527,18 @@ async def get_records(
     Returns:
         List of records
     """
-    data = await request.json()
+    data = await _read_json_object(request)
     if get_by == "project" or get_by == "record_group":
-        sort_by = data.get(
-            "sort", ["dateCreated", 1]
-        )  ## 1 is ascending, -1 is descending`
-        if sort_by[1] != 1 and sort_by[1] != -1:
-            sort_by[1] = 1
-        filter_by = data.get("filter", {})
+        sort_by = _normalize_sort_by(data.get("sort", ["dateCreated", 1]))
+        filter_by = _get_filter_from_request_body(data)
         if get_by == "project":
             project_id = data.get("id", None)
             if project_id is not None:
+                if not data_manager.userCanAccessProject(project_id, user_info):
+                    raise HTTPException(
+                        403,
+                        detail=f"You do not have access to this project, please contact the project creator to gain access.",
+                    )
                 records, record_count = data_manager.fetchRecordsByProject(
                     user_info,
                     project_id,
@@ -533,17 +551,19 @@ async def get_records(
         elif get_by == "record_group":
             rg_id = data.get("id", None)
             if rg_id is not None:
+                _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
+                if rg_data is None:
+                    raise HTTPException(
+                        403,
+                        detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+                    )
                 records, record_count = data_manager.fetchRecordsByRecordGroup(
                     user_info, rg_id, page, records_per_page, sort_by, filter_by
                 )
                 return {"records": records, "record_count": record_count}
     elif get_by == "team":
-        sort_by = data.get(
-            "sort", ["dateCreated", 1]
-        )  ## 1 is ascending, -1 is descending`
-        if sort_by[1] != 1 and sort_by[1] != -1:
-            sort_by[1] = 1
-        filter_by = data.get("filter", {})
+        sort_by = _normalize_sort_by(data.get("sort", ["dateCreated", 1]))
+        filter_by = _get_filter_from_request_body(data)
         records, record_count = data_manager.fetchRecordsByTeam(
             user_info,
             page,
@@ -762,7 +782,7 @@ async def add_project(request: Request, user_info: dict = Depends(authenticate))
             403,
             detail=f"You are not authorized to create projects for this team. Please contact a team lead.",
         )
-    data = await request.json()
+    data = await _read_json_object(request)
     new_id = data_manager.createProject(data, user_info)
     return new_id
 
@@ -783,8 +803,14 @@ async def add_record_group(request: Request, user_info: dict = Depends(authentic
             403,
             detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
         )
-    data = await request.json()
-    new_id = data_manager.createRecordGroup(data, user_info)
+    data = await _read_json_object(request)
+    try:
+        new_id = data_manager.createRecordGroup(data, user_info)
+    except PermissionError:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
     return new_id
 
 
@@ -1053,7 +1079,9 @@ async def upload_record_images(
     files_to_delete = []
     try:
         for idx, file in enumerate(files):
-            original_name = os.path.basename(file.filename or f"image-{idx + 1}.png")
+            original_name = util.safe_filename(
+                file.filename, fallback=f"image-{idx + 1}.png"
+            )
             base_name, file_ext = os.path.splitext(original_name)
             file_ext = file_ext.lower()
             if file_ext not in allowed_extensions:
@@ -1063,8 +1091,9 @@ async def upload_record_images(
                 )
 
             unique_base_name = f"{base_name or 'image'}-{secrets.token_hex(4)}"
-            original_output_path = (
-                f"{data_manager.app_settings.img_dir}/{unique_base_name}{file_ext}"
+            original_output_path = os.path.join(
+                str(data_manager.app_settings.img_dir),
+                f"{unique_base_name}{file_ext}",
             )
             async with aiofiles.open(original_output_path, "wb") as out_file:
                 chunk_size = 1024 * 1024
@@ -1144,18 +1173,21 @@ async def upload_document(
         if user_info is None:
             raise HTTPException(404, detail=f"User not found")
 
+    safe_upload_name = util.safe_filename(file.filename, fallback="document")
     if preventDuplicates:
-        record_exists = data_manager.checkIfRecordExists(file.filename, rg_id)
+        record_exists = data_manager.checkIfRecordExists(safe_upload_name, rg_id)
         if record_exists:
             return JSONResponse(
                 status_code=208,
-                content={"message": f"{file.filename} exists for {rg_id}, returning"},
+                content={
+                    "message": f"{safe_upload_name} exists for {rg_id}, returning"
+                },
             )
 
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail=f"Project not found")
-    filename, file_ext = os.path.splitext(file.filename)
+    filename, file_ext = os.path.splitext(safe_upload_name)
 
     if file_ext.lower() == ".zip":
         backend_url = str(request.base_url)
@@ -1165,7 +1197,9 @@ async def upload_document(
         )
 
     else:
-        original_output_path = f"{data_manager.app_settings.img_dir}/{file.filename}"
+        original_output_path = os.path.join(
+            str(data_manager.app_settings.img_dir), safe_upload_name
+        )
         mime_type = file.content_type
         ## read document file
         try:
@@ -1244,7 +1278,7 @@ async def batch_process_documents(
     if not project_is_valid:
         raise HTTPException(404, detail="Project not found")
 
-    req = await request.json()
+    req = await _read_json_object(request)
     bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
     prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
     output_bucket_name = req.get("outputBucketName") or req.get("output_bucket_name")
@@ -1316,7 +1350,7 @@ async def check_batch_process_documents_gcs_path(
     if not project_is_valid:
         raise HTTPException(404, detail="Project not found")
 
-    req = await request.json()
+    req = await _read_json_object(request)
     bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
     prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
     prevent_duplicates = req.get(
@@ -1441,13 +1475,19 @@ async def update_project(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "manage_project"):
+    _require_permission(
+        user_info,
+        "manage_project",
+        "You are not authorized to update projects. Please contact a team lead or project manager.",
+    )
+    data = await _read_json_object(request)
+    try:
+        return data_manager.updateProject(project_id, data, user_info)
+    except PermissionError:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to update projects. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
         )
-    data = await request.json()
-    return data_manager.updateProject(project_id, data, user_info)
 
 
 @router.post("/update_record_group/{rg_id}")
@@ -1464,13 +1504,19 @@ async def update_record_group(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "manage_project"):
+    _require_permission(
+        user_info,
+        "manage_project",
+        "You are not authorized to update projects. Please contact a team lead or project manager.",
+    )
+    data = await _read_json_object(request)
+    try:
+        return data_manager.updateRecordGroup(rg_id, data, user_info)
+    except PermissionError:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to update projects. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
         )
-    data = await request.json()
-    return data_manager.updateRecordGroup(rg_id, data, user_info)
 
 
 @router.post("/update_record/{record_id}")
@@ -1487,17 +1533,24 @@ async def update_record(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "review_record"):
+    _require_permission(
+        user_info,
+        "review_record",
+        "You are not authorized to review records. Please contact a team lead or project manager.",
+    )
+    if data_manager.fetchRecordForUser(record_id, user_info) is None:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to review records. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
         )
-    req = await request.json()
+    req = await _read_json_object(request)
     data = req.get("data", None)
     update_type = req.get("type", None)
     field_to_clean = req.get("fieldToClean", None)
     if update_type == "record_notes":
         update = data_manager.updateRecordNotes(record_id, data, user_info)
+        if update is None:
+            raise HTTPException(400, detail="Invalid record note update type.")
     else:
         update = data_manager.updateRecord(
             record_id,
@@ -1506,6 +1559,11 @@ async def update_record(
             field_to_clean,
             user_info,
             calling_function="update_record",
+        )
+    if update is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
         )
     if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
@@ -1545,7 +1603,6 @@ async def delete_processor(
 @router.post("/delete_project/{project_id}")
 async def delete_project(
     project_id: str,
-    background_tasks: BackgroundTasks,
     user_info: dict = Depends(authenticate),
 ):
     """Delete project.
@@ -1556,12 +1613,18 @@ async def delete_project(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "delete"):
+    _require_permission(
+        user_info,
+        "delete",
+        "You are not authorized to delete projects. Please contact a team lead or project manager.",
+    )
+    try:
+        data_manager.deleteProject(project_id, user_info)
+    except PermissionError:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to delete projects. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
         )
-    data_manager.deleteProject(project_id, background_tasks, user_info)
 
     return {"response": "success"}
 
@@ -1569,7 +1632,6 @@ async def delete_project(
 @router.post("/delete_record_group/{rg_id}")
 async def delete_record_group(
     rg_id: str,
-    background_tasks: BackgroundTasks,
     user_info: dict = Depends(authenticate),
 ):
     """Delete record group.
@@ -1580,12 +1642,18 @@ async def delete_record_group(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "delete"):
+    _require_permission(
+        user_info,
+        "delete",
+        "You are not authorized to delete record groups. Please contact a team lead or project manager.",
+    )
+    try:
+        data_manager.deleteRecordGroup(rg_id, user_info)
+    except PermissionError:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to delete record groups. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
         )
-    data_manager.deleteRecordGroup(rg_id, background_tasks, user_info)
     return {"response": "success"}
 
 
@@ -1604,20 +1672,14 @@ async def delete_record_group_records(
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "delete"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
-        )
+    _require_permission(
+        user_info,
+        "delete",
+        "You are not authorized to delete records. Please contact a team lead or project manager.",
+    )
 
-    try:
-        req = await request.json()
-    except Exception:
-        req = {}
-
-    filter_by = req.get("filter", {})
-    if not isinstance(filter_by, dict):
-        raise HTTPException(400, detail=f"Filter must be an object.")
+    req = await _read_json_object(request, required=False)
+    filter_by = _get_filter_from_request_body(req)
 
     _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
     if rg_data is None:
@@ -1626,7 +1688,13 @@ async def delete_record_group_records(
             detail=f"You do not have access to this record group, please contact the project creator to gain access.",
         )
 
-    data_manager.deleteRecordsByRecordGroup(rg_id, filter_by, user_info)
+    try:
+        data_manager.deleteRecordsByRecordGroup(rg_id, filter_by, user_info)
+    except PermissionError:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
     return {"response": "success"}
 
 
@@ -1640,10 +1708,15 @@ async def delete_record(record_id: str, user_info: dict = Depends(authenticate))
     Returns:
         Success response
     """
-    if not data_manager.hasPermission(user_info["email"], "delete"):
+    _require_permission(
+        user_info,
+        "delete",
+        "You are not authorized to delete records. Please contact a team lead or project manager.",
+    )
+    if data_manager.fetchRecordForUser(record_id, user_info) is None:
         raise HTTPException(
             403,
-            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
         )
     data_manager.deleteRecords([record_id], user_info)
 
@@ -1660,14 +1733,15 @@ async def delete_records(request: Request, user_info: dict = Depends(authenticat
     Returns:
         Success response
     """
-    print(f"inside delete_records")
-    if not data_manager.hasPermission(user_info["email"], "delete"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to delete records. Please contact a team lead or project manager.",
-        )
-    req = await request.json()
+    _require_permission(
+        user_info,
+        "delete",
+        "You are not authorized to delete records. Please contact a team lead or project manager.",
+    )
+    req = await _read_json_object(request)
     record_ids = req.get("record_ids", [])
+    if not isinstance(record_ids, list):
+        raise HTTPException(400, detail="record_ids must be a list.")
     data_manager.deleteRecords(record_ids, user_info)
     return {"response": "success"}
 
@@ -1685,8 +1759,10 @@ async def check_if_records_exist(
     Returns:
         JSON with duplicate_records
     """
-    req = await request.json()
+    req = await _read_json_object(request)
     file_list = req.get("file_list", [])
+    if not isinstance(file_list, list):
+        raise HTTPException(400, detail="file_list must be a list.")
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
@@ -1712,10 +1788,10 @@ async def get_download_size(
             CSV file containing all or subset of record data for provided location
             All document images for provided location
     """
-    req = await request.json()
+    req = await _read_json_object(request)
 
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
+    filter_by = _get_filter_from_request_body(req)
+    sort_by = _normalize_sort_by(req.get("sort", ["dateCreated", 1]))
     document_types = req.get("document_types", [])
 
     json_fields_to_include = {
@@ -1729,46 +1805,16 @@ async def get_download_size(
         "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
     }
 
-    if location == "project":
-        records, _ = data_manager.fetchRecordsByProject(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "record_group":
-        records, _ = data_manager.fetchRecordsByRecordGroup(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "team":
-        records, _ = data_manager.fetchRecordsByTeam(
-            user_info,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "documentType":
-        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-            user_info,
-            _id,
-            document_types,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    else:
-        raise HTTPException(
-            status_code=400, detail=f"Location must be project, record_group, or team"
-        )
+    records = _fetch_records_for_location(
+        user_info=user_info,
+        location=location,
+        _id=_id,
+        filter_by=filter_by,
+        sort_by=sort_by,
+        document_types=document_types,
+        include_attribute_fields=json_fields_to_include,
+        forDownload=True,
+    )
 
     try:
         documents = util.compileDocumentImageList(records)
@@ -1807,14 +1853,14 @@ async def download_records(
             CSV file containing all or subset of record data for provided location
             All document images for provided location
     """
-    req = await request.json()
+    req = await _read_json_object(request)
 
     request_origin = request.headers.get("origin")
     # _log.info(req)
     selectedColumns = req.get("columns", [])
 
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
+    filter_by = _get_filter_from_request_body(req)
+    sort_by = _normalize_sort_by(req.get("sort", ["dateCreated", 1]))
     document_types = req.get("document_types", [])
 
     json_fields_to_include = {
@@ -1851,51 +1897,24 @@ async def download_records(
     if len(selectedColumns) == 0:
         keep_all_columns = True
     setsOfRecords = {}
+    records = _fetch_records_for_location(
+        user_info=user_info,
+        location=location,
+        _id=_id,
+        filter_by=filter_by,
+        sort_by=sort_by,
+        document_types=document_types,
+        include_attribute_fields=json_fields_to_include,
+        forDownload=True,
+    )
     if location == "project":
-        records, _ = data_manager.fetchRecordsByProject(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
         setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
     elif location == "record_group":
-        records, _ = data_manager.fetchRecordsByRecordGroup(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
         setsOfRecords[output_name] = records
     elif location == "team":
-        records, _ = data_manager.fetchRecordsByTeam(
-            user_info,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
         setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
     elif location == "documentType":
-        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-            user_info,
-            _id,
-            document_types,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
         setsOfRecords[output_name] = records
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Location must be project, record_group, documentType, or team",
-        )
     try:
         filepaths = []
         if export_csv:
@@ -1929,7 +1948,10 @@ async def download_records(
         else:
             documents = []
         ## TODO: make this file name more unique, so multiple downloads dont have the same name
-        download_log_file = f"zip_log_{output_file_id}.txt"
+        download_log_file = os.path.join(
+            str(data_manager.app_settings.export_dir),
+            f"zip_log_{output_file_id}.txt",
+        )
         z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
 
         ## remove file after 60 seconds to allow for the user download to finish
@@ -1956,14 +1978,14 @@ async def download_project_records_by_document_types(
     output_name: str = None,
     user_info: dict = Depends(authenticate),
 ):
-    req = await request.json()
+    req = await _read_json_object(request)
 
     request_origin = request.headers.get("origin")
     selectedColumns = req.get("columns", [])
     document_types = req.get("document_types", [])
 
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
+    filter_by = _get_filter_from_request_body(req)
+    sort_by = _normalize_sort_by(req.get("sort", ["dateCreated", 1]))
 
     json_fields_to_include = {
         "topLevelFields": [
@@ -1988,12 +2010,13 @@ async def download_project_records_by_document_types(
     keep_all_columns = len(selectedColumns) == 0
 
     # Fetch records filtered by project and document types
-    records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-        user_info,
-        project_id,
-        document_types,
+    records = _fetch_records_for_location(
+        user_info=user_info,
+        location="documentType",
+        _id=project_id,
         filter_by=filter_by,
         sort_by=sort_by,
+        document_types=document_types,
         include_attribute_fields=json_fields_to_include,
         forDownload=True,
     )
@@ -2030,7 +2053,10 @@ async def download_project_records_by_document_types(
         else:
             documents = []
 
-        download_log_file = f"zip_log_{output_file_id}.txt"
+        download_log_file = os.path.join(
+            str(data_manager.app_settings.export_dir),
+            f"zip_log_{output_file_id}.txt",
+        )
         z = util.zip_files_stream(filepaths, documents, log_to_file=download_log_file)
 
         filepaths.append(download_log_file)
@@ -2089,7 +2115,7 @@ async def add_user(
         user status
     """
     require_authenticated_admin_route()
-    req = await request.json()
+    req = await _read_json_object(request)
     team_lead = req.get("team_lead", False)
     sys_admin = req.get("sys_admin", False)
     email = email.lower().replace(" ", "")
@@ -2103,6 +2129,11 @@ async def add_user(
         new_user = data_manager.getUser(email)
         if new_user is None:
             resp = data_manager.addUser({"email": email}, team, team_lead, sys_admin)
+            if not resp:
+                raise HTTPException(
+                    status_code=400, detail=f"Unable to add user {email}."
+                )
+            return "success"
 
         else:
             ## this user exists already. add them to this team
@@ -2665,7 +2696,7 @@ async def delete_user(email: str, user_info: dict = Depends(authenticate)):
     email = email.lower()
     if data_manager.hasPermission(user_info["email"], "delete"):
         data_manager.deleteUser(email, user_info)
-        return {"Deleted", email}
+        return {"deleted": email}
 
     else:
         raise HTTPException(
