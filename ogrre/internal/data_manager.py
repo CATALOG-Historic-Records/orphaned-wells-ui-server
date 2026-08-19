@@ -306,9 +306,9 @@ class DataManager:
             return None
         collaborator = collaborator.strip()
 
-        ## There is a naming convention disparity between OGRRE (rrc) and OGRRE data cleaning (texas_rrc)
-        if collaborator == "rrc":
-            collaborator = "texas_rrc"
+        ## There WAS a naming convention disparity between OGRRE (rrc) and OGRRE data cleaning (texas_rrc), which is now fixed. leave this in as a fallback for now
+        if collaborator == "texas_rrc":
+            collaborator = "rrc"
         return collaborator or None
 
     def getCollaboratorForUser(self, user=None):
@@ -1189,6 +1189,7 @@ class DataManager:
                         columns.add(attr["name"])
             if "projects" in document:
                 del document["projects"]
+            columns.add("record_notes")
             return {"columns": list(columns), "obj": document}
 
         elif location == "record_group":
@@ -1204,6 +1205,7 @@ class DataManager:
                     if data_fusion and attr_name not in data_fusion:
                         continue
                     columns.append(attr["name"])
+            columns.append("record_notes")
             return {"columns": columns, "obj": rg_document}
         return None
 
@@ -2239,6 +2241,21 @@ class DataManager:
                                 ]
 
                     record_attribute["file"] = document.get("filename", "")
+                    if "record_notes" in selectedColumns or keep_all_columns:
+                        notes_list = document.get("record_notes") or []
+                        active_notes = [
+                            note
+                            for note in notes_list
+                            if not note.get("deleted", False)
+                        ]
+                        formatted_notes = []
+                        for note in active_notes:
+                            creator = note.get("creator", "Unknown")
+                            text = note.get("text", "")
+                            formatted_notes.append(f"{creator}: {text}")
+                        record_attribute["record_notes"] = "; ".join(formatted_notes)
+                        if "record_notes" not in attributes:
+                            attributes.append("record_notes")
                     record_attribute["URL"] = f"{request_origin}/record/{document_id}"
                     record_attributes.append(record_attribute)
                 except Exception as e:
@@ -2259,6 +2276,14 @@ class DataManager:
                         attribute_name = document_attribute["key"]
                         if attribute_name in selectedColumns or keep_all_columns:
                             record_attribute[attribute_name] = document_attribute
+                    if "record_notes" in selectedColumns or keep_all_columns:
+                        notes_list = document.get("record_notes") or []
+                        active_notes = [
+                            note
+                            for note in notes_list
+                            if not note.get("deleted", False)
+                        ]
+                        record_attribute["record_notes"] = active_notes
                     record_attribute["file"] = document.get("filename", "")
                     record_attributes.append(record_attribute)
                 except Exception as e:
