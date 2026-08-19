@@ -12,21 +12,8 @@ import re
 import importlib.metadata as importlib_metadata
 import json
 
-import ogrre_data_cleaning.clean as OGRRE_cleaning_functions
+from ogrre_data_cleaning import CLEANING_FUNCTIONS
 from ogrre.internal import storage_api
-
-CLEANING_FUNCTIONS = {
-    "clean_bool": OGRRE_cleaning_functions.clean_bool,
-    "string_to_int": OGRRE_cleaning_functions.string_to_int,
-    "string_to_float": OGRRE_cleaning_functions.string_to_float,
-    "string_to_date": OGRRE_cleaning_functions.string_to_date,
-    "clean_date": OGRRE_cleaning_functions.clean_date,
-    "convert_hole_size_to_decimal": OGRRE_cleaning_functions.convert_hole_size_to_decimal,
-    "llm_clean": OGRRE_cleaning_functions.llm_clean,
-    "clean_depth": OGRRE_cleaning_functions.clean_depth,
-    "newts_clean_units": OGRRE_cleaning_functions.newts_clean_units,
-    "newts_clean_epa_methods": OGRRE_cleaning_functions.newts_clean_epa_methods,
-}
 
 _log = logging.getLogger(__name__)
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
@@ -1271,7 +1258,6 @@ def getPreviousAttributeOrSubattributeValue(key_parts, record_doc):
         curr = record_doc
         for each in key_parts:
             if isinstance(each, str) and each.isdigit():
-                _log.info(f"found int: {each}")
                 each = int(each)
                 _log.info(f"-> {each}")
             val = curr[each]

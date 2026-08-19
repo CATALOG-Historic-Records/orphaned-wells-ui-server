@@ -1397,7 +1397,13 @@ async def get_download_size(
     document_types = req.get("document_types", [])
 
     json_fields_to_include = {
-        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "topLevelFields": [
+            "name",
+            "filename",
+            "image_files",
+            "record_group_id",
+            "record_notes",
+        ],
         "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
     }
 
@@ -1490,7 +1496,13 @@ async def download_records(
     document_types = req.get("document_types", [])
 
     json_fields_to_include = {
-        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "topLevelFields": [
+            "name",
+            "filename",
+            "image_files",
+            "record_group_id",
+            "record_notes",
+        ],
         "attributesList": [
             "key",
             "value",
@@ -1632,7 +1644,13 @@ async def download_project_records_by_document_types(
     sort_by = req.get("sort", ["dateCreated", 1])
 
     json_fields_to_include = {
-        "topLevelFields": ["name", "filename", "image_files", "record_group_id"],
+        "topLevelFields": [
+            "name",
+            "filename",
+            "image_files",
+            "record_group_id",
+            "record_notes",
+        ],
         "attributesList": [
             "key",
             "value",
