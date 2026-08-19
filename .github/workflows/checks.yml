@@ -3,7 +3,7 @@ name: Checks
 
 on:
   push:
-    branches: [main]
+
   pull_request:
     branches: [main]
 
@@ -31,3 +31,18 @@ jobs:
       - name: Run Black to verify that the committed code is formatted
         run: |
           black --check .
+
+  e2e-tests:
+    name: Frontend E2E testing
+    needs: code-formatting
+    uses: CATALOG-Historic-Records/orphaned-wells-ui/.github/workflows/frontend-tests-dispatch.yml@main
+    permissions:
+      contents: read
+    with:
+      checkout_repository: CATALOG-Historic-Records/orphaned-wells-ui
+      checkout_ref: main
+      backend_mode: source
+      backend_repository: ${{ github.repository }}
+      backend_ref: ${{ github.sha }}
+    secrets:
+      checkout_token: ${{ secrets.CHECKOUT_TOKEN }}
