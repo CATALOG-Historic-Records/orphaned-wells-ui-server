@@ -10,7 +10,7 @@ from ogrre.internal import util
 
 _log = logging.getLogger(__name__)
 
-LOCATION = os.getenv("LOCATION")
+LOCATION = os.getenv("LOCATION", "us")
 PROJECT_ID = os.getenv("PROJECT_ID")
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 DOCUMENT_AI_BACKEND = os.getenv("DOCUMENT_AI_BACKEND", "google").lower()
