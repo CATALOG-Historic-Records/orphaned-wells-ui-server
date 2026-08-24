@@ -1,0 +1,4 @@
+interface:
+  display_name: "OGRRE Backend Development"
+  short_description: "Guide backend code changes in OGRRE"
+  default_prompt: "Use $ogrre-backend-development before making a backend code change in OGRRE."

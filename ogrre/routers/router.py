@@ -8,6 +8,7 @@ from fastapi import (
     APIRouter,
     HTTPException,
     File,
+    Form,
     UploadFile,
     BackgroundTasks,
     Depends,
@@ -21,12 +22,14 @@ from ogrre.internal.data_manager import DEFAULT_UNAUTHENTICATED_TEAM, data_manag
 from ogrre.internal.image_handling import (
     process_document,
     process_zip,
+    convert_pdf,
+    convert_tiff,
     deployProcessor,
     undeployProcessor,
     check_if_processor_is_deployed,
 )
 from ogrre.internal.storage_api import rotate_images_in_storage
-from ogrre.internal import batch_document_processing
+from ogrre.internal import batch_document_processing, storage_api
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
     IdentityProviderError,
@@ -632,12 +635,9 @@ async def get_record_data(
             detail=f"You do not have access to this record, please contact the project creator to gain access.",
         )
 
-    ## get record schema
-    _, _, processor_attributes = data_manager.getProcessorByRecordGroupID(
+    ## get record schema, if this record group has one
+    processor_attributes = data_manager.getRecordGroupSchemaMap(
         record["rg_id"], user=user_info
-    )
-    processor_attributes = util.convert_processor_attributes_to_dict(
-        processor_attributes
     )
 
     ## lock record if it is awaiting verification and user does not have permission to verify
@@ -786,6 +786,328 @@ async def add_record_group(request: Request, user_info: dict = Depends(authentic
     data = await request.json()
     new_id = data_manager.createRecordGroup(data, user_info)
     return new_id
+
+
+@router.post("/import_json_record_group/{project_id}")
+async def import_json_record_group(
+    project_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    """Create a processorless record group and import records from JSON."""
+    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
+        )
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="JSON import request body is required.")
+
+    try:
+        return data_manager.createRecordGroupFromJsonImport(project_id, data, user_info)
+    except PermissionError:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/import_json_records/{rg_id}")
+async def import_json_records(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    """Append records to an existing record group from JSON."""
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
+    if rg_data is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
+
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="JSON import request body is required.")
+
+    prevent_duplicates = True
+    if isinstance(data, dict):
+        prevent_duplicates = data.get(
+            "preventDuplicates", data.get("prevent_duplicates", True)
+        )
+    try:
+        return data_manager.importJsonRecords(
+            rg_id, data, user_info, prevent_duplicates=prevent_duplicates
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/import_record_file_record_group/{project_id}")
+async def import_record_file_record_group(
+    project_id: str,
+    file: UploadFile = File(...),
+    record_group_name: str = Form(...),
+    record_group_description: str = Form(""),
+    document_type: str = Form("JSON Import"),
+    preventDuplicates: bool = Form(True),
+    user_info: dict = Depends(authenticate),
+):
+    """Create a processorless record group from an uploaded JSON or CSV export."""
+    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
+        )
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    try:
+        import_package = data_manager.parseImportFile(file.filename, await file.read())
+        return data_manager.createRecordGroupFromJsonImport(
+            project_id,
+            {
+                "record_group": {
+                    "name": record_group_name,
+                    "description": record_group_description,
+                    "documentType": document_type,
+                },
+                "import_package": import_package,
+                "preventDuplicates": preventDuplicates,
+            },
+            user_info,
+        )
+    except PermissionError:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/import_record_file_records/{rg_id}")
+async def import_record_file_records(
+    rg_id: str,
+    file: UploadFile = File(...),
+    preventDuplicates: bool = Form(True),
+    user_info: dict = Depends(authenticate),
+):
+    """Append records to an existing record group from an uploaded JSON or CSV file."""
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
+    if rg_data is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
+
+    try:
+        import_package = data_manager.parseImportFile(file.filename, await file.read())
+        return data_manager.importJsonRecords(
+            rg_id,
+            {"import_package": import_package},
+            user_info,
+            prevent_duplicates=preventDuplicates,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/preview_record_file_record_group/{project_id}")
+async def preview_record_file_record_group(
+    project_id: str,
+    file: UploadFile = File(...),
+    preventDuplicates: bool = Form(True),
+    user_info: dict = Depends(authenticate),
+):
+    """Preview import counts for a new processorless record group."""
+    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
+        )
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+    if not data_manager.userCanAccessProject(project_id, user_info):
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this project, please contact the project creator to gain access.",
+        )
+
+    try:
+        import_package = data_manager.parseImportFile(file.filename, await file.read())
+        return data_manager.previewJsonRecords(
+            None,
+            {"import_package": import_package},
+            prevent_duplicates=preventDuplicates,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/preview_record_file_records/{rg_id}")
+async def preview_record_file_records(
+    rg_id: str,
+    file: UploadFile = File(...),
+    preventDuplicates: bool = Form(True),
+    user_info: dict = Depends(authenticate),
+):
+    """Preview import counts for appending JSON or CSV records."""
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    _, rg_data = data_manager.fetchRecordGroupData(rg_id, user_info)
+    if rg_data is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
+
+    try:
+        import_package = data_manager.parseImportFile(file.filename, await file.read())
+        return data_manager.previewJsonRecords(
+            rg_id,
+            {"import_package": import_package},
+            prevent_duplicates=preventDuplicates,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/connect_record_group_processor/{rg_id}")
+async def connect_record_group_processor(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    """Connect or replace the processor associated with a record group."""
+    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to connect processors for this team. Please contact a team lead.",
+        )
+
+    data = await request.json()
+    processor_id = data.get("processorId") or data.get("processor_id")
+    try:
+        return data_manager.connectRecordGroupProcessor(rg_id, processor_id, user_info)
+    except PermissionError:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.post("/upload_record_images/{record_id}")
+async def upload_record_images(
+    record_id: str,
+    files: list[UploadFile] = File(...),
+    user_info: dict = Depends(authenticate),
+):
+    """Attach display image files to an existing record."""
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403,
+            detail=f"You are not authorized to upload records for this project. Please contact a team lead or project manager.",
+        )
+
+    record = data_manager.fetchRecordForUser(record_id, user_info)
+    if record is None:
+        raise HTTPException(
+            403,
+            detail=f"You do not have access to this record, please contact the project creator to gain access.",
+        )
+    if not files:
+        raise HTTPException(400, detail="At least one image file is required.")
+
+    allowed_extensions = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".pdf"}
+    output_paths = []
+    files_to_delete = []
+    try:
+        for idx, file in enumerate(files):
+            original_name = os.path.basename(file.filename or f"image-{idx + 1}.png")
+            base_name, file_ext = os.path.splitext(original_name)
+            file_ext = file_ext.lower()
+            if file_ext not in allowed_extensions:
+                raise HTTPException(
+                    400,
+                    detail=f"{original_name} is not a supported image or PDF file.",
+                )
+
+            unique_base_name = f"{base_name or 'image'}-{secrets.token_hex(4)}"
+            original_output_path = (
+                f"{data_manager.app_settings.img_dir}/{unique_base_name}{file_ext}"
+            )
+            async with aiofiles.open(original_output_path, "wb") as out_file:
+                chunk_size = 1024 * 1024
+                while True:
+                    chunk = await file.read(chunk_size)
+                    if not chunk:
+                        break
+                    await out_file.write(chunk)
+            files_to_delete.append(original_output_path)
+
+            if file_ext in (".tif", ".tiff"):
+                converted_paths = convert_tiff(
+                    unique_base_name, file_ext, data_manager.app_settings.img_dir
+                )
+                output_paths.extend(converted_paths)
+                files_to_delete.extend(converted_paths)
+            elif file_ext == ".pdf":
+                converted_paths = convert_pdf(
+                    unique_base_name, file_ext, data_manager.app_settings.img_dir
+                )
+                output_paths.extend(converted_paths)
+                files_to_delete.extend(converted_paths)
+            else:
+                output_paths.append(original_output_path)
+
+        image_file_names = [
+            os.path.basename(output_path) for output_path in output_paths
+        ]
+        await storage_api.upload_files(
+            file_paths=output_paths,
+            file_names=image_file_names,
+            folder=storage_api.get_record_image_directory(
+                record.get("record_group_id"), record_id
+            ),
+        )
+        return data_manager.appendRecordImages(record_id, image_file_names, user_info)
+    finally:
+        for file_path in set(files_to_delete):
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            except OSError as e:
+                _log.info(f"unable to delete temporary image file {file_path}: {e}")
 
 
 @router.post("/upload_document/{rg_id}/{user_email}")
@@ -2288,7 +2610,7 @@ async def rotate_record_images(
             raise HTTPException(status_code=400, detail="Missing required parameters")
 
         # Get the current image URLs
-        image_urls = data_manager.getRecordImageUrls(record_id, rg_id)
+        image_urls = data_manager.getRecordImageFileUrlPairs(record_id, rg_id)
         if not image_urls:
             raise HTTPException(
                 status_code=404, detail="No images found for this record"

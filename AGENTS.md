@@ -4,6 +4,7 @@ This repo is the FastAPI backend for OGRRE. The paired frontend repo is `../orph
 
 ## Practices
 
+- Before making backend code updates, use `$ogrre-backend-development` from `.agents/skills/ogrre-backend-development`.
 - Read nearby route and data-manager code before editing.
 - Keep route handlers thin and business logic in `ogrre/internal/data_manager.py`.
 - Preserve existing worktree changes; do not reset or revert unrelated files.
@@ -37,4 +38,5 @@ This repo is the FastAPI backend for OGRRE. The paired frontend repo is `../orph
 
 ## Repo-Local Skills
 
-- Use `$ogrre-backend-api-route` from `.codex/skills/ogrre-backend-api-route` for backend route and data-manager work.
+- Use `$ogrre-backend-development` from `.agents/skills/ogrre-backend-development` before backend code updates, including routes, data-manager logic, auth, settings, storage, Document AI, deployment, tests, docs, dependencies, or cleanup.
+- Use `$ogrre-backend-api-route` from `.agents/skills/ogrre-backend-api-route` for backend route and data-manager work.
