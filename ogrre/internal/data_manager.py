@@ -1181,25 +1181,52 @@ class DataManager:
                 rg_ids.append(ObjectId(rg))
             rg_documents = list(self.db.record_groups.find({"_id": {"$in": rg_ids}}))
             schema_less_record_groups = []
+            doc_type_columns = {}
+
             for doc in rg_documents:
+                doc_type = doc.get("documentType") or "Unknown"
                 rg_schema = self.getRecordGroupSchemaAttributes(
                     user=user, rg_document=doc
                 )
                 if rg_schema:
+                    if location == "documentType" and doc_type not in doc_type_columns:
+                        doc_type_columns[doc_type] = []
                     for attr in rg_schema:
                         attr_name = attr.get("name")
                         if attr_name:
                             columns.add(attr_name)
+                            if location == "documentType":
+                                if attr_name not in doc_type_columns[doc_type]:
+                                    doc_type_columns[doc_type].append(attr_name)
                 else:
-                    schema_less_record_groups.append(str(doc["_id"]))
+                    schema_less_record_groups.append((doc, doc_type))
+
             if schema_less_record_groups:
-                columns.update(
-                    self.deriveRecordColumnsFromRecordGroups(schema_less_record_groups)
-                )
+                rg_id_list = [str(item[0]["_id"]) for item in schema_less_record_groups]
+                derived_cols = self.deriveRecordColumnsFromRecordGroups(rg_id_list)
+                columns.update(derived_cols)
+                if location == "documentType":
+                    for doc, doc_type in schema_less_record_groups:
+                        if doc_type not in doc_type_columns:
+                            doc_type_columns[doc_type] = []
+                        for col in derived_cols:
+                            if col not in doc_type_columns[doc_type]:
+                                doc_type_columns[doc_type].append(col)
+
             if "projects" in document:
                 del document["projects"]
-            columns.add("record_notes")
-            return {"columns": list(columns), "obj": document}
+
+            if location == "documentType":
+                return {
+                    "doc_type_columns": doc_type_columns,
+                    "obj": document,
+                }
+            else:
+                columns.add("record_notes")
+                return {
+                    "columns": list(columns),
+                    "obj": document,
+                }
 
         elif location == "record_group":
             columns = []
