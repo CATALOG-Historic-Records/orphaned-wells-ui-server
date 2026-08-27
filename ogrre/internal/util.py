@@ -354,7 +354,7 @@ def validateUser(user):
 
 def generate_gcs_paths(documents):
     if not documents or len(documents) == 0:
-        return []
+        return {}
     gcs_paths = {}
     for record_id, document in documents.items():
         rg_id = document["rg_id"]

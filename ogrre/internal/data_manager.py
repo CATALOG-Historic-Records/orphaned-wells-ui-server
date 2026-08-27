@@ -1111,7 +1111,15 @@ class DataManager:
 
         # 3. Add or intersect record_group_id in filter_by
         if "record_group_id" in filter_by:
-            frontend_rg_ids = filter_by["record_group_id"].get("$in", [])
+            rg_filter = filter_by["record_group_id"]
+            if isinstance(rg_filter, dict):
+                frontend_rg_ids = rg_filter.get("$in", [])
+            elif isinstance(rg_filter, list):
+                frontend_rg_ids = rg_filter
+            elif isinstance(rg_filter, str):
+                frontend_rg_ids = [rg_filter]
+            else:
+                frontend_rg_ids = []
             intersected_rg_ids = list(set(frontend_rg_ids) & set(filtered_rg_ids))
             filter_by["record_group_id"] = {"$in": intersected_rg_ids}
         else:
@@ -3266,7 +3274,7 @@ class DataManager:
         attribute_schema = schema.get(schemaKey)
         if attribute_schema:
             alias = attribute_schema.get("alias")
-            _log.info(f"we found an attribute schema: {alias}")
+            # _log.info(f"we found an attribute schema: {alias}")
             return alias
         else:
             _log.info(f"NO attribute schema for: {schemaKey}")

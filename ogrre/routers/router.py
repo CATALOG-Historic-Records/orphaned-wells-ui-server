@@ -1773,7 +1773,8 @@ async def get_download_size(
     try:
         documents = util.compileDocumentImageList(records)
         gcs_paths = util.generate_gcs_paths(documents)
-        totalBytes = util.compute_total_size([], gcs_paths.keys())
+        gcs_keys = gcs_paths.keys() if isinstance(gcs_paths, dict) else []
+        totalBytes = util.compute_total_size([], gcs_keys)
         return totalBytes
 
     except Exception as e:
