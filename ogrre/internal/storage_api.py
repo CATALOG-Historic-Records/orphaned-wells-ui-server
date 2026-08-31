@@ -25,7 +25,6 @@ import io
 import logging
 import os
 import re
-import sys
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote, urlparse, unquote
@@ -43,7 +42,7 @@ except ImportError:  # pragma: no cover
 
 _log = logging.getLogger(__name__)
 
-DIRNAME, _ = os.path.split(os.path.abspath(sys.argv[0]))
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "google").lower()
@@ -62,9 +61,23 @@ def _storage_path(key):
     return os.path.join(LOCAL_STORAGE_ROOT, key)
 
 
+def _resolve_service_account_path(service_key=None):
+    service_key = (
+        service_key
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        or STORAGE_SERVICE_KEY
+        or "creds.json"
+    )
+    service_path = Path(service_key).expanduser()
+    if service_path.is_absolute():
+        return str(service_path)
+    return str(PACKAGE_DIR / service_path)
+
+
 def _get_storage_client(storage_service_key=None):
-    service_key = storage_service_key or STORAGE_SERVICE_KEY
-    return storage.Client.from_service_account_json(f"{DIRNAME}/{service_key}")
+    return storage.Client.from_service_account_json(
+        _resolve_service_account_path(storage_service_key)
+    )
 
 
 def _get_bucket(bucket_name=None, storage_service_key=None):
@@ -154,12 +167,7 @@ async def _async_upload_to_bucket(
 ):
     async with aiohttp.ClientSession() as session:
         storage_client = Storage(
-            service_file=service_file
-            or (
-                f"{DIRNAME}/{STORAGE_SERVICE_KEY}"
-                if STORAGE_SERVICE_KEY
-                else f"{DIRNAME}/creds.json"
-            ),
+            service_file=_resolve_service_account_path(service_file),
             session=session,
         )
         status = await storage_client.upload(
