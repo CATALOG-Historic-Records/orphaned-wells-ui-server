@@ -229,7 +229,7 @@ jobs:
               value="${value:1:${#value}-2}"
             fi
             case "$key" in
-              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME)
+              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS)
                 continue
                 ;;
             esac
@@ -243,6 +243,8 @@ jobs:
             echo "LOCAL_STORAGE_ROOT=/data/local-storage"
             echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
             echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
+            echo "STORAGE_SERVICE_KEY=/code/ogrre/michael2-service-key.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=/code/ogrre/michael2-service-key.json"
           } >> "$k8s_env_file"
 
           required_runtime_keys=(

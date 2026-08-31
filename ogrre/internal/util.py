@@ -12,6 +12,7 @@ import re
 import importlib.metadata as importlib_metadata
 import json
 
+import fitz
 from ogrre_data_cleaning import CLEANING_FUNCTIONS
 from ogrre.internal import storage_api
 
@@ -166,6 +167,14 @@ def last4_before_decimal(ts=None):
     if ts is None:
         ts = time.time()
     return int(ts) % 10000
+
+
+def sanitize_filename_component(name, default=""):
+    """Strip characters that are unsafe to use in a filename/path segment."""
+    if not name:
+        return default
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(name)).strip()
+    return cleaned or default
 
 
 def time_it(func):
@@ -415,8 +424,74 @@ def compute_total_size(local_file_paths, gcs_paths):
     return total_size
 
 
+def compile_embedded_pdfs(records):
+    """
+    Generates embedded searchable PDF bytes for each record in-memory using ogrre_embed.
+    Returns a list of tuples: [(arcname, pdf_bytes), ...]
+    """
+    try:
+        from ogrre_embed import make_pdf_searchable
+    except ImportError:
+        _log.error(
+            "ogrre_embed package is not installed; cannot generate embedded PDFs."
+        )
+        return []
+
+    embedded_pdfs = []
+    for record in records or []:
+        rg_id = record.get("record_group_id")
+        record_id = str(record.get("_id", ""))
+        if not rg_id or not record_id:
+            continue
+        record_name = record.get("name") or record.get("filename") or record_id
+        if record_name.lower().endswith(".pdf"):
+            record_name = record_name[:-4]
+
+        image_files = record.get("image_files") or []
+        if not image_files:
+            continue
+
+        doc = fitz.open()
+        pages_added = 0
+        for img_name in image_files:
+            if not imageIsValid(img_name):
+                continue
+            blob_key = f"uploads/{rg_id}/{record_id}/{img_name}"
+            try:
+                img_bytes = storage_api.download_file_bytes(blob_key)
+                if not img_bytes:
+                    continue
+                img_doc = fitz.open(stream=img_bytes, filetype="png")
+                pdf_bytes = img_doc.convert_to_pdf()
+                img_pdf = fitz.open("pdf", pdf_bytes)
+                doc.insert_pdf(img_pdf)
+                img_doc.close()
+                img_pdf.close()
+                pages_added += 1
+            except Exception as e:
+                _log.warning(
+                    f"Unable to add image {blob_key} to PDF for embedded pdf: {e}"
+                )
+
+        if pages_added == 0:
+            doc.close()
+            continue
+
+        try:
+            pdf_bytes = make_pdf_searchable(doc, record)
+            arcname = f"documents/{record_name}/{record_name}_searchable.pdf"
+            embedded_pdfs.append((arcname, pdf_bytes))
+        except Exception as e:
+            _log.error(f"Failed to generate searchable PDF for record {record_id}: {e}")
+            doc.close()
+
+    return embedded_pdfs
+
+
 @time_it
-def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
+def zip_files_stream(
+    local_file_paths, documents=[], log_to_file="zip_log.txt", embedded_pdfs=[]
+):
     """
     Streams a ZIP file directly without writing to temp files.
     Includes optional local files (JSON and/or csv), skips missing ones gracefully.
@@ -438,8 +513,10 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
 
     if documents is None:
         documents = []
+    if embedded_pdfs is None:
+        embedded_pdfs = []
     logg(
-        f"Downloading and zipping {len(documents)} images along with {local_file_paths}",
+        f"Downloading and zipping {len(documents)} images, {len(embedded_pdfs)} embedded PDFs along with {local_file_paths}",
         level="info",
     )
 
@@ -456,6 +533,10 @@ def zip_files_stream(local_file_paths, documents=[], log_to_file="zip_log.txt"):
                 )
             else:
                 logg(f"Local file not found, skipping: {file_path}", level="info")
+
+    if embedded_pdfs:
+        for arcname, pdf_bytes in embedded_pdfs:
+            zs.write_iter(arcname, [pdf_bytes])
 
     gcs_paths = generate_gcs_paths(documents)
     i = 0
