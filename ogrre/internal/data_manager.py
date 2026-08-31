@@ -764,24 +764,71 @@ class DataManager:
         self.db.teams.update_one(myquery, newvalues)
         return "success"
 
-    def updateUserRole(self, email, team, role_category, new_roles):
-        try:
-            myquery = {"email": email}
-            user_doc = self.db.users.find(myquery).next()
+    def _normalizeStringList(self, values, field_name):
+        if not isinstance(values, list):
+            raise ValueError(f"{field_name} must be a list")
 
-            user_roles = user_doc.get("roles", {})
-            if role_category == "system":
-                user_roles["system"] = new_roles
-            elif role_category == "team":
-                user_roles["team"][team] = new_roles
+        normalized = []
+        for value in values:
+            if not isinstance(value, str):
+                raise ValueError(f"{field_name} must contain only strings")
+            clean_value = value.strip()
+            if clean_value == "":
+                raise ValueError(f"{field_name} cannot contain empty values")
+            if clean_value not in normalized:
+                normalized.append(clean_value)
+        return normalized
 
-            update = {"$set": {"roles": user_roles}}
-            cursor = self.db.users.update_one(myquery, update)
-            self.recordHistory("updateUser", query=update["$set"])
-            return cursor
-        except Exception as e:
-            _log.error(f"failed to update user role: {e}")
-            return e
+    def validateRoleIdsForCategory(self, role_category, role_ids):
+        normalized_role_ids = self._normalizeStringList(role_ids, "new_roles")
+        if not normalized_role_ids:
+            return normalized_role_ids
+
+        cursor = self.db.roles.find(
+            {"category": role_category, "id": {"$in": normalized_role_ids}},
+            {"id": 1},
+        )
+        valid_role_ids = {document.get("id") for document in cursor}
+        invalid_role_ids = [
+            role_id for role_id in normalized_role_ids if role_id not in valid_role_ids
+        ]
+        if invalid_role_ids:
+            raise ValueError(
+                f"Invalid {role_category} roles: {', '.join(invalid_role_ids)}"
+            )
+        return normalized_role_ids
+
+    def updateUserRole(self, email, team, role_category, new_roles, updated_by=None):
+        new_roles = self.validateRoleIdsForCategory(role_category, new_roles)
+        myquery = {"email": email}
+        user_doc = self.getDocument("users", myquery)
+        if user_doc is None:
+            raise ValueError(f"Unable to find user {email}")
+
+        user_roles = user_doc.get("roles", {})
+        if role_category == "system":
+            user_roles["system"] = new_roles
+        elif role_category == "team":
+            if not team:
+                raise ValueError("team is required to update team roles")
+            team_roles = user_roles.get("team", {})
+            team_roles[team] = new_roles
+            user_roles["team"] = team_roles
+        else:
+            raise ValueError("role_category must be one of: system, team")
+
+        update = {"$set": {"roles": user_roles}}
+        cursor = self.db.users.update_one(myquery, update)
+        self.recordHistory(
+            "updateUserRole",
+            user=updated_by,
+            query={
+                "email": email,
+                "role_category": role_category,
+                "roles": new_roles,
+            },
+        )
+        return cursor
 
     def hasPermission(self, email, permission):
         if not REQUIRE_AUTH:
@@ -1304,9 +1351,44 @@ class DataManager:
         roles = []
         cursor = self.db.roles.find({"category": {"$in": role_categories}})
         for document in cursor:
-            del document["_id"]
-            roles.append(document)
+            role = document.copy()
+            if "_id" in role:
+                del role["_id"]
+            roles.append(role)
         return roles
+
+    def fetchPermissionCatalog(self, role_categories):
+        permissions = set()
+        cursor = self.db.roles.find({"category": {"$in": role_categories}})
+        for document in cursor:
+            for permission in document.get("permissions", []):
+                if isinstance(permission, str) and permission.strip() != "":
+                    permissions.add(permission.strip())
+        return sorted(permissions)
+
+    def updateRolePermissions(self, role_id, category, permissions, updated_by=None):
+        normalized_permissions = self._normalizeStringList(permissions, "permissions")
+        query = {"id": role_id, "category": category}
+        role = self.getDocument("roles", query)
+        if role is None:
+            raise ValueError(f"Unable to find {category} role {role_id}")
+
+        update = {"$set": {"permissions": normalized_permissions}}
+        self.db.roles.update_one(query, update)
+        self.recordHistory(
+            "updateRolePermissions",
+            user=updated_by,
+            query={
+                "role_id": role_id,
+                "category": category,
+                "permissions": normalized_permissions,
+            },
+        )
+
+        updated_role = self.getDocument("roles", query)
+        if updated_role and "_id" in updated_role:
+            del updated_role["_id"]
+        return updated_role
 
     def fetchRecordGroupData(self, rg_id, user):
         ## get user's projects, check if user has access to this project
@@ -3140,16 +3222,19 @@ class DataManager:
         user_team = user["default_team"]
         roles = user.get("roles", {})
 
-        user_roles = []
-        ## get system role
-        for role in roles.get("system", []):
-            user_roles.append(role)
-        ## get team roles
-        for role in roles.get("team", {}).get(user_team, []):
-            user_roles.append(role)
+        system_roles = roles.get("system", [])
+        team_roles = roles.get("team", {}).get(user_team, [])
 
         ## compile permissions from each role
-        query = {"id": {"$in": user_roles}}
+        role_filters = []
+        if system_roles:
+            role_filters.append({"id": {"$in": system_roles}, "category": "system"})
+        if team_roles:
+            role_filters.append({"id": {"$in": team_roles}, "category": "team"})
+        if not role_filters:
+            return []
+
+        query = {"$or": role_filters}
         role_cursor = self.db.roles.find(query)
         user_permissions = set()
         for each in role_cursor:

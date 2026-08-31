@@ -1,7 +1,10 @@
 creds.py
 creds.json
-tidy-outlet-service-key.json
-michael2-service-key.json
+
+# Google service account keys
+*-service-key.json
+*service-key*.json
+
 .DS_Store
 .env
 .env_*
