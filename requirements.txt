@@ -20,4 +20,5 @@ python-multipart>=0.0.31
 requests==2.31.0
 uvicorn==0.27.0
 zipstream==1.1.4
-ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@b765b029761602e97ae1732e799649574e252f8b
+ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@c24f543766de884038910d517d44c6ff03726503
+ogrre_embed @ git+https://github.com/CATALOG-Historic-Records/ogrre-embed.git@059297bf9c2c104bff7af7b5b02484577b24281f

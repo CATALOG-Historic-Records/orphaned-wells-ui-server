@@ -265,7 +265,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:${#value}-2}"
   [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:${#value}-2}"
   case "$key" in
-    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME) continue ;;
+    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS) continue ;;
   esac
   printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
 done < "$raw_env_file"
@@ -277,6 +277,8 @@ done < "$raw_env_file"
   echo "LOCAL_STORAGE_ROOT=/data/local-storage"
   echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
   echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
+  echo "STORAGE_SERVICE_KEY=/code/ogrre/michael2-service-key.json"
+  echo "GOOGLE_APPLICATION_CREDENTIALS=/code/ogrre/michael2-service-key.json"
 } >> "$k8s_env_file"
 ```
 
@@ -505,5 +507,5 @@ curl -f https://boots-server.uow-carbon.org/health
 - DNS pointing at the load balancer is not enough by itself. The rendered Kubernetes Ingress `host` and ManagedCertificate domain must also match the hostname.
 - The backend timeout is configured to 180 seconds through `BackendConfig`, matching the current nginx timeout.
 - The Kubernetes Deployment uses pod-local `emptyDir` volumes for `/logs` and `/data`. Real document storage should continue using Google Cloud Storage.
-- The app receives `creds.json` and `michael2-service-key.json` at `/code/ogrre/...`, matching the current Docker Compose paths.
+- The app receives `creds.json` and `michael2-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` to the absolute `/code/ogrre/michael2-service-key.json` path so packaged Python imports do not resolve the key relative to `site-packages`.
 - The default GKE backend resources request 2 CPU and 6 GiB memory because the current container starts 8 Uvicorn workers.
