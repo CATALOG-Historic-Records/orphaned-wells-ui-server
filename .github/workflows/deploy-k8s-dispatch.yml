@@ -15,9 +15,9 @@ on:
           - osage
           - rrc
       IMAGE_TAG:
-        description: Existing Docker image tag to deploy
+        description: Existing Docker image tag to deploy, or auto to deploy the tested SHA for this ref
         required: true
-        default: latest
+        default: auto
         type: string
   workflow_call:
     inputs:
@@ -26,9 +26,9 @@ on:
         required: true
         type: string
       IMAGE_TAG:
-        description: Existing Docker image tag to deploy
+        description: Existing Docker image tag to deploy, or auto to deploy the tested SHA for this ref
         required: false
-        default: latest
+        default: auto
         type: string
     secrets:
       K8S_DEPLOY_TARGETS:
@@ -75,6 +75,54 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set deployment image
+        id: image
+        env:
+          DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          IMAGE_TAG: ${{ inputs.IMAGE_TAG }}
+        run: |
+          requested_tag="${IMAGE_TAG:-auto}"
+
+          if [ "$requested_tag" = "latest" ]; then
+            echo "::warning::Deploying mutable image tag 'latest'. This should be used only as an explicit override because replacement pods may pull a newer digest later."
+          fi
+
+          if [ "$requested_tag" = "auto" ]; then
+            parents="$(git show -s --format=%P "$GITHUB_SHA")"
+            parent_count="$(wc -w <<< "$parents" | tr -d ' ')"
+
+            # Collaborator branches are usually updated by merging main into
+            # the collaborator branch. In that case the second parent is the
+            # main commit that staging built and tested.
+            if [ "$DEPLOY_ENV" != "staging" ] && [ "$parent_count" -ge 2 ]; then
+              resolved_tag="$(awk '{print $2}' <<< "$parents")"
+            else
+              resolved_tag="$GITHUB_SHA"
+            fi
+          else
+            resolved_tag="$requested_tag"
+          fi
+
+          if [ -z "$resolved_tag" ]; then
+            echo "::error::Unable to resolve deployment image tag."
+            exit 1
+          fi
+
+          image="${IMAGE_NAME}:${resolved_tag}"
+          echo "$DOCKERHUB_ACCESS_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          if ! docker manifest inspect "$image" > /dev/null; then
+            echo "::error::Docker image does not exist: ${image}"
+            exit 1
+          fi
+
+          echo "image_tag=$resolved_tag" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Deploying image ${image}"
 
       - name: Prepare deployment workspace
         run: mkdir -p deployment/secrets deployment/kubernetes/rendered
@@ -122,23 +170,43 @@ jobs:
           memory_limit="$(field memory_limit)"
           persistent_disk_size="$(field persistent_disk_size)"
 
-          : "${replicas:=1}"
-          : "${cpu_request:=2}"
-          : "${memory_request:=6Gi}"
-          : "${cpu_limit:=2}"
-          : "${memory_limit:=6Gi}"
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            : "${replicas:=1}"
+            : "${cpu_request:=1}"
+            : "${memory_request:=6Gi}"
+            : "${cpu_limit:=1}"
+            : "${memory_limit:=6Gi}"
+          else
+            : "${replicas:=2}"
+            : "${cpu_request:=1850m}"
+            : "${memory_request:=12Gi}"
+            : "${cpu_limit:=1850m}"
+            : "${memory_limit:=12Gi}"
+          fi
           : "${persistent_disk_size:=20Gi}"
 
           # Older K8S_DEPLOY_TARGETS outputs requested only 1Gi, which lets
           # GKE Autopilot place the pod on nodes too small for this 8-worker app.
           if [ "$cpu_request" = "500m" ]; then
-            cpu_request="2"
+            if [ "$DEPLOY_ENV" = "staging" ]; then
+              cpu_request="1"
+            else
+              cpu_request="1850m"
+            fi
           fi
           if [ "$memory_request" = "1Gi" ]; then
-            memory_request="6Gi"
+            if [ "$DEPLOY_ENV" = "staging" ]; then
+              memory_request="6Gi"
+            else
+              memory_request="12Gi"
+            fi
           fi
           if [ "$memory_limit" = "4Gi" ]; then
-            memory_limit="6Gi"
+            if [ "$DEPLOY_ENV" = "staging" ]; then
+              memory_limit="6Gi"
+            else
+              memory_limit="12Gi"
+            fi
           fi
 
           required=(
@@ -266,14 +334,6 @@ jobs:
             exit 1
           fi
 
-      - name: Set deployment image
-        id: image
-        env:
-          IMAGE_TAG: ${{ inputs.IMAGE_TAG }}
-        run: |
-          : "${IMAGE_TAG:=latest}"
-          echo "image=${IMAGE_NAME}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v3
         with:
@@ -376,3 +436,41 @@ jobs:
           fi
           kubectl -n "$NAMESPACE" get ingress backend
           kubectl -n "$NAMESPACE" get managedcertificate backend-cert
+
+      - name: Verify rollout image consistency
+        env:
+          DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
+          EXPECTED_IMAGE: ${{ steps.image.outputs.image }}
+          NAMESPACE: ${{ steps.target.outputs.namespace }}
+        run: |
+          selector="app.kubernetes.io/name=orphaned-wells-ui-server,app.kubernetes.io/component=api,uow.lbl.gov/environment=${DEPLOY_ENV}"
+          deployment_image="$(kubectl -n "$NAMESPACE" get deployment backend -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          desired_replicas="$(kubectl -n "$NAMESPACE" get deployment backend -o jsonpath='{.spec.replicas}')"
+          ready_replicas="$(kubectl -n "$NAMESPACE" get deployment backend -o jsonpath='{.status.readyReplicas}')"
+          ready_replicas="${ready_replicas:-0}"
+
+          if [ "$deployment_image" != "$EXPECTED_IMAGE" ]; then
+            echo "::error::Deployment image is ${deployment_image}, expected ${EXPECTED_IMAGE}"
+            exit 1
+          fi
+
+          pod_json="$(kubectl -n "$NAMESPACE" get pods -l "$selector" -o json)"
+          ready_pod_count="$(jq '[.items[] | select(.metadata.deletionTimestamp == null) | select(any(.status.containerStatuses[]?; .name == "backend" and .ready == true))] | length' <<< "$pod_json")"
+          image_ids="$(jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .status.containerStatuses[]? | select(.name == "backend" and .ready == true) | .imageID' <<< "$pod_json" | sort -u)"
+          image_id_count="$(printf '%s\n' "$image_ids" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+          if [ "$ready_replicas" != "$desired_replicas" ] || [ "$ready_pod_count" != "$desired_replicas" ]; then
+            echo "::error::Expected ${desired_replicas} ready backend pod(s), found deployment readyReplicas=${ready_replicas}, ready pods=${ready_pod_count}"
+            kubectl -n "$NAMESPACE" get pods -l "$selector" -o wide
+            exit 1
+          fi
+
+          if [ "$image_id_count" -ne 1 ]; then
+            echo "::error::Ready backend pods are running different image IDs:"
+            printf '%s\n' "$image_ids"
+            kubectl -n "$NAMESPACE" get pods -l "$selector" -o wide
+            exit 1
+          fi
+
+          echo "Verified ${ready_pod_count} ready backend pod(s) on image ID:"
+          printf '%s\n' "$image_ids"
