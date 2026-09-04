@@ -45,15 +45,13 @@ variable "legacy_backend_vms" {
     }
 
     osage = {
-      enable_startup_script = false
-      zone                  = "us-central1-f"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20250910"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "osage-uow-server"
+      enable_startup_script  = false
+      zone                   = "us-central1-f"
+      machine_type           = "e2-standard-2"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20250910"
+      boot_disk_size         = 20
+      boot_resource_policies = []
+      boot_disk_device_name  = "osage-uow-server"
     }
 
     ca = {
@@ -67,15 +65,13 @@ variable "legacy_backend_vms" {
     }
 
     newts = {
-      enable_startup_script = false
-      zone                  = "us-central1-b"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "newts-ogrre-server"
+      enable_startup_script  = false
+      zone                   = "us-central1-b"
+      machine_type           = "e2-standard-2"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
+      boot_disk_size         = 20
+      boot_resource_policies = []
+      boot_disk_device_name  = "newts-ogrre-server"
     }
 
     staging = {
@@ -89,15 +85,13 @@ variable "legacy_backend_vms" {
     }
 
     rrc = {
-      enable_startup_script = false
-      zone                  = "us-central1-b"
-      machine_type          = "e2-standard-2"
-      boot_image            = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size        = 20
-      boot_resource_policies = [
-        "https://www.googleapis.com/compute/v1/projects/tidy-outlet-412020/regions/us-central1/resourcePolicies/default-schedule-1"
-      ]
-      boot_disk_device_name = "rrc-ogrre-server"
+      enable_startup_script  = false
+      zone                   = "us-central1-b"
+      machine_type           = "e2-standard-2"
+      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
+      boot_disk_size         = 20
+      boot_resource_policies = []
+      boot_disk_device_name  = "rrc-ogrre-server"
     }
   }
 
@@ -185,6 +179,11 @@ variable "gke_backends" {
   default = {
     staging = {
       upload_bucket_name = "uploaded_documents_v0"
+      replicas           = 1
+      cpu_request        = "1"
+      memory_request     = "6Gi"
+      cpu_limit          = "1"
+      memory_limit       = "6Gi"
     }
     osage = {}
     isgs  = {}

@@ -85,6 +85,8 @@ gh secret set K8S_DEPLOY_TARGETS \
   --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
 ```
 
+When Terraform deployment behavior changes, update the operator-facing frontend docs in `../orphaned-wells-ui/docs/docs/deploy-gcp` as part of the same work so the two repos stay aligned.
+
 See `../kubernetes/README.md` for Kubernetes deployment and operations commands.
 
 ### Primary DNS state migration
@@ -333,8 +335,10 @@ gke_backend_overrides = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
     replicas             = 1
-    memory_request       = "8Gi"
-    memory_limit         = "8Gi"
+    cpu_request          = "1"
+    memory_request       = "6Gi"
+    cpu_limit            = "1"
+    memory_limit         = "6Gi"
     persistent_disk_size = "20Gi"
   }
 }
