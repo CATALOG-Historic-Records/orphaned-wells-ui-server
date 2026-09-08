@@ -92,12 +92,12 @@ spec:
             - name: backend-data
               mountPath: /data
             - name: backend-runtime-files
-              mountPath: /code/ogrre/creds.json
-              subPath: creds.json
+              mountPath: /code/ogrre/storage-service-key.json
+              subPath: storage-service-key.json
               readOnly: true
             - name: backend-runtime-files
-              mountPath: /code/ogrre/michael2-service-key.json
-              subPath: michael2-service-key.json
+              mountPath: /code/ogrre/document-ai-service-key.json
+              subPath: document-ai-service-key.json
               readOnly: true
       volumes:
         - name: backend-logs

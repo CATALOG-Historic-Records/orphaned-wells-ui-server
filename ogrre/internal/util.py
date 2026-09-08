@@ -23,6 +23,7 @@ ATTRIBUTE_PATH_SEPARATOR = "::"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_PACKAGE_NAME = "orphaned-wells-ui-server"
 DATA_CLEANING_PACKAGE_NAME = "ogrre_data_cleaning"
+EMBED_PACKAGE_NAME = "ogrre_embed"
 
 
 def split_attribute_identifier(identifier):
@@ -1452,6 +1453,10 @@ def build_ogrre_version_info() -> dict:
     for key, value in _get_requirement_metadata(DATA_CLEANING_PACKAGE_NAME).items():
         data_cleaning_info.setdefault(key, value)
 
+    embed_info = _get_distribution_metadata(EMBED_PACKAGE_NAME)
+    for key, value in _get_requirement_metadata(EMBED_PACKAGE_NAME).items():
+        embed_info.setdefault(key, value)
+
     backend_info = _get_distribution_metadata(BACKEND_PACKAGE_NAME)
     for key, value in _get_setup_py_metadata().items():
         backend_info.setdefault(key, value)
@@ -1459,6 +1464,7 @@ def build_ogrre_version_info() -> dict:
     return {
         "packages": [
             data_cleaning_info,
+            embed_info,
             backend_info,
         ],
         "deployment": _get_deployment_metadata(),

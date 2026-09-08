@@ -1,25 +1,11 @@
 services:
   web:
     image: michaelpescelbl/orphaned-wells-ui-server:latest
+    env_file:
+      - ../ogrre/.env
     environment:
-      - ENVIRONMENT=${ENVIRONMENT}
-      - COLLABORATOR=${COLLABORATOR}
-      - BACKEND_URL=${BACKEND_URL}
-      - LOCATION=${LOCATION}
-      - DB_USERNAME=${DB_USERNAME}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_CONNECTION=${DB_CONNECTION}
-      - DB_NAME=${DB_NAME}
-      - PROJECT_ID=${PROJECT_ID}
-      - STORAGE_SERVICE_KEY=${STORAGE_SERVICE_KEY}
-      - STORAGE_BUCKET_NAME=${STORAGE_BUCKET_NAME}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - SESSION_COOKIE_DOMAIN=${SESSION_COOKIE_DOMAIN}
-      - SESSION_COOKIE_SAMESITE=${SESSION_COOKIE_SAMESITE}
-      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE}
-      - token_uri=${token_uri}
-      - client_id=${client_id}
-      - client_secret=${client_secret}
+      - STORAGE_SERVICE_KEY=${STORAGE_SERVICE_KEY:-/code/ogrre/storage-service-key.json}
+      - DOCUMENT_AI_SERVICE_KEY=${DOCUMENT_AI_SERVICE_KEY:-/code/ogrre/document-ai-service-key.json}
       - LOG_DIR=/logs
     container_name: web
     ports:
@@ -27,8 +13,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/logs
-      - ./secrets/creds.json:/code/ogrre/creds.json:ro
-      - ./secrets/michael2-service-key.json:/code/ogrre/michael2-service-key.json:ro
+      - ./secrets/storage-service-key.json:/code/ogrre/storage-service-key.json:ro
+      - ./secrets/document-ai-service-key.json:/code/ogrre/document-ai-service-key.json:ro
     logging:
       driver: "json-file"
       options:
@@ -43,7 +29,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/${ENVIRONMENT}:/etc/nginx/conf.d:ro
+      # Run compose with --env-file ../ogrre/.env so NGINX_ENV is available here.
+      - ./nginx/${NGINX_ENV:-staging}:/etc/nginx/conf.d:ro
       - /etc/letsencrypt:/etc/letsencrypt
       - ./certbot-webroot:/var/www/certbot
     environment:

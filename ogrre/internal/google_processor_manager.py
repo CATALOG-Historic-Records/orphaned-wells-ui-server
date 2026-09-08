@@ -1,19 +1,11 @@
-import os
-import sys
 import logging
 
-from google.api_core.client_options import ClientOptions
-from google.cloud import documentai
 from google.api_core.exceptions import FailedPrecondition, InvalidArgument
+
+from ogrre.internal.document_ai_client import get_docai_client
 
 
 _log = logging.getLogger(__name__)
-
-LOCATION = os.getenv("LOCATION")
-
-docai_client = documentai.DocumentProcessorServiceClient(
-    client_options=ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com"),
-)
 
 
 def deploy_processor_version(RESOURCE_NAME, timeout=900, _Timeout=True):
@@ -49,6 +41,7 @@ def deploy_processor_version(RESOURCE_NAME, timeout=900, _Timeout=True):
         Upon success the string "DEPLOYED" is returned.
     """
     try:
+        docai_client = get_docai_client()
         operation = docai_client.deploy_processor_version(
             name=RESOURCE_NAME, timeout=timeout
         )
@@ -93,6 +86,7 @@ def undeploy_processor_version(RESOURCE_NAME):
 
     """
     try:
+        docai_client = get_docai_client()
         operation = docai_client.undeploy_processor_version(name=RESOURCE_NAME)
         # Print operation details
         _log.info(operation.operation.name)

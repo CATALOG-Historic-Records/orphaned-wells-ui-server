@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 import fitz
 from google.cloud import documentai
-from google.cloud.documentai_toolbox.utilities import gcs_utilities
+from google.cloud.documentai_toolbox import constants as documentai_toolbox_constants
 from PIL import Image
 
 from ogrre.internal import document_ai_api
@@ -184,9 +184,7 @@ def get_gcs_path_document_summary(
     prevent_duplicates=False,
 ):
     normalized_prefix = _normalize_prefix(prefix)
-    batches = gcs_utilities.create_batches(
-        gcs_bucket_name=bucket_name, gcs_prefix=normalized_prefix, batch_size=BATCH_SIZE
-    )
+    batches = _create_gcs_document_batches(bucket_name, normalized_prefix, BATCH_SIZE)
     batch_documents = [_get_gcs_documents(batch) for batch in batches]
     all_documents = [
         gcs_document for documents in batch_documents for gcs_document in documents
@@ -335,9 +333,7 @@ def _process_batch_documents(
         raise ValueError("Batch Document AI processing requires the google backend")
 
     prefix = _normalize_prefix(prefix)
-    batches = gcs_utilities.create_batches(
-        gcs_bucket_name=bucket_name, gcs_prefix=prefix, batch_size=BATCH_SIZE
-    )
+    batches = _create_gcs_document_batches(bucket_name, prefix, BATCH_SIZE)
     batch_documents = [_get_gcs_documents(batch) for batch in batches]
     all_documents = [
         gcs_document for documents in batch_documents for gcs_document in documents
@@ -915,6 +911,63 @@ def _mark_record_error(data_manager, rg_id, record_id, file_name, error_message)
 
 def _get_gcs_documents(input_config):
     return list(input_config.gcs_documents.documents)
+
+
+def _create_gcs_document_batches(bucket_name, prefix, batch_size):
+    if batch_size > documentai_toolbox_constants.BATCH_MAX_FILES:
+        raise ValueError(
+            "Batch size must be less than "
+            f"{documentai_toolbox_constants.BATCH_MAX_FILES}. "
+            f"You provided {batch_size}."
+        )
+
+    _, bucket = storage_api._get_bucket(bucket_name=bucket_name)
+    batches = []
+    batch = []
+
+    for blob in bucket.list_blobs(prefix=prefix):
+        if blob.name.endswith("/"):
+            continue
+
+        content_type = blob.content_type or mimetypes.guess_type(blob.name)[0]
+        if content_type not in documentai_toolbox_constants.VALID_MIME_TYPES:
+            _log.info(
+                "skipping batch file with invalid MIME type: %s (%s)",
+                blob.name,
+                content_type,
+            )
+            continue
+
+        if int(blob.size or 0) > documentai_toolbox_constants.BATCH_MAX_FILE_SIZE:
+            _log.info(
+                "skipping batch file over size limit: %s (%s bytes)",
+                blob.name,
+                blob.size,
+            )
+            continue
+
+        batch.append(
+            documentai.GcsDocument(
+                gcs_uri=f"gs://{bucket_name}/{blob.name}",
+                mime_type=content_type,
+            )
+        )
+        if len(batch) == batch_size:
+            batches.append(
+                documentai.BatchDocumentsInputConfig(
+                    gcs_documents=documentai.GcsDocuments(documents=batch)
+                )
+            )
+            batch = []
+
+    if batch:
+        batches.append(
+            documentai.BatchDocumentsInputConfig(
+                gcs_documents=documentai.GcsDocuments(documents=batch)
+            )
+        )
+
+    return batches
 
 
 def _normalize_prefix(prefix):
