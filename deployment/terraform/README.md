@@ -23,7 +23,33 @@ This directory contains the Terraform configuration used to manage OGRRE backend
 - Access to the target GCP project for this deployment
 - A supported shell to run `bash` scripts
 
-## Google Cloud login
+## Service Accounts
+
+Terraform uses the deployment/Terraform identity only. Do not run Terraform with the backend storage or Document AI runtime keys.
+
+Recommended identities:
+
+| Service account | Used for | Credentials location |
+| --- | --- | --- |
+| Storage runtime, for example `ogrre-storage-runtime` | Backend Cloud Storage upload bucket reads, writes, deletes, and signed/download URL interactions | Local `ogrre/.env` as `STORAGE_SERVICE_KEY`; GitHub secret `STORAGE_SERVICE_KEY_JSON` |
+| Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | Local `ogrre/.env` as `DOCUMENT_AI_SERVICE_KEY`; GitHub secret `DOCUMENT_AI_SERVICE_KEY_JSON` |
+| Deployment/Terraform, for example `ogrre-deployment-ci` | Terraform infrastructure changes plus GitHub Actions Kubernetes/App Engine deployments | Local `GOOGLE_APPLICATION_CREDENTIALS` only when using a key; GitHub secret `DEPLOYMENT_SERVICE_KEY_JSON` |
+
+The deployment/Terraform account needs enough project access to manage the infrastructure in this directory:
+
+- `roles/container.admin`
+- `roles/compute.networkAdmin`
+- `roles/dns.admin`
+- `roles/storage.admin`
+- `roles/serviceusage.serviceUsageAdmin` if Terraform manages project services
+
+It also needs read/write access to the Terraform state bucket. `roles/storage.admin` at the project level covers this; a narrower setup can grant state-bucket access directly.
+
+Keep Cloud Storage upload-bucket runtime access on the storage runtime service account and Document AI API/runtime access on the Document AI runtime service account. Those runtime identities are configured in the backend app environment, not in Terraform.
+
+For GitHub Actions GKE deploys, the same deployment account also needs Kubernetes RBAC inside the cluster. See `../kubernetes/README.md` for the namespace and workload permissions to bind.
+
+## Google Cloud Login
 
 From this directory, authenticate to Google Cloud and set the project that matches your Terraform configuration:
 
@@ -35,6 +61,12 @@ gcloud auth login
 gcloud config set project <YOUR_PROJECT_ID>
 
 gcloud auth application-default login
+```
+
+If you use a deployment/Terraform service-account JSON key locally instead of user ADC, set it in your shell before running Terraform:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/secure/path/ogrre-deployment-ci-service-key.json
 ```
 
 The import script also unsets `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_AUTHORIZED_USER_CREDENTIALS`, and `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` to avoid conflicts with existing credentials.
@@ -84,6 +116,8 @@ gh secret set K8S_DEPLOY_TARGETS \
   --repo CATALOG-Historic-Records/orphaned-wells-ui-server \
   --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
 ```
+
+When Terraform deployment behavior changes, update the operator-facing frontend docs in `../orphaned-wells-ui/docs/docs/deploy-gcp` as part of the same work so the two repos stay aligned.
 
 See `../kubernetes/README.md` for Kubernetes deployment and operations commands.
 
@@ -333,8 +367,10 @@ gke_backend_overrides = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
     replicas             = 1
-    memory_request       = "8Gi"
-    memory_limit         = "8Gi"
+    cpu_request          = "1"
+    memory_request       = "6Gi"
+    cpu_limit            = "1"
+    memory_limit         = "6Gi"
     persistent_disk_size = "20Gi"
   }
 }

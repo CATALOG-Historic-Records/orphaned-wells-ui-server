@@ -11,4 +11,5 @@ jobs:
     uses: ./.github/workflows/deploy-k8s-dispatch.yml
     with:
       DEPLOY_ENV: ca
+      IMAGE_TAG: auto
     secrets: inherit

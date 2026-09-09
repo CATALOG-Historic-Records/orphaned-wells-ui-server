@@ -1,38 +1,19 @@
 import base64
 import logging
 import os
-import sys
 
-from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 import requests
+from ogrre.internal.document_ai_client import get_docai_client as _get_docai_client
 from ogrre.internal import util
 
 _log = logging.getLogger(__name__)
 
 LOCATION = os.getenv("LOCATION", "us")
 PROJECT_ID = os.getenv("PROJECT_ID")
-STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
 DOCUMENT_AI_BACKEND = os.getenv("DOCUMENT_AI_BACKEND", "google").lower()
 DOCUMENT_AI_URL = os.getenv("DOCUMENT_AI_URL")
 DOCUMENT_AI_TIMEOUT = float(os.getenv("DOCUMENT_AI_TIMEOUT", "60"))
-
-
-_docai_client = None
-
-
-def _get_docai_client():
-    global _docai_client
-    if _docai_client is None:
-        client_options = None
-        if LOCATION:
-            client_options = ClientOptions(
-                api_endpoint=f"{LOCATION}-documentai.googleapis.com"
-            )
-        _docai_client = documentai.DocumentProcessorServiceClient(
-            client_options=client_options
-        )
-    return _docai_client
 
 
 def _get_coordinates(entity, attribute):
