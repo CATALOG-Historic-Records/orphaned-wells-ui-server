@@ -44,6 +44,7 @@ _log = logging.getLogger(__name__)
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 STORAGE_SERVICE_KEY = os.getenv("STORAGE_SERVICE_KEY")
+PROJECT_ID = os.getenv("PROJECT_ID")
 BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME")
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "google").lower()
 LOCAL_STORAGE_ROOT = os.path.expanduser(
@@ -62,12 +63,10 @@ def _storage_path(key):
 
 
 def _resolve_service_account_path(service_key=None):
-    service_key = (
-        service_key
-        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        or STORAGE_SERVICE_KEY
-        or "creds.json"
-    )
+    service_key = service_key or STORAGE_SERVICE_KEY
+    if not service_key:
+        return None
+
     service_path = Path(service_key).expanduser()
     if service_path.is_absolute():
         return str(service_path)
@@ -75,9 +74,12 @@ def _resolve_service_account_path(service_key=None):
 
 
 def _get_storage_client(storage_service_key=None):
-    return storage.Client.from_service_account_json(
-        _resolve_service_account_path(storage_service_key)
-    )
+    service_path = _resolve_service_account_path(storage_service_key)
+    if service_path:
+        return storage.Client.from_service_account_json(
+            service_path, project=PROJECT_ID
+        )
+    return storage.Client(project=PROJECT_ID)
 
 
 def _get_bucket(bucket_name=None, storage_service_key=None):
@@ -166,10 +168,11 @@ async def _async_upload_to_bucket(
     service_file=None,
 ):
     async with aiohttp.ClientSession() as session:
-        storage_client = Storage(
-            service_file=_resolve_service_account_path(service_file),
-            session=session,
-        )
+        service_path = _resolve_service_account_path(service_file)
+        if service_path:
+            storage_client = Storage(service_file=service_path, session=session)
+        else:
+            storage_client = Storage(session=session)
         status = await storage_client.upload(
             bucket_name, f"{folder}/{blob_name}", file_obj
         )

@@ -33,25 +33,27 @@ jobs:
           cat << 'EOF' > ogrre/.env
           REQUIRE_AUTH=false
           ${{ secrets.STAGING_ENV }}
+          STORAGE_SERVICE_KEY=storage-service-key.json
+          DOCUMENT_AI_SERVICE_KEY=document-ai-service-key.json
           EOF
 
       - name: Install application
         run: |
           pip install .
 
-      - name: Add creds file
-        id: create-creds-json
+      - name: Add storage service key json file
+        id: create-storage-service-key-json
         uses: jsdaniell/create-json@v1.2.3
         with:
-            name: "ogrre/creds.json"
-            json: ${{ secrets.CREDS_JSON }}
+            name: "ogrre/storage-service-key.json"
+            json: ${{ secrets.STORAGE_SERVICE_KEY_JSON }}
 
-      - name: Add service key json file
-        id: create-service-key-json
+      - name: Add Document AI service key json file
+        id: create-document-ai-service-key-json
         uses: jsdaniell/create-json@v1.2.3
         with:
-            name: "ogrre/michael2-service-key.json"
-            json: ${{ secrets.SERVICE_KEY_JSON }}
+            name: "ogrre/document-ai-service-key.json"
+            json: ${{ secrets.DOCUMENT_AI_SERVICE_KEY_JSON }}
 
       - name: Run application
         run: |
