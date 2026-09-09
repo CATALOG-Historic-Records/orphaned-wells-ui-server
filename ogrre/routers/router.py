@@ -2266,7 +2266,7 @@ async def get_cleaning_functions(user_info: dict = Depends(authenticate)):
 
 @router.get("/get_ogrre_version")
 async def get_ogrre_version(user_info: dict = Depends(authenticate)):
-    """Get backend package and OGRRE data cleaning version metadata."""
+    """Get backend package and OGRRE dependency version metadata."""
     if not data_manager.hasPermission(user_info.get("email"), "manage_schema"):
         raise HTTPException(
             403,

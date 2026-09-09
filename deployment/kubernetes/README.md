@@ -76,7 +76,97 @@ The identity running Terraform needs permissions to manage GKE, Compute addresse
 - `roles/storage.admin`
 - `roles/serviceusage.serviceUsageAdmin` if Terraform manages project services
 
-The GitHub Actions service account in `SERVICE_KEY_JSON` needs enough access to fetch GKE credentials, apply Kubernetes resources, and read/write upload bucket objects. `roles/container.admin` plus bucket/project storage object permissions is sufficient for the current deployment path.
+## Service Accounts
+
+Use three service accounts for the backend system:
+
+| Service account | Used for | GitHub/local credential |
+| --- | --- | --- |
+| Storage runtime, for example `ogrre-storage-runtime` | Backend Cloud Storage upload bucket reads, writes, deletes, and signed/download URL interactions | `STORAGE_SERVICE_KEY_JSON` in GitHub; local `STORAGE_SERVICE_KEY` in `ogrre/.env` |
+| Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | `DOCUMENT_AI_SERVICE_KEY_JSON` in GitHub; local `DOCUMENT_AI_SERVICE_KEY` in `ogrre/.env` |
+| Deployment/Terraform, for example `ogrre-deployment-ci` | Terraform infrastructure changes and GitHub Actions deployments to GKE/App Engine | `DEPLOYMENT_SERVICE_KEY_JSON` in GitHub; optional local `GOOGLE_APPLICATION_CREDENTIALS` for Terraform |
+
+The deployment account must be able to fetch GKE credentials and apply the rendered manifests. In IAM, give it access to the target GKE project, typically the same Terraform roles listed above when the account also manages infrastructure. For Kubernetes itself, bind that Google identity to Kubernetes RBAC in each target namespace so it can apply and inspect:
+
+- namespaces
+- secrets
+- deployments and rollout status
+- services
+- ingresses
+- `BackendConfig`
+- `ManagedCertificate`
+- `FrontendConfig`
+
+There is no Google IAM role that replaces Kubernetes RBAC for namespace-scoped manifest apply. GCP IAM lets the deployment account reach the cluster; Kubernetes RBAC controls what it can change inside the cluster.
+
+Keep Cloud Storage and Document AI runtime access on the dedicated runtime service accounts, not on the deployment service account.
+
+Bootstrap the Kubernetes RBAC once with an existing cluster-admin identity:
+
+```bash
+PROJECT_ID=<PROJECT_ID>
+DEPLOYER_EMAIL="ogrre-deployment-ci@${PROJECT_ID}.iam.gserviceaccount.com"
+
+cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogrre-backend-namespace-manager
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogrre-backend-namespace-manager
+subjects:
+  - kind: User
+    name: ${DEPLOYER_EMAIL}
+roleRef:
+  kind: ClusterRole
+  name: ogrre-backend-namespace-manager
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+for namespace in uow-staging uow-isgs uow-newts uow-osage uow-ca uow-rrc; do
+  kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+  cat <<EOF | kubectl -n "$namespace" apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ogrre-backend-deployer
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["cloud.google.com"]
+    resources: ["backendconfigs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["networking.gke.io"]
+    resources: ["managedcertificates", "frontendconfigs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+EOF
+
+  kubectl -n "$namespace" create rolebinding ogrre-backend-deployer \
+    --role=ogrre-backend-deployer \
+    --user="$DEPLOYER_EMAIL" \
+    --dry-run=client -o yaml | kubectl apply -f -
+done
+```
+
+`cluster-admin` also works as a single broad binding, but it grants substantially more than this deploy workflow needs.
 
 ## Deploy or update GKE infrastructure
 
@@ -133,8 +223,9 @@ Keep the existing deployment secrets:
 - `PROJECT_ID`
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_ACCESS_TOKEN`
-- `CREDS_JSON`
-- `SERVICE_KEY_JSON`
+- `DEPLOYMENT_SERVICE_KEY_JSON`
+- `STORAGE_SERVICE_KEY_JSON`
+- `DOCUMENT_AI_SERVICE_KEY_JSON`
 - `K8S_DEPLOY_TARGETS`
 
 Each backend environment also needs an environment-file secret:
@@ -154,12 +245,16 @@ The environment-file secret should contain the same key/value pairs used by the 
 - `LOCAL_STORAGE_ROOT`
 - `LOCAL_STORAGE_URL_BASE`
 - `STORAGE_BUCKET_NAME`
+- `STORAGE_SERVICE_KEY`
+- `DOCUMENT_AI_SERVICE_KEY`
 
 Keep `COLLABORATOR` in the environment secret when the backend needs it.
 
+Use `ogrre/.env.example` as the source of truth for environment-file contents. Omit local file paths and local-only settings that the workflow owns, and store real values in the environment-specific GitHub secret such as `STAGING_ENV` or `ISGS_ENV`.
+
 ## GitHub Actions deployment
 
-The staging workflow builds and pushes both `michaelpescelbl/orphaned-wells-ui-server:latest` and an immutable commit-SHA tag, then deploys staging with the SHA tag. The `latest` tag remains available for environment-specific backend deployments that run later:
+The staging workflow builds and pushes both `michaelpescelbl/orphaned-wells-ui-server:latest` and an immutable commit-SHA tag, then deploys staging with the SHA tag. Environment-specific backend deployments promote an existing commit-SHA tag rather than deploying `latest`:
 
 ```bash
 gh workflow run deploy-k8s-staging.yml \
@@ -167,7 +262,7 @@ gh workflow run deploy-k8s-staging.yml \
   --ref main
 ```
 
-The environment-specific workflows deploy the existing Docker image tag, defaulting to `latest`:
+The environment-specific workflows default `IMAGE_TAG` to `auto`. On collaborator branch merge commits, `auto` resolves to the second parent commit, which is the main commit that staging built and tested. On fast-forward or non-merge commits, `auto` resolves to the current commit. Manually entering `latest` is allowed as an explicit override, but it is a mutable tag and can recreate mixed-image replicas after later pod replacement:
 
 ```bash
 gh workflow run deploy-k8s-isgs.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref isgs
@@ -191,6 +286,8 @@ ENABLE_GKE_ISGS_DEPLOY=true
 ENABLE_GKE_NEWTS_DEPLOY=true
 ENABLE_GKE_OSAGE_DEPLOY=true
 ```
+
+When Kubernetes deployment behavior changes, update the operator-facing frontend docs in `../orphaned-wells-ui/docs/docs/deploy-gcp` as part of the same work so the two repos stay aligned.
 
 ## Command-line deployment without GitHub Actions
 
@@ -223,13 +320,14 @@ NAMESPACE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].namespace' <<< "$TARGETS_JSO
 HOSTNAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].host' <<< "$TARGETS_JSON")"
 STATIC_IP_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].static_ip_name' <<< "$TARGETS_JSON")"
 STORAGE_BUCKET_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].storage_bucket_name' <<< "$TARGETS_JSON")"
-REPLICAS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].replicas // 1' <<< "$TARGETS_JSON")"
-CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_request // "2"' <<< "$TARGETS_JSON")"
-MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // "6Gi"' <<< "$TARGETS_JSON")"
-CPU_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_limit // "2"' <<< "$TARGETS_JSON")"
-MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_limit // "6Gi"' <<< "$TARGETS_JSON")"
+REPLICAS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].replicas // 2' <<< "$TARGETS_JSON")"
+CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_request // "1850m"' <<< "$TARGETS_JSON")"
+MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // "12Gi"' <<< "$TARGETS_JSON")"
+CPU_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_limit // "1850m"' <<< "$TARGETS_JSON")"
+MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_limit // "12Gi"' <<< "$TARGETS_JSON")"
 PERSISTENT_DISK_SIZE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].persistent_disk_size // "20Gi"' <<< "$TARGETS_JSON")"
-IMAGE=michaelpescelbl/orphaned-wells-ui-server:latest
+IMAGE_TAG=<tested-commit-sha>
+IMAGE=michaelpescelbl/orphaned-wells-ui-server:"$IMAGE_TAG"
 DEPLOY_RUN_ID="local-$(date +%s)"
 ```
 
@@ -239,8 +337,8 @@ Prepare local secrets:
 mkdir -p deployment/secrets deployment/kubernetes/rendered
 
 cp ogrre/.env_"$DEPLOY_ENV" deployment/secrets/runtime.env
-cp ogrre/creds.json deployment/secrets/creds.json
-cp ogrre/michael2-service-key.json deployment/secrets/michael2-service-key.json
+cp ogrre/storage-service-key.json deployment/secrets/storage-service-key.json
+cp ogrre/document-ai-service-key.json deployment/secrets/document-ai-service-key.json
 ```
 
 Normalize the runtime env file the same way the workflow does:
@@ -265,7 +363,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:${#value}-2}"
   [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:${#value}-2}"
   case "$key" in
-    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS) continue ;;
+    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS) continue ;;
   esac
   printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
 done < "$raw_env_file"
@@ -277,8 +375,8 @@ done < "$raw_env_file"
   echo "LOCAL_STORAGE_ROOT=/data/local-storage"
   echo "LOCAL_STORAGE_URL_BASE=https://$HOSTNAME/local-storage"
   echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
-  echo "STORAGE_SERVICE_KEY=/code/ogrre/michael2-service-key.json"
-  echo "GOOGLE_APPLICATION_CREDENTIALS=/code/ogrre/michael2-service-key.json"
+  echo "STORAGE_SERVICE_KEY=/code/ogrre/storage-service-key.json"
+  echo "DOCUMENT_AI_SERVICE_KEY=/code/ogrre/document-ai-service-key.json"
 } >> "$k8s_env_file"
 ```
 
@@ -298,8 +396,8 @@ kubectl -n "$NAMESPACE" create secret generic backend-runtime-env \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "$NAMESPACE" create secret generic backend-runtime-files \
-  --from-file=creds.json=deployment/secrets/creds.json \
-  --from-file=michael2-service-key.json=deployment/secrets/michael2-service-key.json \
+  --from-file=storage-service-key.json=deployment/secrets/storage-service-key.json \
+  --from-file=document-ai-service-key.json=deployment/secrets/document-ai-service-key.json \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -309,8 +407,8 @@ Render and apply the manifest:
 RUNTIME_CONFIG_SHA="$(
   shasum -a 256 \
     deployment/secrets/runtime.k8s.env \
-    deployment/secrets/creds.json \
-    deployment/secrets/michael2-service-key.json \
+    deployment/secrets/storage-service-key.json \
+    deployment/secrets/document-ai-service-key.json \
     | shasum -a 256 \
     | awk '{print $1}'
 )"
@@ -319,6 +417,19 @@ export DEPLOY_ENV NAMESPACE HOSTNAME STATIC_IP_NAME STORAGE_BUCKET_NAME REPLICAS
 envsubst < deployment/kubernetes/backend.yaml > deployment/kubernetes/rendered/backend.yaml
 kubectl apply -f deployment/kubernetes/rendered/backend.yaml
 kubectl -n "$NAMESPACE" rollout status deployment/backend --timeout=10m
+
+IMAGE_IDS="$(
+  kubectl -n "$NAMESPACE" get pods \
+    -l app.kubernetes.io/name=orphaned-wells-ui-server,app.kubernetes.io/component=api,uow.lbl.gov/environment="$DEPLOY_ENV" \
+    -o json \
+    | jq -r '.items[] | select(.metadata.deletionTimestamp == null) | .status.containerStatuses[]? | select(.name == "backend" and .ready == true) | .imageID' \
+    | sort -u
+)"
+if [ "$(printf '%s\n' "$IMAGE_IDS" | sed '/^$/d' | wc -l | tr -d ' ')" -ne 1 ]; then
+  echo "ready backend pods are running different image IDs"
+  printf '%s\n' "$IMAGE_IDS"
+  exit 1
+fi
 ```
 
 ## Status commands
@@ -457,8 +568,10 @@ gke_backend_overrides = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
     replicas             = 1
-    memory_request       = "8Gi"
-    memory_limit         = "8Gi"
+    cpu_request          = "1"
+    memory_request       = "6Gi"
+    cpu_limit            = "1"
+    memory_limit         = "6Gi"
     persistent_disk_size = "20Gi"
   }
 }
@@ -507,5 +620,5 @@ curl -f https://boots-server.uow-carbon.org/health
 - DNS pointing at the load balancer is not enough by itself. The rendered Kubernetes Ingress `host` and ManagedCertificate domain must also match the hostname.
 - The backend timeout is configured to 180 seconds through `BackendConfig`, matching the current nginx timeout.
 - The Kubernetes Deployment uses pod-local `emptyDir` volumes for `/logs` and `/data`. Real document storage should continue using Google Cloud Storage.
-- The app receives `creds.json` and `michael2-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` to the absolute `/code/ogrre/michael2-service-key.json` path so packaged Python imports do not resolve the key relative to `site-packages`.
-- The default GKE backend resources request 2 CPU and 6 GiB memory because the current container starts 8 Uvicorn workers.
+- The app receives `storage-service-key.json` and `document-ai-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `DOCUMENT_AI_SERVICE_KEY` to those absolute paths so packaged Python imports do not resolve key filenames relative to `site-packages`.
+- The default collaborator GKE backend resources request 1850m CPU and 12 GiB memory. Staging is intentionally smaller at 1 replica with 1 CPU and 6 GiB memory.
