@@ -171,6 +171,15 @@ jobs:
           cpu_limit="$(field cpu_limit)"
           memory_limit="$(field memory_limit)"
           persistent_disk_size="$(field persistent_disk_size)"
+          api_uvicorn_workers="$(field api_uvicorn_workers)"
+          processing_job_cpu_request="$(field processing_job_cpu_request)"
+          processing_job_memory_request="$(field processing_job_memory_request)"
+          processing_job_cpu_limit="$(field processing_job_cpu_limit)"
+          processing_job_memory_limit="$(field processing_job_memory_limit)"
+          processing_job_ephemeral_storage="$(field processing_job_ephemeral_storage)"
+          processing_job_active_deadline_seconds="$(field processing_job_active_deadline_seconds)"
+          processing_job_ttl_seconds_after_finished="$(field processing_job_ttl_seconds_after_finished)"
+          processing_job_max_active="$(field processing_job_max_active)"
 
           if [ "$DEPLOY_ENV" = "staging" ]; then
             : "${replicas:=1}"
@@ -186,6 +195,23 @@ jobs:
             : "${memory_limit:=12Gi}"
           fi
           : "${persistent_disk_size:=20Gi}"
+          : "${api_uvicorn_workers:=2}"
+          : "${processing_job_ephemeral_storage:=10Gi}"
+          : "${processing_job_active_deadline_seconds:=86400}"
+          : "${processing_job_ttl_seconds_after_finished:=604800}"
+          : "${processing_job_max_active:=1}"
+
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            : "${processing_job_cpu_request:=1}"
+            : "${processing_job_memory_request:=6Gi}"
+            : "${processing_job_cpu_limit:=1}"
+            : "${processing_job_memory_limit:=6Gi}"
+          else
+            : "${processing_job_cpu_request:=1850m}"
+            : "${processing_job_memory_request:=12Gi}"
+            : "${processing_job_cpu_limit:=1850m}"
+            : "${processing_job_memory_limit:=12Gi}"
+          fi
 
           # Older K8S_DEPLOY_TARGETS outputs requested only 1Gi, which lets
           # GKE Autopilot place the pod on nodes too small for this 8-worker app.
@@ -241,13 +267,33 @@ jobs:
             echo "cpu_limit=$cpu_limit"
             echo "memory_limit=$memory_limit"
             echo "persistent_disk_size=$persistent_disk_size"
+            echo "api_uvicorn_workers=$api_uvicorn_workers"
+            echo "processing_job_cpu_request=$processing_job_cpu_request"
+            echo "processing_job_memory_request=$processing_job_memory_request"
+            echo "processing_job_cpu_limit=$processing_job_cpu_limit"
+            echo "processing_job_memory_limit=$processing_job_memory_limit"
+            echo "processing_job_ephemeral_storage=$processing_job_ephemeral_storage"
+            echo "processing_job_active_deadline_seconds=$processing_job_active_deadline_seconds"
+            echo "processing_job_ttl_seconds_after_finished=$processing_job_ttl_seconds_after_finished"
+            echo "processing_job_max_active=$processing_job_max_active"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare runtime env file
         env:
           DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
           HOSTNAME: ${{ steps.target.outputs.host }}
+          NAMESPACE: ${{ steps.target.outputs.namespace }}
+          IMAGE: ${{ steps.image.outputs.image }}
           STORAGE_BUCKET_NAME: ${{ steps.target.outputs.storage_bucket_name }}
+          API_UVICORN_WORKERS: ${{ steps.target.outputs.api_uvicorn_workers }}
+          PROCESSING_JOB_CPU_REQUEST: ${{ steps.target.outputs.processing_job_cpu_request }}
+          PROCESSING_JOB_MEMORY_REQUEST: ${{ steps.target.outputs.processing_job_memory_request }}
+          PROCESSING_JOB_CPU_LIMIT: ${{ steps.target.outputs.processing_job_cpu_limit }}
+          PROCESSING_JOB_MEMORY_LIMIT: ${{ steps.target.outputs.processing_job_memory_limit }}
+          PROCESSING_JOB_EPHEMERAL_STORAGE: ${{ steps.target.outputs.processing_job_ephemeral_storage }}
+          PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS: ${{ steps.target.outputs.processing_job_active_deadline_seconds }}
+          PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED: ${{ steps.target.outputs.processing_job_ttl_seconds_after_finished }}
+          PROCESSING_JOB_MAX_ACTIVE: ${{ steps.target.outputs.processing_job_max_active }}
           STAGING_ENV_CONTENT: ${{ secrets.STAGING_ENV }}
           CA_ENV_CONTENT: ${{ secrets.CA_ENV }}
           ISGS_ENV_CONTENT: ${{ secrets.ISGS_ENV }}
@@ -299,7 +345,7 @@ jobs:
               value="${value:1:${#value}-2}"
             fi
             case "$key" in
-              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS)
+              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS|UVICORN_WORKERS|PROCESSING_JOB_*)
                 continue
                 ;;
             esac
@@ -315,6 +361,18 @@ jobs:
             echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
             echo "STORAGE_SERVICE_KEY=/code/ogrre/storage-service-key.json"
             echo "DOCUMENT_AI_SERVICE_KEY=/code/ogrre/document-ai-service-key.json"
+            echo "UVICORN_WORKERS=$API_UVICORN_WORKERS"
+            echo "PROCESSING_JOB_MODE=kubernetes"
+            echo "PROCESSING_JOB_NAMESPACE=$NAMESPACE"
+            echo "PROCESSING_JOB_IMAGE=$IMAGE"
+            echo "PROCESSING_JOB_CPU_REQUEST=$PROCESSING_JOB_CPU_REQUEST"
+            echo "PROCESSING_JOB_MEMORY_REQUEST=$PROCESSING_JOB_MEMORY_REQUEST"
+            echo "PROCESSING_JOB_CPU_LIMIT=$PROCESSING_JOB_CPU_LIMIT"
+            echo "PROCESSING_JOB_MEMORY_LIMIT=$PROCESSING_JOB_MEMORY_LIMIT"
+            echo "PROCESSING_JOB_EPHEMERAL_STORAGE=$PROCESSING_JOB_EPHEMERAL_STORAGE"
+            echo "PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS=$PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS"
+            echo "PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED=$PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED"
+            echo "PROCESSING_JOB_MAX_ACTIVE=$PROCESSING_JOB_MAX_ACTIVE"
           } >> "$k8s_env_file"
 
           required_runtime_keys=(
@@ -351,7 +409,7 @@ jobs:
           location: ${{ steps.target.outputs.cluster_location }}
           project_id: ${{ secrets.PROJECT_ID }}
 
-      - name: Create namespace and secrets
+      - name: Create deployment secrets
         env:
           NAMESPACE: ${{ steps.target.outputs.namespace }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -359,7 +417,7 @@ jobs:
         run: |
           set -e -o pipefail
 
-          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get namespace "$NAMESPACE"
 
           kubectl -n "$NAMESPACE" create secret docker-registry dockerhub-pull \
             --docker-server=https://index.docker.io/v1/ \

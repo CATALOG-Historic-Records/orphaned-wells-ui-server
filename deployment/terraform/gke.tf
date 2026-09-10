@@ -20,22 +20,40 @@ locals {
 
   gke_backends = {
     for name, backend in local.gke_backend_definitions : name => {
-      namespace                 = coalesce(try(backend.namespace, null), "uow-${name}")
-      hostname                  = trimsuffix(coalesce(try(backend.hostname, null), "${name}-server.${var.backend_dns_domain}"), ".")
-      test_hostname             = trimsuffix(coalesce(try(backend.test_hostname, null), "${name}-k8s-server.${var.backend_dns_domain}"), ".")
-      static_ip_name            = coalesce(try(backend.static_ip_name, null), "${name}-uow-gke-ip")
-      upload_bucket_name        = coalesce(try(backend.upload_bucket_name, null), "${name}_uploads")
-      upload_bucket_location    = coalesce(try(backend.upload_bucket_location, null), var.upload_bucket_location)
-      replicas                  = coalesce(try(backend.replicas, null), 2)
-      cpu_request               = coalesce(try(backend.cpu_request, null), "1850m")
-      memory_request            = coalesce(try(backend.memory_request, null), "12Gi")
-      cpu_limit                 = coalesce(try(backend.cpu_limit, null), "1850m")
-      memory_limit              = coalesce(try(backend.memory_limit, null), "12Gi")
-      persistent_disk_size      = coalesce(try(backend.persistent_disk_size, null), "20Gi")
-      create_primary_dns_record = coalesce(try(backend.create_primary_dns_record, null), true)
-      create_test_dns_record    = coalesce(try(backend.create_test_dns_record, null), true)
-      dns_ttl                   = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
+      namespace                                 = coalesce(try(backend.namespace, null), "uow-${name}")
+      hostname                                  = trimsuffix(coalesce(try(backend.hostname, null), "${name}-server.${var.backend_dns_domain}"), ".")
+      test_hostname                             = trimsuffix(coalesce(try(backend.test_hostname, null), "${name}-k8s-server.${var.backend_dns_domain}"), ".")
+      static_ip_name                            = coalesce(try(backend.static_ip_name, null), "${name}-uow-gke-ip")
+      upload_bucket_name                        = coalesce(try(backend.upload_bucket_name, null), "${name}_uploads")
+      upload_bucket_location                    = coalesce(try(backend.upload_bucket_location, null), var.upload_bucket_location)
+      replicas                                  = coalesce(try(backend.replicas, null), 2)
+      cpu_request                               = coalesce(try(backend.cpu_request, null), "1850m")
+      memory_request                            = coalesce(try(backend.memory_request, null), "12Gi")
+      cpu_limit                                 = coalesce(try(backend.cpu_limit, null), "1850m")
+      memory_limit                              = coalesce(try(backend.memory_limit, null), "12Gi")
+      persistent_disk_size                      = coalesce(try(backend.persistent_disk_size, null), "20Gi")
+      api_uvicorn_workers                       = coalesce(try(backend.api_uvicorn_workers, null), 2)
+      processing_job_cpu_request                = coalesce(try(backend.processing_job_cpu_request, null), "1850m")
+      processing_job_memory_request             = coalesce(try(backend.processing_job_memory_request, null), "12Gi")
+      processing_job_cpu_limit                  = coalesce(try(backend.processing_job_cpu_limit, null), "1850m")
+      processing_job_memory_limit               = coalesce(try(backend.processing_job_memory_limit, null), "12Gi")
+      processing_job_ephemeral_storage          = coalesce(try(backend.processing_job_ephemeral_storage, null), "10Gi")
+      processing_job_active_deadline_seconds    = coalesce(try(backend.processing_job_active_deadline_seconds, null), 86400)
+      processing_job_ttl_seconds_after_finished = coalesce(try(backend.processing_job_ttl_seconds_after_finished, null), 604800)
+      processing_job_max_active                 = coalesce(try(backend.processing_job_max_active, null), 1)
+      enable_kubernetes_workloads               = coalesce(try(backend.enable_kubernetes_workloads, null), true)
+      create_primary_dns_record                 = coalesce(try(backend.create_primary_dns_record, null), true)
+      create_test_dns_record                    = coalesce(try(backend.create_test_dns_record, null), true)
+      dns_ttl                                   = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
     }
+  }
+
+  # Cloud infrastructure can be retained before a collaborator is ready for a
+  # Kubernetes deployment. Only enabled backends receive a namespace, runtime
+  # ServiceAccounts/RBAC, and a GitHub Actions deploy target.
+  kubernetes_workload_backends = {
+    for name, backend in local.gke_backends : name => backend
+    if backend.enable_kubernetes_workloads
   }
 
   gke_primary_dns_backends = {

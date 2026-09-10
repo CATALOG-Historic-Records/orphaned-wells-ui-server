@@ -12,6 +12,7 @@ import argparse
 load_dotenv()
 
 PROJECT_ID = os.getenv("PROJECT_ID")
+UVICORN_WORKERS = int(os.getenv("UVICORN_WORKERS", "8"))
 
 if PROJECT_ID:
     os.environ["GCLOUD_PROJECT"] = PROJECT_ID
@@ -75,11 +76,21 @@ if __name__ == "__main__":
     if args.production:
         _log.info(f"starting app in prod")
         uvicorn.run(
-            "__main__:app", host="127.0.0.1", port=8001, reload=False, workers=8
+            "__main__:app",
+            host="127.0.0.1",
+            port=8001,
+            reload=False,
+            workers=UVICORN_WORKERS,
         )
     elif args.docker:
         _log.info(f"starting app in docker")
-        uvicorn.run("__main__:app", host="0.0.0.0", port=8001, reload=False, workers=8)
+        uvicorn.run(
+            "__main__:app",
+            host="0.0.0.0",
+            port=8001,
+            reload=False,
+            workers=UVICORN_WORKERS,
+        )
     else:
         _log.info(f"starting app in dev")
         multiprocessing.freeze_support()
