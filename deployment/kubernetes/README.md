@@ -1,6 +1,6 @@
 # Kubernetes deployment for orphaned-wells-ui-server
 
-This directory contains the Kubernetes deployment template used to run each backend environment on GKE. Terraform owns the cloud infrastructure, and the GitHub Actions workflows render and apply this Kubernetes template for each backend environment.
+This directory contains the Kubernetes deployment template used to run each backend environment on GKE. Terraform owns the cloud infrastructure and long-lived Kubernetes identity/RBAC objects. GitHub Actions renders and applies the application-workload template for each backend environment.
 
 Legacy Compute Engine VM definitions remain in Terraform, but VMs are disabled unless explicitly listed in `enabled_legacy_backend_vms`. New GKE backends do not need a VM entry.
 
@@ -13,9 +13,10 @@ Terraform in `deployment/terraform` creates:
 - one Cloud Storage upload bucket per unique backend bucket name
 - optional `<env>-k8s-server.uow-carbon.org` test DNS records
 - primary DNS records, such as `staging-server.uow-carbon.org`, pointing to the GKE static IP
+- one namespace, two workload ServiceAccounts, and the processing Job Role/RoleBinding per backend environment
 - `kubernetes_deploy_targets`, the JSON map consumed by GitHub Actions
 
-Kubernetes creates one namespace per backend environment:
+Terraform creates one namespace per backend environment:
 
 | Environment | Namespace |
 | --- | --- |
@@ -23,9 +24,33 @@ Kubernetes creates one namespace per backend environment:
 | isgs | `uow-isgs` |
 | newts | `uow-newts` |
 | osage | `uow-osage` |
-| ca | `uow-ca` |
+| rrc | `uow-rrc` |
 
-Each namespace contains:
+CA retains its Terraform-managed cloud configuration but currently has
+`enable_kubernetes_workloads = false`. It has no `uow-ca` namespace, Kubernetes
+runtime identities/RBAC, or deployment target until that setting is changed to
+`true`.
+
+Terraform manages these long-lived namespace resources:
+
+- `ServiceAccount/backend-api`, which may create and inspect only processing Jobs in its namespace
+- `ServiceAccount/processing-worker`, used by short-lived document-processing Pods
+- `Role` and `RoleBinding` named `processing-job-dispatcher`
+- namespace labels
+
+The two runtime identities have deliberately different responsibilities:
+
+| Pod type | Kubernetes ServiceAccount | Kubernetes API permission | Purpose |
+| --- | --- | --- | --- |
+| Always-running `Deployment/backend` API Pod | `backend-api` | Create and inspect processing Jobs; read their Pods | Dispatch and monitor a batch worker. |
+| Short-lived processing Job Pod | `processing-worker` | None granted by this configuration | Process documents and update durable MongoDB job state. |
+
+The Role is the namespace-scoped permission policy. The RoleBinding attaches
+that policy to `backend-api`; without the binding, the Role grants nothing.
+The processing worker intentionally is not bound to the Role, so a worker Pod
+cannot create more Jobs or inspect unrelated Pods.
+
+GitHub Actions manages these application resources:
 
 - `Deployment/backend`
 - `Service/backend`
@@ -37,9 +62,16 @@ Each namespace contains:
 - `Secret/backend-runtime-files`
 - `Secret/dockerhub-pull`
 
+The API is the only always-running workload. When a user submits a GCS batch,
+the API writes a durable MongoDB job record and asks the Kubernetes API to
+create a `batch/v1 Job`. Kubernetes then starts one high-memory worker Pod with
+the same immutable image and runtime secrets. The worker updates the MongoDB
+job record, exits, and Kubernetes removes it after the configured retention
+period. The worker does not serve HTTP and is not a second Deployment.
+
 ## Rendered manifests
 
-`deployment/kubernetes/backend.yaml` is the Kubernetes manifest template. The workflow renders it with environment-specific values like:
+`deployment/kubernetes/backend.yaml` is the application-workload manifest template. Terraform manages namespaces, ServiceAccounts, and RBAC in `deployment/terraform/kubernetes_rbac.tf`; the workflow renders this template with environment-specific values like:
 
 - `NAMESPACE`
 - `DEPLOY_ENV`
@@ -76,7 +108,7 @@ The identity running Terraform needs permissions to manage GKE, Compute addresse
 - `roles/storage.admin`
 - `roles/serviceusage.serviceUsageAdmin` if Terraform manages project services
 
-## Service Accounts
+## Identities and Kubernetes authorization
 
 Use three service accounts for the backend system:
 
@@ -84,89 +116,24 @@ Use three service accounts for the backend system:
 | --- | --- | --- |
 | Storage runtime, for example `ogrre-storage-runtime` | Backend Cloud Storage upload bucket reads, writes, deletes, and signed/download URL interactions | `STORAGE_SERVICE_KEY_JSON` in GitHub; local `STORAGE_SERVICE_KEY` in `ogrre/.env` |
 | Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | `DOCUMENT_AI_SERVICE_KEY_JSON` in GitHub; local `DOCUMENT_AI_SERVICE_KEY` in `ogrre/.env` |
-| Deployment/Terraform, for example `ogrre-deployment-ci` | Terraform infrastructure changes and GitHub Actions deployments to GKE/App Engine | `DEPLOYMENT_SERVICE_KEY_JSON` in GitHub; optional local `GOOGLE_APPLICATION_CREDENTIALS` for Terraform |
+| Terraform platform identity, for example a privileged human operator or dedicated infrastructure account | Terraform cloud infrastructure plus namespaces, runtime ServiceAccounts, and runtime RBAC | Local ADC or a dedicated Terraform credential |
+| GitHub deployment identity, `ogrre-deployment-ci` | Creates deployment Secrets and applies the workload-only manifest | `DEPLOYMENT_SERVICE_KEY_JSON` in GitHub |
 
-The deployment account must be able to fetch GKE credentials and apply the rendered manifests. In IAM, give it access to the target GKE project, typically the same Terraform roles listed above when the account also manages infrastructure. For Kubernetes itself, bind that Google identity to Kubernetes RBAC in each target namespace so it can apply and inspect:
-
-- namespaces
-- secrets
-- deployments and rollout status
-- services
-- ingresses
-- `BackendConfig`
-- `ManagedCertificate`
-- `FrontendConfig`
-
-There is no Google IAM role that replaces Kubernetes RBAC for namespace-scoped manifest apply. GCP IAM lets the deployment account reach the cluster; Kubernetes RBAC controls what it can change inside the cluster.
+The Terraform platform identity must be authorized to create Kubernetes Roles
+and RoleBindings. The documented `roles/container.admin` is sufficient, though
+a separate platform identity is preferable to giving that broad role to the
+GitHub deployment identity. `roles/container.developer`, which the GitHub
+identity already has, is sufficient for the workload-only GitHub Actions
+manifest but intentionally cannot create or delegate Kubernetes RBAC roles.
 
 Keep Cloud Storage and Document AI runtime access on the dedicated runtime service accounts, not on the deployment service account.
 
-Bootstrap the Kubernetes RBAC once with an existing cluster-admin identity:
-
-```bash
-PROJECT_ID=<PROJECT_ID>
-DEPLOYER_EMAIL="ogrre-deployment-ci@${PROJECT_ID}.iam.gserviceaccount.com"
-
-cat <<EOF | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: ogrre-backend-namespace-manager
-rules:
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: ogrre-backend-namespace-manager
-subjects:
-  - kind: User
-    name: ${DEPLOYER_EMAIL}
-roleRef:
-  kind: ClusterRole
-  name: ogrre-backend-namespace-manager
-  apiGroup: rbac.authorization.k8s.io
-EOF
-
-for namespace in uow-staging uow-isgs uow-newts uow-osage uow-ca uow-rrc; do
-  kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
-
-  cat <<EOF | kubectl -n "$namespace" apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: ogrre-backend-deployer
-rules:
-  - apiGroups: [""]
-    resources: ["secrets", "services"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/status"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["cloud.google.com"]
-    resources: ["backendconfigs"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["networking.gke.io"]
-    resources: ["managedcertificates", "frontendconfigs"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["pods", "events"]
-    verbs: ["get", "list", "watch"]
-EOF
-
-  kubectl -n "$namespace" create rolebinding ogrre-backend-deployer \
-    --role=ogrre-backend-deployer \
-    --user="$DEPLOYER_EMAIL" \
-    --dry-run=client -o yaml | kubectl apply -f -
-done
-```
-
-`cluster-admin` also works as a single broad binding, but it grants substantially more than this deploy workflow needs.
+There is no GitHub Actions RBAC bootstrap command in this design. A Terraform
+apply creates the runtime identities and their least-privilege permissions
+before a deployment is attempted. Existing namespaces must be imported into
+Terraform state once; see `../terraform/README.md#existing-gke-namespaces`.
+Do not run the previously documented `ogrre-backend-namespace-manager`
+bootstrap: it is superseded by Terraform ownership.
 
 ## Deploy or update GKE infrastructure
 
@@ -216,6 +183,13 @@ terraform output -json kubernetes_deploy_targets | jq '.newts'
 
 The `host` field controls the Kubernetes Ingress host and the Google-managed certificate domain. DNS alone is not enough; after changing hostnames in Terraform, update `K8S_DEPLOY_TARGETS` and redeploy the backend.
 
+The target map also includes worker resource configuration. GitHub Actions
+generates `UVICORN_WORKERS`, `PROCESSING_JOB_*`, and
+`PROCESSING_JOB_MODE=kubernetes` in `backend-runtime-env`; do not add those
+generated values to collaborator runtime-env secrets. See
+`../terraform/README.md#batch-worker-resource-configuration` for the source
+settings and defaults.
+
 ## Required GitHub secrets
 
 Keep the existing deployment secrets:
@@ -231,7 +205,6 @@ Keep the existing deployment secrets:
 Each backend environment also needs an environment-file secret:
 
 - `STAGING_ENV`
-- `CA_ENV`
 - `ISGS_ENV`
 - `NEWTS_ENV`
 - `OSAGE_ENV`
@@ -268,7 +241,7 @@ The environment-specific workflows default `IMAGE_TAG` to `auto`. On collaborato
 gh workflow run deploy-k8s-isgs.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref isgs
 gh workflow run deploy-k8s-newts.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref newts
 gh workflow run deploy-k8s-osage.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref osage
-gh workflow run deploy-k8s-ca.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref ca
+gh workflow run deploy-k8s-rrc.yml --repo CATALOG-Historic-Records/orphaned-wells-ui-server --ref rrc
 ```
 
 Automatic deploys are controlled by repository variables:
@@ -281,7 +254,6 @@ Or one environment at a time:
 
 ```text
 ENABLE_GKE_STAGING_DEPLOY=true
-ENABLE_GKE_CA_DEPLOY=true
 ENABLE_GKE_ISGS_DEPLOY=true
 ENABLE_GKE_NEWTS_DEPLOY=true
 ENABLE_GKE_OSAGE_DEPLOY=true
@@ -326,6 +298,15 @@ MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // "12Gi
 CPU_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_limit // "1850m"' <<< "$TARGETS_JSON")"
 MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_limit // "12Gi"' <<< "$TARGETS_JSON")"
 PERSISTENT_DISK_SIZE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].persistent_disk_size // "20Gi"' <<< "$TARGETS_JSON")"
+API_UVICORN_WORKERS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].api_uvicorn_workers // 2' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_cpu_request // "1850m"' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_memory_request // "12Gi"' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_CPU_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_cpu_limit // "1850m"' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_memory_limit // "12Gi"' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_EPHEMERAL_STORAGE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_ephemeral_storage // "10Gi"' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_active_deadline_seconds // 86400' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_ttl_seconds_after_finished // 604800' <<< "$TARGETS_JSON")"
+PROCESSING_JOB_MAX_ACTIVE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_max_active // 1' <<< "$TARGETS_JSON")"
 IMAGE_TAG=<tested-commit-sha>
 IMAGE=michaelpescelbl/orphaned-wells-ui-server:"$IMAGE_TAG"
 DEPLOY_RUN_ID="local-$(date +%s)"
@@ -363,7 +344,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   [[ "$value" == \"*\" && "$value" == *\" ]] && value="${value:1:${#value}-2}"
   [[ "$value" == \'*\' && "$value" == *\' ]] && value="${value:1:${#value}-2}"
   case "$key" in
-    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS) continue ;;
+    ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS|UVICORN_WORKERS|PROCESSING_JOB_*) continue ;;
   esac
   printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
 done < "$raw_env_file"
@@ -377,13 +358,25 @@ done < "$raw_env_file"
   echo "STORAGE_BUCKET_NAME=$STORAGE_BUCKET_NAME"
   echo "STORAGE_SERVICE_KEY=/code/ogrre/storage-service-key.json"
   echo "DOCUMENT_AI_SERVICE_KEY=/code/ogrre/document-ai-service-key.json"
+  echo "UVICORN_WORKERS=$API_UVICORN_WORKERS"
+  echo "PROCESSING_JOB_MODE=kubernetes"
+  echo "PROCESSING_JOB_NAMESPACE=$NAMESPACE"
+  echo "PROCESSING_JOB_IMAGE=$IMAGE"
+  echo "PROCESSING_JOB_CPU_REQUEST=$PROCESSING_JOB_CPU_REQUEST"
+  echo "PROCESSING_JOB_MEMORY_REQUEST=$PROCESSING_JOB_MEMORY_REQUEST"
+  echo "PROCESSING_JOB_CPU_LIMIT=$PROCESSING_JOB_CPU_LIMIT"
+  echo "PROCESSING_JOB_MEMORY_LIMIT=$PROCESSING_JOB_MEMORY_LIMIT"
+  echo "PROCESSING_JOB_EPHEMERAL_STORAGE=$PROCESSING_JOB_EPHEMERAL_STORAGE"
+  echo "PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS=$PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS"
+  echo "PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED=$PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED"
+  echo "PROCESSING_JOB_MAX_ACTIVE=$PROCESSING_JOB_MAX_ACTIVE"
 } >> "$k8s_env_file"
 ```
 
-Create or update Kubernetes Secrets:
+Verify that Terraform has created the namespace, then create or update Kubernetes Secrets:
 
 ```bash
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl get namespace "$NAMESPACE"
 
 kubectl -n "$NAMESPACE" create secret docker-registry dockerhub-pull \
   --docker-server=https://index.docker.io/v1/ \
@@ -455,12 +448,13 @@ kubectl -n uow-staging get deployment backend
 kubectl -n uow-staging get pods -l app.kubernetes.io/name=orphaned-wells-ui-server -o wide
 kubectl -n uow-staging get ingress backend
 kubectl -n uow-staging get managedcertificate backend-cert
+kubectl -n uow-staging get jobs -l app.kubernetes.io/component=processor
 ```
 
 Check every backend:
 
 ```bash
-for ns in uow-staging uow-isgs uow-newts uow-osage uow-ca; do
+for ns in uow-staging uow-isgs uow-newts uow-osage uow-rrc; do
   echo "== $ns =="
   kubectl -n "$ns" get deployment backend
   kubectl -n "$ns" get pods -l app.kubernetes.io/name=orphaned-wells-ui-server -o wide
@@ -481,6 +475,7 @@ Logs for one environment:
 ```bash
 kubectl -n uow-newts logs deployment/backend --tail=200
 kubectl -n uow-newts logs deployment/backend --tail=200 -f
+kubectl -n uow-newts logs job/<worker-job-name> --tail=200
 ```
 
 Logs for a specific pod:
@@ -541,7 +536,7 @@ kubectl -n uow-staging delete pod "$POD"
 Restart all backend Deployments:
 
 ```bash
-for ns in uow-staging uow-isgs uow-newts uow-osage uow-ca; do
+for ns in uow-staging uow-isgs uow-newts uow-osage uow-rrc; do
   kubectl -n "$ns" rollout restart deployment/backend
 done
 ```
@@ -559,6 +554,12 @@ gke_backend_overrides = {
   boots = {}
 }
 ```
+
+Set `enable_kubernetes_workloads = false` for a collaborator whose cloud
+configuration should remain managed but which is not ready to deploy to GKE.
+Terraform then omits the namespace, runtime ServiceAccounts/RBAC, and
+`K8S_DEPLOY_TARGETS` entry. CA currently uses this setting; change it to
+`true` before deploying CA through its existing workflow.
 
 Optional per-backend settings can be added in the same map:
 
@@ -622,3 +623,4 @@ curl -f https://boots-server.uow-carbon.org/health
 - The Kubernetes Deployment uses pod-local `emptyDir` volumes for `/logs` and `/data`. Real document storage should continue using Google Cloud Storage.
 - The app receives `storage-service-key.json` and `document-ai-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `DOCUMENT_AI_SERVICE_KEY` to those absolute paths so packaged Python imports do not resolve key filenames relative to `site-packages`.
 - The default collaborator GKE backend resources request 1850m CPU and 12 GiB memory. Staging is intentionally smaller at 1 replica with 1 CPU and 6 GiB memory.
+- Batch workers use separate per-environment resource requests. The initial rollout permits one active batch worker per environment and sets `backoffLimit: 0`; retry failed batches only after reviewing their durable job status and affected records.

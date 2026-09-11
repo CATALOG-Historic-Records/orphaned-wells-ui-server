@@ -81,3 +81,12 @@ docker compose --env-file ../ogrre/.env up web
 ```
 
 The full Compose stack also includes nginx/certbot for deployed-hostname setups. If you run the full stack, `NGINX_ENV` in `ogrre/.env` must select an existing config directory under `deployment/nginx/`.
+
+## Batch processing workers
+
+Batch processing state is stored in MongoDB so it survives API restarts. Local
+development defaults to `PROCESSING_JOB_MODE=background`, which runs the worker
+after the API response. GKE deployments override that setting to `kubernetes`:
+the API creates a short-lived, high-memory Kubernetes Job using the same built
+image and runtime configuration. See `deployment/kubernetes/README.md` before
+enabling the GKE path; it requires namespace RBAC for the API service account.

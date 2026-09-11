@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import re
+import uuid
 from collections import Counter
 
 from bson import ObjectId
@@ -2391,6 +2392,184 @@ class DataManager:
         new_id = db_response.inserted_id
         self.recordHistory("createRecord", user, record_id=str(new_id))
         return str(new_id)
+
+    # Processing jobs are intentionally separate from records. A job can survive
+    # an API-pod restart and may create many records while it runs.
+    def createBatchProcessingJob(
+        self,
+        rg_id,
+        user_info,
+        bucket_name,
+        prefix="",
+        output_bucket_name=None,
+        output_prefix=None,
+        run_cleaning_functions=True,
+        prevent_duplicates=False,
+    ):
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        request_user = {
+            key: user_info.get(key)
+            for key in ("email", "default_team", "team", "name")
+            if user_info.get(key) is not None
+        }
+        job = {
+            "_id": job_id,
+            "job_id": job_id,
+            "type": "batch_document",
+            "status": "queued",
+            "record_group_id": rg_id,
+            "request_user": request_user,
+            "input": {
+                "bucket_name": bucket_name,
+                "prefix": prefix or "",
+                "output_bucket_name": output_bucket_name or bucket_name,
+                "output_prefix": output_prefix,
+            },
+            "options": {
+                "run_cleaning_functions": bool(run_cleaning_functions),
+                "prevent_duplicates": bool(prevent_duplicates),
+            },
+            "worker": {"kubernetes_job_name": None, "image": None},
+            "created_at": now,
+            "updated_at": now,
+            "started_at": None,
+            "completed_at": None,
+            "batches_total": 0,
+            "batches_completed": 0,
+            "summary": {
+                "total_submitted": 0,
+                "total_succeeded": 0,
+                "total_failed": 0,
+                "total_skipped_duplicates": 0,
+                "failed_document_uris": [],
+                "skipped_duplicate_uris": [],
+            },
+            "error": None,
+        }
+        self.db.processing_jobs.insert_one(job)
+        self.recordHistory(
+            "createBatchProcessingJob",
+            request_user.get("email"),
+            rg_id=rg_id,
+            notes={
+                "job_id": job_id,
+                "bucket_name": bucket_name,
+                "prefix": prefix or "",
+            },
+        )
+        return self._serializeProcessingJob(job)
+
+    def _serializeProcessingJob(self, job):
+        if job is None:
+            return None
+        job = dict(job)
+        job["job_id"] = str(job.get("job_id") or job.get("_id"))
+        job.pop("_id", None)
+        return job
+
+    def getProcessingJob(self, job_id):
+        return self._serializeProcessingJob(
+            self.db.processing_jobs.find_one({"_id": str(job_id)})
+        )
+
+    def countActiveProcessingJobs(self, job_type="batch_document"):
+        return self.db.processing_jobs.count_documents(
+            {
+                "type": job_type,
+                "status": {"$in": ["queued", "dispatched", "running"]},
+            }
+        )
+
+    def updateProcessingJob(self, job_id, fields):
+        if not fields:
+            return self.getProcessingJob(job_id)
+        fields = dict(fields)
+        fields["updated_at"] = time.time()
+        self.db.processing_jobs.update_one({"_id": str(job_id)}, {"$set": fields})
+        return self.getProcessingJob(job_id)
+
+    def claimProcessingJob(self, job_id):
+        now = time.time()
+        job = self.db.processing_jobs.find_one_and_update(
+            {
+                "_id": str(job_id),
+                "status": {"$in": ["queued", "dispatched"]},
+            },
+            {
+                "$set": {
+                    "status": "running",
+                    "started_at": now,
+                    "updated_at": now,
+                    "error": None,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        serialized_job = self._serializeProcessingJob(job)
+        if serialized_job is not None:
+            self.recordHistory(
+                "startProcessingJob",
+                serialized_job.get("request_user", {}).get("email"),
+                rg_id=serialized_job.get("record_group_id"),
+                notes={"job_id": serialized_job["job_id"]},
+            )
+        return serialized_job
+
+    def incrementProcessingJobSummary(
+        self,
+        job_id,
+        total_submitted=0,
+        total_succeeded=0,
+        total_failed=0,
+        total_skipped_duplicates=0,
+        failed_document_uris=None,
+        skipped_duplicate_uris=None,
+        batches_completed=0,
+    ):
+        update = {
+            "$set": {"updated_at": time.time()},
+            "$inc": {
+                "summary.total_submitted": total_submitted,
+                "summary.total_succeeded": total_succeeded,
+                "summary.total_failed": total_failed,
+                "summary.total_skipped_duplicates": total_skipped_duplicates,
+                "batches_completed": batches_completed,
+            },
+        }
+        push_values = {}
+        if failed_document_uris:
+            push_values["summary.failed_document_uris"] = {
+                "$each": failed_document_uris
+            }
+        if skipped_duplicate_uris:
+            push_values["summary.skipped_duplicate_uris"] = {
+                "$each": skipped_duplicate_uris
+            }
+        if push_values:
+            update["$push"] = push_values
+        self.db.processing_jobs.update_one({"_id": str(job_id)}, update)
+        return self.getProcessingJob(job_id)
+
+    def completeProcessingJob(self, job_id, status, error=None):
+        if status not in ("completed", "completed_with_errors", "error"):
+            raise ValueError(f"Unsupported processing job status: {status}")
+        job = self.updateProcessingJob(
+            job_id,
+            {
+                "status": status,
+                "completed_at": time.time(),
+                "error": str(error)[:2000] if error else None,
+            },
+        )
+        if job is not None:
+            self.recordHistory(
+                "completeProcessingJob",
+                job.get("request_user", {}).get("email"),
+                rg_id=job.get("record_group_id"),
+                notes={"job_id": job["job_id"], "status": status},
+            )
+        return job
 
     ## update functions
     def updateProject(self, project_id, new_data, user_info={}):

@@ -10,7 +10,6 @@ import copy
 from pathlib import Path
 import re
 import importlib.metadata as importlib_metadata
-import json
 
 import fitz
 from ogrre_data_cleaning import CLEANING_FUNCTIONS
