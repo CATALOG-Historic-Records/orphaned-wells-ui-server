@@ -4,9 +4,7 @@ from collections import Counter
 import logging
 import mimetypes
 import os
-import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple
 
@@ -44,9 +42,6 @@ MONITORED_DUPLICATE_FIELD_KEYS = {
 LOG_BLOB_NAME_SAMPLE_LIMIT = int(
     os.getenv("DOCUMENT_AI_BATCH_LOG_BLOB_NAME_SAMPLE_LIMIT", "20")
 )
-
-_batch_jobs = {}
-_batch_jobs_lock = threading.Lock()
 
 
 class PreparedDocument(NamedTuple):
@@ -127,53 +122,31 @@ def _get_duplicate_file_bases(gcs_documents, rg_id=None, data_manager=None):
 
 
 def create_batch_document_job(
+    data_manager,
     rg_id,
     user_info,
     bucket_name,
     prefix="",
     output_bucket_name=None,
     output_prefix=None,
+    run_cleaning_functions=True,
     prevent_duplicates=False,
 ):
-    job_id = uuid.uuid4().hex
-    now = time.time()
-    with _batch_jobs_lock:
-        _batch_jobs[job_id] = {
-            "job_id": job_id,
-            "status": "queued",
-            "record_group_id": rg_id,
-            "bucket_name": bucket_name,
-            "prefix": prefix or "",
-            "output_bucket_name": output_bucket_name or bucket_name,
-            "output_prefix": output_prefix,
-            "created_at": now,
-            "updated_at": now,
-            "started_at": None,
-            "completed_at": None,
-            "batches_total": 0,
-            "batches_completed": 0,
-            "summary": _new_summary(),
-            "error": None,
-            "user_email": user_info.get("email"),
-            "prevent_duplicates": prevent_duplicates,
-        }
-    return job_id
+    job = data_manager.createBatchProcessingJob(
+        rg_id=rg_id,
+        user_info=user_info,
+        bucket_name=bucket_name,
+        prefix=prefix,
+        output_bucket_name=output_bucket_name,
+        output_prefix=output_prefix,
+        run_cleaning_functions=run_cleaning_functions,
+        prevent_duplicates=prevent_duplicates,
+    )
+    return job["job_id"]
 
 
-def get_batch_document_job(job_id):
-    with _batch_jobs_lock:
-        job = _batch_jobs.get(job_id)
-        if job is None:
-            return None
-        job_copy = dict(job)
-        job_copy["summary"] = dict(job["summary"])
-        job_copy["summary"]["failed_document_uris"] = list(
-            job["summary"]["failed_document_uris"]
-        )
-        job_copy["summary"]["skipped_duplicate_uris"] = list(
-            job["summary"].get("skipped_duplicate_uris", [])
-        )
-        return job_copy
+def get_batch_document_job(job_id, data_manager):
+    return data_manager.getProcessingJob(job_id)
 
 
 def get_gcs_path_document_summary(
@@ -235,16 +208,12 @@ def get_gcs_path_document_summary(
     }
 
 
-def _set_job_fields(job_id, **fields):
-    with _batch_jobs_lock:
-        job = _batch_jobs.get(job_id)
-        if job is None:
-            return
-        job.update(fields)
-        job["updated_at"] = time.time()
+def _set_job_fields(data_manager, job_id, **fields):
+    return data_manager.updateProcessingJob(job_id, fields)
 
 
 def _increment_job_summary(
+    data_manager,
     job_id,
     total_submitted=0,
     total_succeeded=0,
@@ -253,68 +222,59 @@ def _increment_job_summary(
     failed_document_uris=None,
     skipped_duplicate_uris=None,
 ):
-    failed_document_uris = failed_document_uris or []
-    skipped_duplicate_uris = skipped_duplicate_uris or []
-    with _batch_jobs_lock:
-        job = _batch_jobs.get(job_id)
-        if job is None:
-            return
-        summary = job["summary"]
-        summary["total_submitted"] += total_submitted
-        summary["total_succeeded"] += total_succeeded
-        summary["total_failed"] += total_failed
-        summary.setdefault("total_skipped_duplicates", 0)
-        summary.setdefault("skipped_duplicate_uris", [])
-        summary["total_skipped_duplicates"] += total_skipped_duplicates
-        summary["failed_document_uris"].extend(failed_document_uris)
-        summary["skipped_duplicate_uris"].extend(skipped_duplicate_uris)
-        job["updated_at"] = time.time()
+    return data_manager.incrementProcessingJobSummary(
+        job_id,
+        total_submitted=total_submitted,
+        total_succeeded=total_succeeded,
+        total_failed=total_failed,
+        total_skipped_duplicates=total_skipped_duplicates,
+        failed_document_uris=failed_document_uris,
+        skipped_duplicate_uris=skipped_duplicate_uris,
+    )
 
 
-def _increment_batches_completed(job_id):
-    with _batch_jobs_lock:
-        job = _batch_jobs.get(job_id)
-        if job is None:
-            return
-        job["batches_completed"] += 1
-        job["updated_at"] = time.time()
+def _increment_batches_completed(data_manager, job_id):
+    return data_manager.incrementProcessingJobSummary(job_id, batches_completed=1)
 
 
-def process_batch_document_job(
-    job_id,
-    rg_id,
-    user_info,
-    data_manager,
-    bucket_name,
-    prefix="",
-    output_bucket_name=None,
-    output_prefix=None,
-    run_cleaning_functions=True,
-    prevent_duplicates=False,
-):
-    _set_job_fields(job_id, status="running", started_at=time.time(), error=None)
+def process_batch_document_job(job_id, data_manager):
+    job = data_manager.claimProcessingJob(job_id)
+    if job is None:
+        existing_job = data_manager.getProcessingJob(job_id)
+        if existing_job is None:
+            raise ValueError(f"Batch document processing job not found: {job_id}")
+        _log.info(
+            "batch document worker skipped job_id=%s because status is %s",
+            job_id,
+            existing_job.get("status"),
+        )
+        return existing_job
+
+    input_data = job["input"]
+    options = job["options"]
     try:
         _process_batch_documents(
             job_id=job_id,
-            rg_id=rg_id,
-            user_info=user_info,
+            rg_id=job["record_group_id"],
+            user_info=job["request_user"],
             data_manager=data_manager,
-            bucket_name=bucket_name,
-            prefix=prefix,
-            output_bucket_name=output_bucket_name or bucket_name,
-            output_prefix=output_prefix,
-            run_cleaning_functions=run_cleaning_functions,
-            prevent_duplicates=prevent_duplicates,
+            bucket_name=input_data["bucket_name"],
+            prefix=input_data["prefix"],
+            output_bucket_name=input_data["output_bucket_name"],
+            output_prefix=input_data["output_prefix"],
+            run_cleaning_functions=options["run_cleaning_functions"],
+            prevent_duplicates=options["prevent_duplicates"],
         )
-        job = get_batch_document_job(job_id)
+        job = get_batch_document_job(job_id, data_manager)
         summary = job["summary"]
         status = "completed"
         if summary["total_failed"] > 0:
             status = "completed_with_errors"
-        _set_job_fields(job_id, status=status, completed_at=time.time())
+        data_manager.completeProcessingJob(job_id, status)
     except Exception as e:
         _log.exception("batch document processing job failed")
-        _set_job_fields(job_id, status="error", completed_at=time.time(), error=str(e))
+        data_manager.completeProcessingJob(job_id, "error", error=e)
+        raise
 
 
 def _process_batch_documents(
@@ -345,8 +305,8 @@ def _process_batch_documents(
         for gcs_document in all_documents
         if _get_gcs_document_base_name(gcs_document) in duplicate_file_bases
     )
-    _set_job_fields(job_id, batches_total=len(batches))
-    _increment_job_summary(job_id, total_submitted=total_documents)
+    _set_job_fields(data_manager, job_id, batches_total=len(batches))
+    _increment_job_summary(data_manager, job_id, total_submitted=total_documents)
     _log.info(
         "batch document job started job_id=%s rg_id=%s bucket=%s prefix=%s "
         "output_bucket=%s output_prefix=%s batches=%s documents=%s "
@@ -415,8 +375,8 @@ def _process_batch_documents(
                         ],
                         "skipped_duplicate_uris": [],
                     }
-                _increment_job_summary(job_id, **partial_summary)
-                _increment_batches_completed(job_id)
+                _increment_job_summary(data_manager, job_id, **partial_summary)
+                _increment_batches_completed(data_manager, job_id)
 
 
 def _process_one_batch(
