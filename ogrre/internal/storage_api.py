@@ -96,6 +96,38 @@ def _is_local():
     return STORAGE_BACKEND == "local"
 
 
+def create_directory_upload_url(bucket_name, item, origin):
+    """Delegate creation of one immutable object; never return runtime credentials."""
+    _, bucket = _get_bucket(bucket_name=bucket_name)
+    blob = bucket.blob(item["object_name"])
+    return blob.create_resumable_upload_session(
+        content_type=item["content_type"],
+        size=item["size"],
+        origin=origin,
+        if_generation_match=0,
+        timeout=30,
+    )
+
+
+def verify_directory_upload(bucket_name, item, required=True):
+    _, bucket = _get_bucket(bucket_name=bucket_name)
+    blob = bucket.blob(item["object_name"])
+    try:
+        blob.reload(timeout=30)
+    except NotFound:
+        if not required:
+            return None
+        raise ValueError(f"File has not finished uploading: {item['relative_path']}")
+    if blob.size != item["size"] or blob.content_type != item["content_type"]:
+        raise ValueError(
+            f"Uploaded file does not match the manifest: {item['relative_path']}"
+        )
+    generation = str(blob.generation)
+    if item.get("generation") and item["generation"] != generation:
+        raise ValueError(f"Uploaded file has changed: {item['relative_path']}")
+    return {**item, "generation": generation, "crc32c": blob.crc32c}
+
+
 async def upload_file(file_path, file_name, folder="uploads", on_bytes_read=None):
     key = f"{folder}/{file_name}" if folder else file_name
     if _is_local():

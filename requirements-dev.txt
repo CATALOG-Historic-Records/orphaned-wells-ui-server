@@ -1,5 +1,6 @@
 black==22.3.0
 pytest==8.4.2
+mongomock==4.3.0
 
 # Defer to setup.py contents
 -e .[dev]

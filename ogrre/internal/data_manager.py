@@ -7,12 +7,15 @@ import json
 import re
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 from bson import ObjectId
 from pymongo import ASCENDING, DESCENDING, InsertOne, UpdateOne, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
 from ogrre.internal import storage_api
+from ogrre.internal import directory_upload
 from ogrre.internal.mongodb_connection import connectToDatabase
 from ogrre.internal.settings import AppSettings
 from ogrre.internal.util import get_document_image
@@ -2393,6 +2396,139 @@ class DataManager:
         self.recordHistory("createRecord", user, record_id=str(new_id))
         return str(new_id)
 
+    def createDirectoryUpload(self, rg_id, user_info, request):
+        session_id, files, options = directory_upload.validate_manifest(request)
+        existing_job = self.getProcessingJob(session_id)
+        if existing_job and (
+            existing_job["record_group_id"] != rg_id
+            or existing_job["request_user"]["email"] != user_info["email"]
+            or existing_job["input"].get("upload_session_id") != session_id
+        ):
+            raise ValueError("Upload session ID is already in use")
+        session = {
+            "_id": session_id,
+            "record_group_id": rg_id,
+            "user_email": user_info["email"],
+            "files": files,
+            "options": options,
+            "bucket_name": storage_api.BUCKET_NAME,
+            "status": "uploading",
+            "created_at": time.time(),
+            "expires_at": time.time() + directory_upload.SESSION_SECONDS,
+        }
+        result = self.db.directory_uploads.update_one(
+            {"_id": session_id}, {"$setOnInsert": session}, upsert=True
+        )
+        existing = self.db.directory_uploads.find_one({"_id": session_id})
+        if any(
+            existing.get(key) != session[key]
+            for key in (
+                "record_group_id",
+                "user_email",
+                "files",
+                "options",
+                "bucket_name",
+            )
+        ):
+            raise ValueError("Upload session ID is already in use")
+        if result.upserted_id:
+            self.recordHistory(
+                "createDirectoryUpload",
+                user_info["email"],
+                rg_id=rg_id,
+                notes={"session_id": session_id, "files": len(files)},
+            )
+        return existing
+
+    def prepareProcessingRecord(self, record_id, record, user_info):
+        existing = self.db.records.find_one({"_id": ObjectId(record_id)})
+        if existing:
+            self.db.records.update_one(
+                {"_id": ObjectId(record_id)},
+                {
+                    "$set": {
+                        "status": "processing",
+                        "image_files": record["image_files"],
+                        "processing_attempt": record["processing_attempt"],
+                    },
+                    "$unset": {"error_message": ""},
+                },
+            )
+            self.recordHistory(
+                "retryProcessingRecord",
+                user_info.get("email"),
+                record_id=record_id,
+                notes={"job_id": record["processing_job_id"]},
+            )
+        else:
+            record["_id"] = ObjectId(record_id)
+            self.createRecord(record, user_info)
+        return record_id
+
+    def getDirectoryUpload(self, session_id, rg_id, user_info):
+        return self.db.directory_uploads.find_one(
+            {
+                "_id": session_id,
+                "record_group_id": rg_id,
+                "user_email": user_info["email"],
+            }
+        )
+
+    def getDirectoryUploadFile(self, session, file_id, origin):
+        directory_upload.require_open_session(session)
+        item = next(
+            (item for item in session["files"] if item["file_id"] == file_id), None
+        )
+        if item is None:
+            raise ValueError("File is not part of this upload session")
+        if storage_api.verify_directory_upload(
+            session["bucket_name"], item, required=False
+        ):
+            return {"uploaded": True, "file_id": file_id}
+        return {
+            "uploaded": False,
+            "file_id": file_id,
+            "upload_url": storage_api.create_directory_upload_url(
+                session["bucket_name"], item, origin
+            ),
+        }
+
+    def finalizeDirectoryUpload(self, session, user_info):
+        existing_job = self.getProcessingJob(session["_id"])
+        if existing_job:
+            if (
+                existing_job["record_group_id"] != session["record_group_id"]
+                or existing_job["request_user"]["email"] != user_info["email"]
+                or existing_job["input"].get("upload_session_id") != session["_id"]
+            ):
+                raise ValueError("Upload session ID is already in use")
+            return existing_job
+        directory_upload.require_open_session(session)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            documents = list(
+                pool.map(
+                    lambda item: storage_api.verify_directory_upload(
+                        session["bucket_name"], item
+                    ),
+                    session["files"],
+                )
+            )
+        job = self.createBatchProcessingJob(
+            session["record_group_id"],
+            user_info,
+            session["bucket_name"],
+            prefix=f"{directory_upload.STAGING_PREFIX}/{session['_id']}/",
+            job_id=session["_id"],
+            documents=documents,
+            output_prefix=f"directory_upload_outputs/{session['_id']}/",
+            upload_expires_at=session["expires_at"],
+            **session["options"],
+        )
+        self.db.directory_uploads.update_one(
+            {"_id": session["_id"]}, {"$set": {"status": "submitted"}}
+        )
+        return job
+
     # Processing jobs are intentionally separate from records. A job can survive
     # an API-pod restart and may create many records while it runs.
     def createBatchProcessingJob(
@@ -2405,8 +2541,11 @@ class DataManager:
         output_prefix=None,
         run_cleaning_functions=True,
         prevent_duplicates=False,
+        job_id=None,
+        documents=None,
+        upload_expires_at=None,
     ):
-        job_id = uuid.uuid4().hex
+        job_id = job_id or uuid.uuid4().hex
         now = time.time()
         request_user = {
             key: user_info.get(key)
@@ -2446,19 +2585,122 @@ class DataManager:
                 "skipped_duplicate_uris": [],
             },
             "error": None,
+            "attempt": 0,
         }
-        self.db.processing_jobs.insert_one(job)
-        self.recordHistory(
-            "createBatchProcessingJob",
-            request_user.get("email"),
-            rg_id=rg_id,
-            notes={
-                "job_id": job_id,
-                "bucket_name": bucket_name,
-                "prefix": prefix or "",
-            },
+        if documents is not None:
+            job["input"]["documents"] = documents
+            job["input"]["upload_session_id"] = job_id
+            job["input"]["upload_expires_at"] = upload_expires_at
+        result = self.db.processing_jobs.update_one(
+            {"_id": job_id}, {"$setOnInsert": job}, upsert=True
         )
+        if result.upserted_id:
+            self.recordHistory(
+                "createBatchProcessingJob",
+                request_user.get("email"),
+                rg_id=rg_id,
+                notes={
+                    "job_id": job_id,
+                    "bucket_name": bucket_name,
+                    "prefix": prefix or "",
+                },
+            )
+        return self.getProcessingJob(job_id)
+
+    def listProcessingJobs(self, rg_id):
+        return [
+            self._serializeProcessingJob(job)
+            for job in self.db.processing_jobs.find(
+                {"record_group_id": rg_id}, {"input.documents": 0}
+            )
+            .sort("created_at", DESCENDING)
+            .limit(10)
+        ]
+
+    def getActiveProcessingJobs(self):
+        return [
+            self._serializeProcessingJob(job)
+            for statuses in (["dispatched", "running"], ["queued"])
+            for job in self.db.processing_jobs.find(
+                {"status": {"$in": statuses}},
+                {"input.documents": 0},
+            )
+            .sort("created_at", ASCENDING)
+            .limit(100)
+        ]
+
+    def reserveProcessingCapacity(self, job_id, maximum):
+        if maximum <= 0:
+            return True
+        try:
+            self.db.processing_capacity.update_one(
+                {
+                    "_id": "batch_document",
+                    "$or": [
+                        {"jobs": job_id},
+                        {f"jobs.{maximum - 1}": {"$exists": False}},
+                    ],
+                },
+                {"$addToSet": {"jobs": job_id}},
+                upsert=True,
+            )
+            return True
+        except DuplicateKeyError:
+            return False
+
+    def releaseProcessingCapacity(self, job_id):
+        self.db.processing_capacity.update_one(
+            {"_id": "batch_document"}, {"$pull": {"jobs": job_id}}
+        )
+
+    def retryProcessingJob(self, job_id):
+        job = self.db.processing_jobs.find_one_and_update(
+            {
+                "_id": job_id,
+                "status": {"$in": ["error", "completed_with_errors"]},
+                "input.upload_session_id": {"$exists": True},
+            },
+            {
+                "$set": {
+                    "status": "queued",
+                    "error": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "updated_at": time.time(),
+                    "worker": {},
+                    "batches_completed": 0,
+                    "summary": {
+                        "total_submitted": 0,
+                        "total_succeeded": 0,
+                        "total_failed": 0,
+                        "total_skipped_duplicates": 0,
+                        "failed_document_uris": [],
+                        "skipped_duplicate_uris": [],
+                    },
+                },
+                "$inc": {"attempt": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if job:
+            self.recordHistory(
+                "retryProcessingJob",
+                job["request_user"]["email"],
+                rg_id=job["record_group_id"],
+                notes={"job_id": job_id},
+            )
         return self._serializeProcessingJob(job)
+
+    def beginProcessingJobDispatch(self, job_id, fields, attempt=0):
+        result = self.db.processing_jobs.update_one(
+            {
+                "_id": job_id,
+                "status": "queued",
+                "attempt": {"$in": [0, None]} if attempt == 0 else attempt,
+            },
+            {"$set": {**fields, "status": "dispatched", "updated_at": time.time()}},
+        )
+        return result.modified_count == 1
 
     def _serializeProcessingJob(self, job):
         if job is None:
@@ -2473,14 +2715,6 @@ class DataManager:
             self.db.processing_jobs.find_one({"_id": str(job_id)})
         )
 
-    def countActiveProcessingJobs(self, job_type="batch_document"):
-        return self.db.processing_jobs.count_documents(
-            {
-                "type": job_type,
-                "status": {"$in": ["queued", "dispatched", "running"]},
-            }
-        )
-
     def updateProcessingJob(self, job_id, fields):
         if not fields:
             return self.getProcessingJob(job_id)
@@ -2489,12 +2723,13 @@ class DataManager:
         self.db.processing_jobs.update_one({"_id": str(job_id)}, {"$set": fields})
         return self.getProcessingJob(job_id)
 
-    def claimProcessingJob(self, job_id):
+    def claimProcessingJob(self, job_id, attempt=0):
         now = time.time()
         job = self.db.processing_jobs.find_one_and_update(
             {
                 "_id": str(job_id),
-                "status": {"$in": ["queued", "dispatched"]},
+                "status": "dispatched",
+                "attempt": {"$in": [0, None]} if attempt == 0 else attempt,
             },
             {
                 "$set": {
@@ -2551,25 +2786,56 @@ class DataManager:
         self.db.processing_jobs.update_one({"_id": str(job_id)}, update)
         return self.getProcessingJob(job_id)
 
-    def completeProcessingJob(self, job_id, status, error=None):
+    def completeProcessingJob(self, job_id, status, error=None, attempt=None):
         if status not in ("completed", "completed_with_errors", "error"):
             raise ValueError(f"Unsupported processing job status: {status}")
-        job = self.updateProcessingJob(
-            job_id,
-            {
-                "status": status,
-                "completed_at": time.time(),
-                "error": str(error)[:2000] if error else None,
-            },
+        query = {"_id": job_id, "status": {"$in": ["queued", "dispatched", "running"]}}
+        if attempt is not None:
+            query["attempt"] = {"$in": [0, None]} if attempt == 0 else attempt
+        current = self.db.processing_jobs.find_one(query)
+        if current is None:
+            return self.getProcessingJob(job_id)
+        attempt = current.get("attempt", 0)
+        query["attempt"] = {"$in": [0, None]} if attempt == 0 else attempt
+        if status in ("error", "completed_with_errors"):
+            # Repair records before the terminal write. If the API stops here,
+            # maintenance can repeat the repair while the job is still active.
+            self.db.records.update_many(
+                {
+                    "processing_job_id": job_id,
+                    "processing_attempt": attempt,
+                    "status": "processing",
+                },
+                {
+                    "$set": {
+                        "status": "error",
+                        "error_message": "Processing did not finish. Review the job status before retrying.",
+                    }
+                },
+            )
+        job = self._serializeProcessingJob(
+            self.db.processing_jobs.find_one_and_update(
+                query,
+                {
+                    "$set": {
+                        "status": status,
+                        "completed_at": time.time(),
+                        "updated_at": time.time(),
+                        "error": str(error)[:2000] if error else None,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
         )
         if job is not None:
+            self.releaseProcessingCapacity(f"{job_id}:{job.get('attempt', 0)}")
             self.recordHistory(
                 "completeProcessingJob",
                 job.get("request_user", {}).get("email"),
                 rg_id=job.get("record_group_id"),
                 notes={"job_id": job["job_id"], "status": status},
             )
-        return job
+        return job or self.getProcessingJob(job_id)
 
     ## update functions
     def updateProject(self, project_id, new_data, user_info={}):

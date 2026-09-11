@@ -507,3 +507,30 @@ If the new VM already exists in the GCP project, run `scripts/import_existing_in
 - Use `terraform.tfvars` only for local overrides; shared non-secret defaults live in `variables.tf`.
 
 If you need further detail on a specific collaborator or import workflow, I can expand this README with step-by-step examples.
+
+
+## Directory upload bucket settings
+
+`backend_uploads` manages CORS for browser-to-GCS directory transfers and a
+14-day lifecycle rule for `directory_uploads/` and `directory_upload_outputs/`.
+Origins default to the frontend custom domains for each bucket's backends.
+The staging bucket also allows `http://localhost:3000` (native and Docker
+development) and `http://localhost:3001` (the isolated Docker E2E stack).
+Set `upload_bucket_cors_origins` to replace a bucket's complete origin list for
+other hosts or ports; retain the frontend domain and local origins still used.
+Use the origin in the browser address bar, including the published host port.
+`http://127.0.0.1:3000` is a different origin and requires an explicit entry.
+The backend serving that frontend must also permit its origin in
+`ALLOWED_ORIGINS`; bucket configuration does not update backend runtime settings.
+
+GCS bucket CORS governs XML API requests. The JSON API resumable sessions used
+for directory uploads supply the browser origin at session creation and have
+their own CORS handling. See [Google's endpoint behavior documentation](https://docs.cloud.google.com/storage/docs/cross-origin#cloud-storage-cors-support).
+Local development with `STORAGE_BACKEND=local` does not access GCS.
+
+Review existing CORS and lifecycle settings in the Terraform plan before
+applying these changes. The deletion rule covers only the two temporary
+prefixes; it does not cover `uploads/`, `deleted/`, or caller-owned batch inputs.
+Apply storage configuration before deploying the paired upload frontend/backend.
+API CPU/memory defaults are unchanged pending the staging validation documented
+in [the Kubernetes README](../kubernetes/README.md#browser-directory-upload-rollout).

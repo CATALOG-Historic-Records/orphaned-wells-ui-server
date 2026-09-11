@@ -62,7 +62,7 @@ GitHub Actions manages these application resources:
 - `Secret/backend-runtime-files`
 - `Secret/dockerhub-pull`
 
-The API is the only always-running workload. When a user submits a GCS batch,
+The API is the only always-running workload. When a user finalizes a local directory upload or submits a GCS batch,
 the API writes a durable MongoDB job record and asks the Kubernetes API to
 create a `batch/v1 Job`. Kubernetes then starts one high-memory worker Pod with
 the same immutable image and runtime secrets. The worker updates the MongoDB
@@ -624,3 +624,67 @@ curl -f https://boots-server.uow-carbon.org/health
 - The app receives `storage-service-key.json` and `document-ai-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `DOCUMENT_AI_SERVICE_KEY` to those absolute paths so packaged Python imports do not resolve key filenames relative to `site-packages`.
 - The default collaborator GKE backend resources request 1850m CPU and 12 GiB memory. Staging is intentionally smaller at 1 replica with 1 CPU and 6 GiB memory.
 - Batch workers use separate per-environment resource requests. The initial rollout permits one active batch worker per environment and sets `backoffLimit: 0`; retry failed batches only after reviewing their durable job status and affected records.
+
+
+## Browser directory upload rollout
+
+Apply the Terraform bucket CORS and lifecycle configuration before deploying the
+paired backend and frontend changes. Review existing CORS/lifecycle rules in the
+plan: Terraform now manages these settings. Bucket CORS defaults to the frontend
+custom domains (`https://uow-carbon.org` for staging and
+`https://<collaborator>.uow-carbon.org` for collaborators). The staging bucket
+also allows `http://localhost:3000` for native/Docker development and
+`http://localhost:3001` for the isolated Docker E2E stack. For other origins,
+set `upload_bucket_cors_origins` in Terraform; an override replaces that
+bucket's complete origin list.
+
+The backend serving a frontend must include its origin in `ALLOWED_ORIGINS`.
+Local frontends using a local backend need that setting in the local environment;
+only add localhost to the deployed backend if developers actually call it.
+Bucket CORS does not update these runtime settings. GCS JSON API resumable
+sessions use the origin supplied at creation; the bucket CORS rules govern XML
+API requests. The browser uses
+credential-free GCS `PUT` requests with `Content-Range`, and reads the `Range`
+response header when resuming. Runtime storage credentials must create sessions,
+read object metadata, and read/write upload objects. Document AI's service agent
+must be able to read staged originals and write batch outputs as with existing
+GCS batch processing. Do not grant bucket-wide credentials to the browser.
+
+The `directory_uploads/` and `directory_upload_outputs/` prefixes are reserved
+for temporary directory input/output and receive a 14-day lifecycle deletion
+rule. Other prefixes are unaffected. Sessions expire after seven days; ensure
+any increased worker deadline still fits within retention. Mongo session/job
+metadata is retained for diagnosis. Kubernetes Job TTL does not clean GCS data.
+
+`PROCESSING_JOB_MAX_ACTIVE` now controls an atomic capacity reservation. Excess
+jobs queue instead of returning the former busy response. Every API process
+runs idempotent job maintenance every 30 seconds; no additional deployment or
+Kubernetes permission is required. API and worker labels still distinguish
+`app.kubernetes.io/component=api` from `processor` for logs and metrics.
+
+### Staging checks before reducing API resources
+
+1. Verify real bucket CORS from the frontend origin and test a transfer larger
+   than 8 MiB so multiple chunks and the `Range` response are exercised.
+2. Upload a representative 500-file directory, including large multipage PDFs,
+   while browsing and editing records. Verify that only metadata reaches the
+   API and that processing runs in a `processor` Job pod.
+3. Interrupt a transfer, retry, and repeat finalization. Confirm completed
+   objects are reused and there is only one logical job.
+4. Submit concurrently from two sessions. Confirm the configured active worker
+   limit holds and queued jobs eventually dispatch.
+5. Kill a worker during preparation and while waiting for Document AI. Confirm
+   reconciliation marks linked records as failed, releases capacity, and that
+   a manual directory retry reuses records and recorded operations.
+6. Close the browser and reopen the upload dialog. Check progress, partial
+   failures, and successful record images/attributes/cleaning behavior.
+7. Compare API and worker memory peaks, CPU, throttling, restarts/OOM events,
+   temporary storage, job duration, and API response latency separately.
+
+After those checks, test smaller API requests in staging (for example 1 CPU and
+4 GiB with two Uvicorn workers), then choose production settings from measured
+headroom. Keep replica count unchanged initially. Single-file/ZIP and other API
+workflows still need coverage. Resource changes flow through Terraform outputs,
+`K8S_DEPLOY_TARGETS`, and a backend deployment; changing Terraform alone does not
+resize running pods. Check the admitted pod resources because Autopilot can
+adjust requests to enforce CPU/memory ratios.

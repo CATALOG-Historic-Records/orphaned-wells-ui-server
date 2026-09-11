@@ -5,6 +5,8 @@ import logging
 import mimetypes
 import os
 import time
+import hashlib
+from bson import ObjectId
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple
 
@@ -237,8 +239,8 @@ def _increment_batches_completed(data_manager, job_id):
     return data_manager.incrementProcessingJobSummary(job_id, batches_completed=1)
 
 
-def process_batch_document_job(job_id, data_manager):
-    job = data_manager.claimProcessingJob(job_id)
+def process_batch_document_job(job_id, data_manager, attempt=0):
+    job = data_manager.claimProcessingJob(job_id, attempt)
     if job is None:
         existing_job = data_manager.getProcessingJob(job_id)
         if existing_job is None:
@@ -264,16 +266,17 @@ def process_batch_document_job(job_id, data_manager):
             output_prefix=input_data["output_prefix"],
             run_cleaning_functions=options["run_cleaning_functions"],
             prevent_duplicates=options["prevent_duplicates"],
+            documents=input_data.get("documents"),
         )
         job = get_batch_document_job(job_id, data_manager)
         summary = job["summary"]
         status = "completed"
         if summary["total_failed"] > 0:
             status = "completed_with_errors"
-        data_manager.completeProcessingJob(job_id, status)
+        data_manager.completeProcessingJob(job_id, status, attempt=attempt)
     except Exception as e:
         _log.exception("batch document processing job failed")
-        data_manager.completeProcessingJob(job_id, "error", error=e)
+        data_manager.completeProcessingJob(job_id, "error", error=e, attempt=attempt)
         raise
 
 
@@ -288,17 +291,38 @@ def _process_batch_documents(
     output_prefix=None,
     run_cleaning_functions=True,
     prevent_duplicates=False,
+    documents=None,
 ):
     if document_ai_api.DOCUMENT_AI_BACKEND != "google":
         raise ValueError("Batch Document AI processing requires the google backend")
 
     prefix = _normalize_prefix(prefix)
-    batches = _create_gcs_document_batches(bucket_name, prefix, BATCH_SIZE)
+    if documents is not None:
+        # Only finalized, immutable objects are admitted to directory jobs. Never
+        # discover additional files by listing the staging prefix.
+        for item in documents:
+            storage_api.verify_directory_upload(bucket_name, item)
+        batches = [
+            documentai.BatchDocumentsInputConfig(
+                gcs_documents=documentai.GcsDocuments(
+                    documents=[
+                        documentai.GcsDocument(
+                            gcs_uri=f"gs://{bucket_name}/{item['object_name']}",
+                            mime_type=item["content_type"],
+                        )
+                        for item in documents
+                    ]
+                )
+            )
+        ]
+    else:
+        batches = _create_gcs_document_batches(bucket_name, prefix, BATCH_SIZE)
     batch_documents = [_get_gcs_documents(batch) for batch in batches]
     all_documents = [
         gcs_document for documents in batch_documents for gcs_document in documents
     ]
     total_documents = len(all_documents)
+    # Retried records belong to this job and are recovered before duplicate checks.
     duplicate_file_bases = _get_duplicate_file_bases(all_documents, rg_id, data_manager)
     duplicate_document_count = sum(
         1
@@ -400,9 +424,21 @@ def _process_one_batch(
     duplicate_file_bases = duplicate_file_bases or set()
 
     prepared_documents = []
+    job = data_manager.getProcessingJob(job_id)
+    attempt = job.get("attempt", 0)
+    manifest = {
+        f"gs://{job['input']['bucket_name']}/{item['object_name']}": item
+        for item in job["input"].get("documents", [])
+    }
     for gcs_document in _get_gcs_documents(input_config):
+        record_id = _processing_record_id(job_id, gcs_document.gcs_uri)
+        existing_record = data_manager.db.records.find_one({"_id": ObjectId(record_id)})
+        if existing_record and existing_record.get("status") == "digitized":
+            partial_summary["total_succeeded"] += 1
+            continue
         if (
             prevent_duplicates
+            and existing_record is None
             and _get_gcs_document_base_name(gcs_document) in duplicate_file_bases
         ):
             _log.info(f"skipping duplicate batch document {gcs_document.gcs_uri}")
@@ -417,8 +453,13 @@ def _process_one_batch(
                     rg_id=rg_id,
                     user_info=user_info,
                     data_manager=data_manager,
+                    job_id=job_id,
+                    attempt=attempt,
+                    manifest_item=manifest.get(gcs_document.gcs_uri),
                 )
             )
+            if prevent_duplicates:
+                duplicate_file_bases.add(_get_gcs_document_base_name(gcs_document))
         except Exception as e:
             _log.exception(
                 "unable to prepare batch document job_id=%s batch_index=%s "
@@ -443,12 +484,25 @@ def _process_one_batch(
     )
 
     try:
-        operation = document_ai_api.batch_process_documents(
-            input_documents=filtered_input_config,
-            output_gcs_uri=output_gcs_uri,
-            processor_id=processor_id,
-            model_id=model_id,
-        )
+        saved_operation = job.get("operations", {}).get(str(batch_index), {})
+        if saved_operation.get("name") and not saved_operation.get("consumed"):
+            operation = document_ai_api.get_batch_operation(saved_operation["name"])
+        else:
+            operation = document_ai_api.batch_process_documents(
+                input_documents=filtered_input_config,
+                output_gcs_uri=f"{output_gcs_uri.rstrip('/')}/attempt-{attempt}/",
+                processor_id=processor_id,
+                model_id=model_id,
+            )
+            data_manager.updateProcessingJob(
+                job_id,
+                {
+                    f"operations.{batch_index}": {
+                        "name": operation.operation.name,
+                        "consumed": False,
+                    }
+                },
+            )
         operation.result(timeout=BATCH_LRO_TIMEOUT)
         metadata = operation.metadata
     except Exception as e:
@@ -464,6 +518,20 @@ def _process_one_batch(
             )
             partial_summary["failed_document_uris"].append(prepared.source_uri)
         partial_summary["total_failed"] += len(prepared_documents)
+        # A terminal failed operation can be resubmitted; an operation that is
+        # still running must be reattached after a timeout or worker restart.
+        if "operation" in locals():
+            try:
+                if operation.done() and operation.exception() is not None:
+                    data_manager.updateProcessingJob(
+                        job_id, {f"operations.{batch_index}.consumed": True}
+                    )
+            except Exception:
+                _log.warning(
+                    "unable to check final operation state job_id=%s batch=%s",
+                    job_id,
+                    batch_index,
+                )
         return partial_summary
 
     if metadata.state != documentai.BatchProcessMetadata.State.SUCCEEDED:
@@ -479,6 +547,9 @@ def _process_one_batch(
             )
             partial_summary["failed_document_uris"].append(prepared.source_uri)
         partial_summary["total_failed"] += len(prepared_documents)
+        data_manager.updateProcessingJob(
+            job_id, {f"operations.{batch_index}.consumed": True}
+        )
         return partial_summary
 
     status_by_source = {
@@ -556,6 +627,9 @@ def _process_one_batch(
                 partial_summary, prepared, data_manager, rg_id, message
             )
 
+    data_manager.updateProcessingJob(
+        job_id, {f"operations.{batch_index}.consumed": True}
+    )
     return partial_summary
 
 
@@ -571,7 +645,13 @@ def _mark_failed_document(partial_summary, prepared, data_manager, rg_id, messag
     partial_summary["failed_document_uris"].append(prepared.source_uri)
 
 
-def _prepare_document_for_batch(gcs_document, rg_id, user_info, data_manager):
+def _processing_record_id(job_id, source_uri):
+    return hashlib.sha256(f"{job_id}:{source_uri}".encode()).hexdigest()[:24]
+
+
+def _prepare_document_for_batch(
+    gcs_document, rg_id, user_info, data_manager, job_id, attempt=0, manifest_item=None
+):
     source_uri = gcs_document.gcs_uri
     location = storage_api.parse_gcs_url(source_uri)
     source_filename = os.path.basename(location.blob_path)
@@ -580,9 +660,16 @@ def _prepare_document_for_batch(gcs_document, rg_id, user_info, data_manager):
     record_id = None
 
     try:
-        source_bytes = storage_api.download_file_bytes(
-            location.blob_path, bucket_name=location.bucket
-        )
+        if manifest_item:
+            _, bucket = storage_api._get_bucket(bucket_name=location.bucket)
+            source_bytes = bucket.blob(location.blob_path).download_as_bytes(
+                if_generation_match=int(manifest_item["generation"]),
+                timeout=60,
+            )
+        else:
+            source_bytes = storage_api.download_file_bytes(
+                location.blob_path, bucket_name=location.bucket
+            )
         png_files = _convert_document_to_png_files(
             source_bytes=source_bytes,
             filename=filename,
@@ -601,8 +688,12 @@ def _prepare_document_for_batch(gcs_document, rg_id, user_info, data_manager):
             "review_status": "unreviewed",
             "original_filename": source_filename,
             "image_files": image_file_names,
+            "processing_job_id": job_id,
+            "processing_attempt": attempt,
+            "processing_source_uri": source_uri,
         }
-        record_id = data_manager.createRecord(new_record, user_info)
+        record_id = _processing_record_id(job_id, source_uri)
+        data_manager.prepareProcessingRecord(record_id, new_record, user_info)
         _upload_png_files(rg_id, record_id, png_files)
         if DETECT_WHITESPACE:
             _update_whitespace_results(data_manager, record_id, png_files)

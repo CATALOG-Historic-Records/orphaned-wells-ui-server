@@ -3,6 +3,7 @@ import logging
 import os
 
 from google.cloud import documentai
+from google.api_core import operation as gapic_operation
 import requests
 from ogrre.internal.document_ai_client import get_docai_client as _get_docai_client
 from ogrre.internal import util
@@ -153,6 +154,18 @@ def batch_process_documents(
         skip_human_review=skip_human_review,
     )
     return docai_client.batch_process_documents(request=request)
+
+
+def get_batch_operation(name):
+    client = _get_docai_client()
+    operations = client.transport.operations_client
+    operation = operations.get_operation(name, timeout=30)
+    return gapic_operation.from_gapic(
+        operation,
+        operations,
+        documentai.BatchProcessResponse,
+        metadata_type=documentai.BatchProcessMetadata,
+    )
 
 
 def process_document_content(
