@@ -6,7 +6,8 @@ This directory contains the Terraform configuration used to manage OGRRE backend
 
 - `variables.tf` defines the shared defaults, including the default GKE backends and legacy VM inventory.
 - `main.tf` creates legacy backend VM modules only for names listed in `enabled_legacy_backend_vms`, using definitions from `legacy_backend_vms`.
-- `gke.tf` creates the shared GKE deployment infrastructure unless `enable_gke=false`.
+- `gke.tf` creates the shared GKE deployment infrastructure unless `enable_gke=false`, including per-environment API and batch-worker resource defaults exported to deployment automation.
+- `kubernetes_rbac.tf` creates each backend namespace, its two workload ServiceAccounts, and the API Job-dispatch Role/RoleBinding.
 - `storage.tf` creates one Cloud Storage upload bucket per unique GKE backend bucket name.
 - `modules/backend_vm` contains the reusable legacy VM module, including a compute instance, static IP, and optional VM-owned DNS record.
 - `terraform.tfvars.example` shows optional local override patterns.
@@ -21,11 +22,12 @@ This directory contains the Terraform configuration used to manage OGRRE backend
 - `jq` installed
 - GitHub CLI `gh` installed and authenticated when updating GitHub Actions secrets from the command line
 - Access to the target GCP project for this deployment
+- A Terraform identity authorized to create Kubernetes namespaces, Roles, RoleBindings, and ServiceAccounts in the shared GKE cluster
 - A supported shell to run `bash` scripts
 
 ## Service Accounts
 
-Terraform uses the deployment/Terraform identity only. Do not run Terraform with the backend storage or Document AI runtime keys.
+Terraform uses the Terraform platform identity only. Do not run Terraform with the backend storage or Document AI runtime keys.
 
 Recommended identities:
 
@@ -33,9 +35,10 @@ Recommended identities:
 | --- | --- | --- |
 | Storage runtime, for example `ogrre-storage-runtime` | Backend Cloud Storage upload bucket reads, writes, deletes, and signed/download URL interactions | Local `ogrre/.env` as `STORAGE_SERVICE_KEY`; GitHub secret `STORAGE_SERVICE_KEY_JSON` |
 | Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | Local `ogrre/.env` as `DOCUMENT_AI_SERVICE_KEY`; GitHub secret `DOCUMENT_AI_SERVICE_KEY_JSON` |
-| Deployment/Terraform, for example `ogrre-deployment-ci` | Terraform infrastructure changes plus GitHub Actions Kubernetes/App Engine deployments | Local `GOOGLE_APPLICATION_CREDENTIALS` only when using a key; GitHub secret `DEPLOYMENT_SERVICE_KEY_JSON` |
+| Terraform platform, for example a privileged human operator or dedicated infrastructure account | Terraform cloud infrastructure plus Kubernetes namespaces and runtime RBAC | Local `GOOGLE_APPLICATION_CREDENTIALS` or user ADC |
+| GitHub deployment, `ogrre-deployment-ci` | Workload-only Kubernetes deployments | GitHub secret `DEPLOYMENT_SERVICE_KEY_JSON` |
 
-The deployment/Terraform account needs enough project access to manage the infrastructure in this directory:
+The Terraform platform identity needs enough project and Kubernetes access to manage the infrastructure in this directory:
 
 - `roles/container.admin`
 - `roles/compute.networkAdmin`
@@ -47,7 +50,13 @@ It also needs read/write access to the Terraform state bucket. `roles/storage.ad
 
 Keep Cloud Storage upload-bucket runtime access on the storage runtime service account and Document AI API/runtime access on the Document AI runtime service account. Those runtime identities are configured in the backend app environment, not in Terraform.
 
-For GitHub Actions GKE deploys, the same deployment account also needs Kubernetes RBAC inside the cluster. See `../kubernetes/README.md` for the namespace and workload permissions to bind.
+Terraform uses the Kubernetes provider as well as the Google provider. The
+Terraform platform identity must be able to create Kubernetes Roles and
+RoleBindings; `roles/container.admin` is sufficient. Do not give that broad
+role to `ogrre-deployment-ci` just to deploy application updates. Its existing
+`roles/container.developer` access is used by GitHub Actions for the
+workload-only manifest after Terraform has provisioned the namespace
+foundation.
 
 ## Google Cloud Login
 
@@ -63,10 +72,10 @@ gcloud config set project <YOUR_PROJECT_ID>
 gcloud auth application-default login
 ```
 
-If you use a deployment/Terraform service-account JSON key locally instead of user ADC, set it in your shell before running Terraform:
+If you use a Terraform platform service-account JSON key locally instead of user ADC, set it in your shell before running Terraform:
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/secure/path/ogrre-deployment-ci-service-key.json
+export GOOGLE_APPLICATION_CREDENTIALS=/secure/path/ogrre-terraform-platform-service-key.json
 ```
 
 The import script also unsets `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_AUTHORIZED_USER_CREDENTIALS`, and `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` to avoid conflicts with existing credentials.
@@ -90,6 +99,40 @@ Apply the planned changes:
 ```bash
 terraform apply
 ```
+
+## Existing GKE namespaces
+
+Terraform now owns OGRRE namespaces and runtime Kubernetes RBAC. Before the
+first apply of this change, import every namespace that already exists in the
+cluster; otherwise Terraform will correctly attempt to create it and the
+Kubernetes API will reject the duplicate. Run an import only for namespaces
+that `kubectl get namespace` confirms already exist:
+
+```bash
+terraform import 'kubernetes_namespace_v1.backend["staging"]' uow-staging
+terraform import 'kubernetes_namespace_v1.backend["isgs"]' uow-isgs
+terraform import 'kubernetes_namespace_v1.backend["newts"]' uow-newts
+terraform import 'kubernetes_namespace_v1.backend["osage"]' uow-osage
+terraform import 'kubernetes_namespace_v1.backend["rrc"]' uow-rrc
+```
+
+After import, review the plan. It should adopt the namespaces and create the
+two ServiceAccounts plus `processing-job-dispatcher` Role and RoleBinding for
+each backend. Do not run the former GitHub Actions RBAC bootstrap; Terraform
+replaces it. Namespace resources use `prevent_destroy=true`, so removing a
+backend definition cannot silently remove a namespace and its workloads.
+
+For a new collaborator, add the backend to `gke_backends` or
+`gke_backend_overrides` and run the normal Terraform apply. Terraform creates
+the namespace and worker authorization as part of that same change, so no
+per-collaborator RBAC bootstrap is required.
+
+Set `enable_kubernetes_workloads = false` when cloud resources must remain
+managed but the collaborator is not yet ready for a GKE backend. Such an entry
+does not receive a Kubernetes namespace, runtime ServiceAccounts/RBAC, or a
+`kubernetes_deploy_targets` entry. CA currently uses this setting. Set it to
+`true` when CA is ready; Terraform will then create its Kubernetes foundation
+without replacing its existing cloud resources.
 
 ## GKE deployment infrastructure
 
@@ -120,6 +163,37 @@ gh secret set K8S_DEPLOY_TARGETS \
 When Terraform deployment behavior changes, update the operator-facing frontend docs in `../orphaned-wells-ui/docs/docs/deploy-gcp` as part of the same work so the two repos stay aligned.
 
 See `../kubernetes/README.md` for Kubernetes deployment and operations commands.
+
+### Batch-worker resource configuration
+
+Terraform does not create a permanent worker deployment or additional Google
+Cloud resources for document processing. It exports per-environment values in
+`kubernetes_deploy_targets`; GitHub Actions writes those values into the
+runtime secret used by the API to create short-lived Kubernetes Jobs.
+
+Each backend may set these optional `gke_backends` or
+`gke_backend_overrides` fields:
+
+- `api_uvicorn_workers` controls the API container's Uvicorn worker count.
+- `processing_job_cpu_request`, `processing_job_memory_request`,
+  `processing_job_cpu_limit`, and `processing_job_memory_limit` size each
+  batch-processing Job independently from the always-running API pods.
+- `processing_job_ephemeral_storage` reserves worker scratch space for source
+  downloads and image conversion.
+- `processing_job_active_deadline_seconds` is the maximum Job run time;
+  `processing_job_ttl_seconds_after_finished` retains completed Job metadata
+  and Pod logs for troubleshooting.
+- `processing_job_max_active` limits simultaneous batch Jobs per environment.
+- `enable_kubernetes_workloads` controls whether Terraform also creates the
+  namespace, runtime RBAC, and GitHub Actions deploy target. It defaults to
+  `true`; CA intentionally sets it to `false` until it is ready for GKE.
+
+The default collaborator worker is 1850m CPU and 12Gi memory. Staging uses its
+existing 1 CPU and 6Gi profile. API pod requests are deliberately unchanged by
+this first batch-worker rollout because single-file and ZIP uploads still run
+on API pods. After Terraform changes these output values, update
+`K8S_DEPLOY_TARGETS` and deploy the backend; no batch-worker setting takes
+effect from Terraform alone.
 
 ### Primary DNS state migration
 

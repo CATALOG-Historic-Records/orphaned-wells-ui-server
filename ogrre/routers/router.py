@@ -30,6 +30,10 @@ from ogrre.internal.image_handling import (
 )
 from ogrre.internal.storage_api import rotate_images_in_storage
 from ogrre.internal import batch_document_processing, storage_api
+from ogrre.internal.processing_job_runner import (
+    dispatch_batch_processing_job,
+    reconcile_processing_job,
+)
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
     IdentityProviderError,
@@ -1275,8 +1279,18 @@ async def batch_process_documents(
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail="Project not found")
+    if rg_id not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to upload records for this record group.",
+        )
 
-    req = await request.json()
+    try:
+        req = await request.json()
+    except ValueError as error:
+        raise HTTPException(400, detail="Request body must be valid JSON") from error
+    if not isinstance(req, dict):
+        raise HTTPException(400, detail="Request body must be a JSON object")
     bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
     prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
     output_bucket_name = req.get("outputBucketName") or req.get("output_bucket_name")
@@ -1291,21 +1305,22 @@ async def batch_process_documents(
     if not bucket_name:
         raise HTTPException(400, detail="bucketName is required")
 
+    max_active_jobs = int(os.getenv("PROCESSING_JOB_MAX_ACTIVE", "1"))
+    if max_active_jobs > 0 and (
+        data_manager.countActiveProcessingJobs() >= max_active_jobs
+    ):
+        raise HTTPException(
+            409,
+            detail=(
+                "Another document processing job is already active for this "
+                "environment. Wait for it to finish before starting a new batch."
+            ),
+        )
+
     job_id = batch_document_processing.create_batch_document_job(
-        rg_id=rg_id,
-        user_info=user_info,
-        bucket_name=bucket_name,
-        prefix=prefix,
-        output_bucket_name=output_bucket_name,
-        output_prefix=output_prefix,
-        prevent_duplicates=prevent_duplicates,
-    )
-    background_tasks.add_task(
-        batch_document_processing.process_batch_document_job,
-        job_id=job_id,
-        rg_id=rg_id,
-        user_info=user_info,
         data_manager=data_manager,
+        rg_id=rg_id,
+        user_info=user_info,
         bucket_name=bucket_name,
         prefix=prefix,
         output_bucket_name=output_bucket_name,
@@ -1313,7 +1328,16 @@ async def batch_process_documents(
         run_cleaning_functions=run_cleaning_functions,
         prevent_duplicates=prevent_duplicates,
     )
-    return {"job_id": job_id, "status": "queued"}
+    try:
+        job = dispatch_batch_processing_job(
+            job_id, data_manager, background_tasks=background_tasks
+        )
+    except Exception as error:
+        _log.exception("unable to dispatch batch processing job %s", job_id)
+        raise HTTPException(
+            500, detail="Unable to start document processing"
+        ) from error
+    return {"job_id": job_id, "status": job.get("status", "queued")}
 
 
 @router.post("/batch_process_documents/{rg_id}/check_gcs_path")
@@ -1347,8 +1371,18 @@ async def check_batch_process_documents_gcs_path(
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail="Project not found")
+    if rg_id not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to upload records for this record group.",
+        )
 
-    req = await request.json()
+    try:
+        req = await request.json()
+    except ValueError as error:
+        raise HTTPException(400, detail="Request body must be valid JSON") from error
+    if not isinstance(req, dict):
+        raise HTTPException(400, detail="Request body must be a JSON object")
     bucket_name = req.get("bucketName") or req.get("bucket_name") or req.get("bucket")
     prefix = req.get("prefix") or req.get("folderPath") or req.get("folder") or ""
     prevent_duplicates = req.get(
@@ -1373,13 +1407,21 @@ async def check_batch_process_documents_gcs_path(
 
 @router.get("/batch_process_documents/{job_id}/status")
 async def get_batch_process_documents_status(
-    job_id: str, user_info: dict = Depends(authenticate)
+    job_id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
 ):
     """Return status for a batch Document AI processing job."""
-    job = batch_document_processing.get_batch_document_job(job_id)
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    job = data_manager.getProcessingJob(job_id)
     if job is None:
         raise HTTPException(404, detail="Batch document processing job not found")
-    return job
+    if job.get("record_group_id") not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403, detail="You are not authorized to view this processing job"
+        )
+    return reconcile_processing_job(job_id, data_manager)
 
 
 @router.post("/deploy_processor/{rg_id}")
@@ -1866,6 +1908,7 @@ async def download_records(
             "page",
             "parentAttribute",
             "topLevelAttribute",
+            "user_provided_coordinates",
         ],
         "subattributes": [
             "key",
@@ -1875,6 +1918,7 @@ async def download_records(
             "subattributes",
             "parentAttribute",
             "topLevelAttribute",
+            "user_provided_coordinates",
         ],
     }
 

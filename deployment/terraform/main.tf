@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/google"
       version = ">= 5.0.0, < 7.0.0"
     }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.30.0, < 3.0.0"
+    }
   }
 }
 

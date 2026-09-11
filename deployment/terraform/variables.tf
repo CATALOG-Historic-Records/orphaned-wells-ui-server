@@ -159,59 +159,88 @@ variable "gke_subnetwork" {
 
 variable "gke_backends" {
   type = map(object({
-    namespace                 = optional(string)
-    hostname                  = optional(string)
-    test_hostname             = optional(string)
-    static_ip_name            = optional(string)
-    upload_bucket_name        = optional(string)
-    upload_bucket_location    = optional(string)
-    replicas                  = optional(number)
-    cpu_request               = optional(string)
-    memory_request            = optional(string)
-    cpu_limit                 = optional(string)
-    memory_limit              = optional(string)
-    persistent_disk_size      = optional(string)
-    create_primary_dns_record = optional(bool)
-    create_test_dns_record    = optional(bool)
-    dns_ttl                   = optional(number)
+    namespace                                 = optional(string)
+    hostname                                  = optional(string)
+    test_hostname                             = optional(string)
+    static_ip_name                            = optional(string)
+    upload_bucket_name                        = optional(string)
+    upload_bucket_location                    = optional(string)
+    replicas                                  = optional(number)
+    cpu_request                               = optional(string)
+    memory_request                            = optional(string)
+    cpu_limit                                 = optional(string)
+    memory_limit                              = optional(string)
+    persistent_disk_size                      = optional(string)
+    api_uvicorn_workers                       = optional(number)
+    processing_job_cpu_request                = optional(string)
+    processing_job_memory_request             = optional(string)
+    processing_job_cpu_limit                  = optional(string)
+    processing_job_memory_limit               = optional(string)
+    processing_job_ephemeral_storage          = optional(string)
+    processing_job_active_deadline_seconds    = optional(number)
+    processing_job_ttl_seconds_after_finished = optional(number)
+    processing_job_max_active                 = optional(number)
+    enable_kubernetes_workloads               = optional(bool)
+    create_primary_dns_record                 = optional(bool)
+    create_test_dns_record                    = optional(bool)
+    dns_ttl                                   = optional(number)
   }))
 
   default = {
     staging = {
-      upload_bucket_name = "uploaded_documents_v0"
-      replicas           = 1
-      cpu_request        = "1"
-      memory_request     = "6Gi"
-      cpu_limit          = "1"
-      memory_limit       = "6Gi"
+      upload_bucket_name            = "uploaded_documents_v0"
+      replicas                      = 1
+      cpu_request                   = "1"
+      memory_request                = "6Gi"
+      cpu_limit                     = "1"
+      memory_limit                  = "6Gi"
+      api_uvicorn_workers           = 2
+      processing_job_cpu_request    = "1"
+      processing_job_memory_request = "6Gi"
+      processing_job_cpu_limit      = "1"
+      processing_job_memory_limit   = "6Gi"
     }
     osage = {}
     isgs  = {}
     newts = {}
-    ca    = {}
-    rrc   = {}
+    # CA cloud resources remain managed, but no Kubernetes namespace, runtime
+    # identity, or deploy target is created until CA is ready to be deployed.
+    ca = {
+      enable_kubernetes_workloads = false
+    }
+    rrc = {}
   }
 
-  description = "Default GKE backend definitions. Keys are collaborator names; omitted attributes use OGRRE naming defaults."
+  description = "Default GKE backend definitions. Keys are collaborator names; omitted attributes use OGRRE naming defaults. Set enable_kubernetes_workloads=false to retain cloud configuration without making the backend deployable to Kubernetes."
 }
 
 variable "gke_backend_overrides" {
   type = map(object({
-    namespace                 = optional(string)
-    hostname                  = optional(string)
-    test_hostname             = optional(string)
-    static_ip_name            = optional(string)
-    upload_bucket_name        = optional(string)
-    upload_bucket_location    = optional(string)
-    replicas                  = optional(number)
-    cpu_request               = optional(string)
-    memory_request            = optional(string)
-    cpu_limit                 = optional(string)
-    memory_limit              = optional(string)
-    persistent_disk_size      = optional(string)
-    create_primary_dns_record = optional(bool)
-    create_test_dns_record    = optional(bool)
-    dns_ttl                   = optional(number)
+    namespace                                 = optional(string)
+    hostname                                  = optional(string)
+    test_hostname                             = optional(string)
+    static_ip_name                            = optional(string)
+    upload_bucket_name                        = optional(string)
+    upload_bucket_location                    = optional(string)
+    replicas                                  = optional(number)
+    cpu_request                               = optional(string)
+    memory_request                            = optional(string)
+    cpu_limit                                 = optional(string)
+    memory_limit                              = optional(string)
+    persistent_disk_size                      = optional(string)
+    api_uvicorn_workers                       = optional(number)
+    processing_job_cpu_request                = optional(string)
+    processing_job_memory_request             = optional(string)
+    processing_job_cpu_limit                  = optional(string)
+    processing_job_memory_limit               = optional(string)
+    processing_job_ephemeral_storage          = optional(string)
+    processing_job_active_deadline_seconds    = optional(number)
+    processing_job_ttl_seconds_after_finished = optional(number)
+    processing_job_max_active                 = optional(number)
+    enable_kubernetes_workloads               = optional(bool)
+    create_primary_dns_record                 = optional(bool)
+    create_test_dns_record                    = optional(bool)
+    dns_ttl                                   = optional(number)
   }))
 
   default     = {}
