@@ -1,6 +1,18 @@
 # Defaults for the shared OGRRE project live in variables.tf.
 # Copy this file to terraform.tfvars only when you need local overrides.
 
+# Staging already allows http://localhost:3000 (development) and :3001 (E2E).
+# Add alternate hosts/ports by replacing the bucket's complete origin list.
+# Retain its frontend domain and any local origins still in use.
+# upload_bucket_cors_origins = {
+#   uploaded_documents_v0 = [
+#     "https://uow-carbon.org",
+#     "http://localhost:3000",
+#     "http://localhost:3001",
+#     "http://localhost:3002",
+#   ]
+# }
+
 # Legacy Compute Engine VMs are disabled by default. Re-enable specific
 # legacy VMs by listing names from legacy_backend_vms:
 #
