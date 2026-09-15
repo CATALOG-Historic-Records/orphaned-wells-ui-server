@@ -188,12 +188,42 @@ Each backend may set these optional `gke_backends` or
   namespace, runtime RBAC, and GitHub Actions deploy target. It defaults to
   `true`; CA intentionally sets it to `false` until it is ready for GKE.
 
-The default collaborator worker is 1850m CPU and 12Gi memory. Staging uses its
-existing 1 CPU and 6Gi profile. API pod requests are deliberately unchanged by
-this first batch-worker rollout because single-file and ZIP uploads still run
-on API pods. After Terraform changes these output values, update
-`K8S_DEPLOY_TARGETS` and deploy the backend; no batch-worker setting takes
-effect from Terraform alone.
+The default collaborator worker is 1850m CPU and 12Gi memory. Staging workers
+retain 1 CPU and 6Gi while the staging API targets 1 CPU and 4Gi with two
+Uvicorn workers. Production API defaults target two replicas, each with 1 CPU
+and 6Gi. Production workers retain their larger allocation independently.
+After Terraform changes these output values, update `K8S_DEPLOY_TARGETS` and
+deploy the backend; no resource setting takes effect from Terraform alone.
+
+### API resource reduction
+
+API requests and limits use these targets; replica counts and all worker
+settings remain unchanged:
+
+| Environment | API replicas | API CPU / memory per pod | Worker CPU / memory |
+| --- | --- | --- | --- |
+| Staging | 1 | 1 CPU / 4Gi | 1 CPU / 6Gi |
+| Production collaborators | 2 | 1 CPU / 6Gi | 1850m CPU / 12Gi |
+
+For an otherwise up-to-date workspace, `terraform plan` should show only
+changes under `kubernetes_deploy_targets`: production `cpu_request` and
+`cpu_limit` change from `1850m` to `1`, and `memory_request` and `memory_limit`
+change from `12Gi` to `6Gi`. If the staging reduction has not already been
+applied, its memory outputs also change from `6Gi` to `4Gi`.
+
+There should be no infrastructure resources to add, change, or destroy from
+this sizing change. Review any other changes separately. Apply the output
+update, refresh the GitHub secret using the export instructions above, and
+deploy the affected environments with the updated workflow. Explicit values
+in the secret take precedence over workflow defaults, so older secrets retain
+the previous pod sizes until refreshed. Applying and exporting these values
+does not resize live pods; each backend deployment activates its new target.
+
+Follow the [staging checks and rollback instructions](../kubernetes/README.md#staging-checks-before-reducing-api-resources)
+and deploy production environments one at a time, preserving replicas and
+worker settings. Keep production at 1 CPU / 6Gi while validating 4Gi in staging;
+any further production reduction requires measured headroom. Use
+`gke_backend_overrides` for environment-specific adjustments or rollback.
 
 ### Primary DNS state migration
 
@@ -532,5 +562,5 @@ Review existing CORS and lifecycle settings in the Terraform plan before
 applying these changes. The deletion rule covers only the two temporary
 prefixes; it does not cover `uploads/`, `deleted/`, or caller-owned batch inputs.
 Apply storage configuration before deploying the paired upload frontend/backend.
-API CPU/memory defaults are unchanged pending the staging validation documented
-in [the Kubernetes README](../kubernetes/README.md#browser-directory-upload-rollout).
+API sizing and validation are documented in
+[the Kubernetes README](../kubernetes/README.md#staging-checks-before-reducing-api-resources).

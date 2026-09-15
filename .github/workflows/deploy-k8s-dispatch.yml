@@ -181,18 +181,19 @@ jobs:
           processing_job_ttl_seconds_after_finished="$(field processing_job_ttl_seconds_after_finished)"
           processing_job_max_active="$(field processing_job_max_active)"
 
+          # Explicit Terraform target values take precedence over these defaults.
           if [ "$DEPLOY_ENV" = "staging" ]; then
             : "${replicas:=1}"
+            : "${cpu_request:=1}"
+            : "${memory_request:=4Gi}"
+            : "${cpu_limit:=1}"
+            : "${memory_limit:=4Gi}"
+          else
+            : "${replicas:=2}"
             : "${cpu_request:=1}"
             : "${memory_request:=6Gi}"
             : "${cpu_limit:=1}"
             : "${memory_limit:=6Gi}"
-          else
-            : "${replicas:=2}"
-            : "${cpu_request:=1850m}"
-            : "${memory_request:=12Gi}"
-            : "${cpu_limit:=1850m}"
-            : "${memory_limit:=12Gi}"
           fi
           : "${persistent_disk_size:=20Gi}"
           : "${api_uvicorn_workers:=2}"
@@ -211,30 +212,6 @@ jobs:
             : "${processing_job_memory_request:=12Gi}"
             : "${processing_job_cpu_limit:=1850m}"
             : "${processing_job_memory_limit:=12Gi}"
-          fi
-
-          # Older K8S_DEPLOY_TARGETS outputs requested only 1Gi, which lets
-          # GKE Autopilot place the pod on nodes too small for this 8-worker app.
-          if [ "$cpu_request" = "500m" ]; then
-            if [ "$DEPLOY_ENV" = "staging" ]; then
-              cpu_request="1"
-            else
-              cpu_request="1850m"
-            fi
-          fi
-          if [ "$memory_request" = "1Gi" ]; then
-            if [ "$DEPLOY_ENV" = "staging" ]; then
-              memory_request="6Gi"
-            else
-              memory_request="12Gi"
-            fi
-          fi
-          if [ "$memory_limit" = "4Gi" ]; then
-            if [ "$DEPLOY_ENV" = "staging" ]; then
-              memory_limit="6Gi"
-            else
-              memory_limit="12Gi"
-            fi
           fi
 
           required=(

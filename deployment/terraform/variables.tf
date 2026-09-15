@@ -202,13 +202,14 @@ variable "gke_backends" {
   }))
 
   default = {
+    # Validate 4Gi in staging while collaborator APIs use 6Gi.
     staging = {
       upload_bucket_name            = "uploaded_documents_v0"
       replicas                      = 1
       cpu_request                   = "1"
-      memory_request                = "6Gi"
+      memory_request                = "4Gi"
       cpu_limit                     = "1"
-      memory_limit                  = "6Gi"
+      memory_limit                  = "4Gi"
       api_uvicorn_workers           = 2
       processing_job_cpu_request    = "1"
       processing_job_memory_request = "6Gi"
