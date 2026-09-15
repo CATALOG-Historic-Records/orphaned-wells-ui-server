@@ -3,6 +3,8 @@ import logging
 import aiofiles
 import requests
 import secrets
+import time
+import json
 from fastapi import (
     Request,
     APIRouter,
@@ -16,6 +18,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
+from starlette.concurrency import run_in_threadpool
 from typing import Optional
 
 from ogrre.internal.data_manager import DEFAULT_UNAUTHENTICATED_TEAM, data_manager
@@ -29,10 +32,17 @@ from ogrre.internal.image_handling import (
     check_if_processor_is_deployed,
 )
 from ogrre.internal.storage_api import rotate_images_in_storage
-from ogrre.internal import batch_document_processing, storage_api
+from ogrre.internal import (
+    batch_document_processing,
+    storage_api,
+    directory_upload,
+    document_ai_api,
+    auth,
+)
 from ogrre.internal.processing_job_runner import (
     dispatch_batch_processing_job,
     reconcile_processing_job,
+    processing_worker_has_stopped,
 )
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
@@ -569,10 +579,23 @@ async def get_records(
         elif get_by == "record_group":
             rg_id = data.get("id", None)
             if rg_id is not None:
+                if not REQUIRE_AUTH:
+                    user_info = _get_anonymous_user_from_request(request)
+                if rg_id not in data_manager.getUserRecordGroups(user_info):
+                    raise HTTPException(
+                        403, detail="You are not authorized to view these records"
+                    )
+                # Read activity first so a completion during the records query
+                # causes one final refresh rather than leaving stale rows visible.
+                has_active_processing_jobs = data_manager.hasActiveProcessingJobs(rg_id)
                 records, record_count = data_manager.fetchRecordsByRecordGroup(
                     user_info, rg_id, page, records_per_page, sort_by, filter_by
                 )
-                return {"records": records, "record_count": record_count}
+                return {
+                    "records": records,
+                    "record_count": record_count,
+                    "has_active_processing_jobs": has_active_processing_jobs,
+                }
     elif get_by == "team":
         sort_by = data.get(
             "sort", ["dateCreated", 1]
@@ -1305,18 +1328,6 @@ async def batch_process_documents(
     if not bucket_name:
         raise HTTPException(400, detail="bucketName is required")
 
-    max_active_jobs = int(os.getenv("PROCESSING_JOB_MAX_ACTIVE", "1"))
-    if max_active_jobs > 0 and (
-        data_manager.countActiveProcessingJobs() >= max_active_jobs
-    ):
-        raise HTTPException(
-            409,
-            detail=(
-                "Another document processing job is already active for this "
-                "environment. Wait for it to finish before starting a new batch."
-            ),
-        )
-
     job_id = batch_document_processing.create_batch_document_job(
         data_manager=data_manager,
         rg_id=rg_id,
@@ -1329,8 +1340,11 @@ async def batch_process_documents(
         prevent_duplicates=prevent_duplicates,
     )
     try:
-        job = dispatch_batch_processing_job(
-            job_id, data_manager, background_tasks=background_tasks
+        job = await run_in_threadpool(
+            dispatch_batch_processing_job,
+            job_id,
+            data_manager,
+            background_tasks=background_tasks,
         )
     except Exception as error:
         _log.exception("unable to dispatch batch processing job %s", job_id)
@@ -1338,6 +1352,249 @@ async def batch_process_documents(
             500, detail="Unable to start document processing"
         ) from error
     return {"job_id": job_id, "status": job.get("status", "queued")}
+
+
+def _require_upload_access(rg_id, request, user_info):
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(403, detail="You are not authorized to upload records.")
+    if rg_id not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to upload records for this record group.",
+        )
+    return user_info
+
+
+def _directory_upload_config():
+    direct = (
+        storage_api.STORAGE_BACKEND == "google"
+        and bool(storage_api.BUCKET_NAME)
+        and document_ai_api.DOCUMENT_AI_BACKEND == "google"
+    )
+    # The legacy path is only available in development; a GKE API must not
+    # silently take over document processing when storage is misconfigured.
+    legacy = os.getenv("PROCESSING_JOB_MODE", "background") == "background"
+    return {
+        "mode": "direct" if direct else "legacy" if legacy else "unavailable",
+        **directory_upload.limits(),
+    }
+
+
+def _require_directory_session(rg_id, session_id, user_info):
+    session = data_manager.getDirectoryUpload(session_id, rg_id, user_info)
+    if session is None:
+        raise HTTPException(404, detail="Directory upload session not found")
+    return session
+
+
+@router.get("/directory_uploads/{rg_id}/config")
+def get_directory_upload_config(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    _require_upload_access(rg_id, request, user_info)
+    return _directory_upload_config()
+
+
+@router.post("/directory_uploads/{rg_id}/sessions")
+async def create_directory_upload(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    user_info = _require_upload_access(rg_id, request, user_info)
+    if _directory_upload_config()["mode"] != "direct":
+        raise HTTPException(
+            400,
+            detail="Direct directory uploads require Google storage and Document AI.",
+        )
+    try:
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 2 * 1024 * 1024:
+                raise HTTPException(413, detail="Directory manifest is too large")
+            body.extend(chunk)
+        session = await run_in_threadpool(
+            data_manager.createDirectoryUpload, rg_id, user_info, json.loads(body)
+        )
+        return {
+            "session_id": session["_id"],
+            "expires_at": session["expires_at"],
+            "files": session["files"],
+            "job": data_manager.getProcessingJob(session["_id"]),
+        }
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+
+@router.post("/directory_uploads/{rg_id}/sessions/{session_id}/files/{file_id}")
+def create_directory_file_upload(
+    rg_id: str,
+    session_id: str,
+    file_id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    user_info = _require_upload_access(rg_id, request, user_info)
+    session = _require_directory_session(rg_id, session_id, user_info)
+    origin = request.headers.get("origin")
+    if not origin or origin not in auth.parse_allowed_origins():
+        raise HTTPException(403, detail="Upload origin is not allowed")
+    try:
+        return data_manager.getDirectoryUploadFile(session, file_id, origin)
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+    except Exception as error:
+        # Storage errors can contain upload credentials; do not echo or log URLs.
+        _log.error(
+            "unable to authorize directory upload session=%s file=%s",
+            session_id,
+            file_id,
+        )
+        raise HTTPException(
+            502, detail="Unable to prepare file upload. Try again."
+        ) from error
+
+
+@router.post("/directory_uploads/{rg_id}/sessions/{session_id}/finalize")
+def finalize_directory_upload(
+    rg_id: str,
+    session_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    user_info = _require_upload_access(rg_id, request, user_info)
+    session = _require_directory_session(rg_id, session_id, user_info)
+    try:
+        job = data_manager.finalizeDirectoryUpload(session, user_info)
+        return dispatch_batch_processing_job(
+            job["job_id"], data_manager, background_tasks
+        )
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+
+@router.get("/processing_jobs/scopes")
+def get_processing_history_scopes(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    return data_manager.getProcessingHistoryProjects(user_info)
+
+
+@router.post("/processing_jobs/history")
+async def get_all_processing_job_history(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    try:
+        body = await request.json()
+        return await run_in_threadpool(
+            data_manager.fetchAllProcessingJobHistory, user_info, body
+        )
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(403, detail=str(error)) from error
+
+
+@router.get("/processing_jobs/{rg_id}")
+def list_processing_jobs(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    if rg_id not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403, detail="You are not authorized to view these processing jobs"
+        )
+    return data_manager.listProcessingJobs(rg_id)
+
+
+def _require_processing_history_access(rg_id, request, user_info):
+    if not REQUIRE_AUTH:
+        user_info = _get_anonymous_user_from_request(request)
+    if rg_id not in data_manager.getUserRecordGroups(user_info):
+        raise HTTPException(
+            403, detail="You are not authorized to view these processing jobs"
+        )
+    return user_info
+
+
+@router.post("/processing_jobs/{rg_id}/history")
+async def get_processing_job_history(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    _require_processing_history_access(rg_id, request, user_info)
+    try:
+        body = await request.json()
+        return await run_in_threadpool(
+            data_manager.fetchProcessingJobHistory, rg_id, body
+        )
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+
+@router.get("/processing_jobs/{rg_id}/{job_id}")
+def get_processing_job_details(
+    rg_id: str,
+    job_id: str,
+    request: Request,
+    page: int = Query(0, ge=0, le=100000),
+    page_size: int = Query(25, ge=1, le=100),
+    file_kind: str = Query("records", pattern="^(records|source|failed|skipped)$"),
+    user_info: dict = Depends(authenticate),
+):
+    user_info = _require_processing_history_access(rg_id, request, user_info)
+    result = data_manager.fetchProcessingJobDetails(
+        rg_id, job_id, file_kind, page, page_size
+    )
+    if result is None:
+        raise HTTPException(404, detail="Processing job not found")
+    reason = data_manager.processingJobRetryReason(result["job"], user_info)
+    if reason is None:
+        try:
+            # The summary excludes worker configuration; use it only for this check.
+            if not processing_worker_has_stopped(data_manager.getProcessingJob(job_id)):
+                reason = "The previous worker is still stopping. Try again shortly."
+        except Exception:
+            reason = (
+                "Unable to confirm the previous worker has stopped. Try again shortly."
+            )
+    result["retry"] = {"allowed": reason is None, "reason": reason}
+    return result
+
+
+@router.post("/processing_jobs/{rg_id}/{job_id}/retry")
+def retry_processing_job(
+    rg_id: str,
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    user_info = _require_upload_access(rg_id, request, user_info)
+    job = data_manager.getProcessingJob(job_id)
+    if job is None or job["record_group_id"] != rg_id:
+        raise HTTPException(404, detail="Processing job not found")
+    session = _require_directory_session(rg_id, job_id, user_info)
+    if not processing_worker_has_stopped(job):
+        raise HTTPException(
+            409, detail="The previous worker is still stopping. Try again shortly."
+        )
+    if session["expires_at"] <= time.time():
+        raise HTTPException(
+            400,
+            detail="The upload has expired. Contact an administrator to recover failed records.",
+        )
+    job = data_manager.retryProcessingJob(job_id)
+    if job is None:
+        raise HTTPException(
+            409, detail="This job cannot be retried in its current state"
+        )
+    return dispatch_batch_processing_job(job_id, data_manager, background_tasks)
 
 
 @router.post("/batch_process_documents/{rg_id}/check_gcs_path")
@@ -1421,7 +1678,7 @@ async def get_batch_process_documents_status(
         raise HTTPException(
             403, detail="You are not authorized to view this processing job"
         )
-    return reconcile_processing_job(job_id, data_manager)
+    return await run_in_threadpool(reconcile_processing_job, job_id, data_manager)
 
 
 @router.post("/deploy_processor/{rg_id}")
