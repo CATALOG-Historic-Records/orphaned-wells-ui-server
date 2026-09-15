@@ -157,6 +157,21 @@ variable "gke_subnetwork" {
   description = "VPC subnetwork used by the GKE cluster."
 }
 
+variable "upload_bucket_cors_origins" {
+  type        = map(list(string))
+  default     = {}
+  description = "Optional complete CORS origin list per upload bucket. Defaults to frontend custom domains, plus http://localhost:3000 and http://localhost:3001 for the staging bucket. Overrides replace the complete list."
+
+  validation {
+    condition = alltrue(flatten([
+      for origins in values(var.upload_bucket_cors_origins) : [
+        for origin in origins : can(regex("^https?://[^/]+$", origin))
+      ]
+    ]))
+    error_message = "CORS origins must be explicit HTTP(S) origins without trailing slashes."
+  }
+}
+
 variable "gke_backends" {
   type = map(object({
     namespace                                 = optional(string)
@@ -187,13 +202,14 @@ variable "gke_backends" {
   }))
 
   default = {
+    # Validate 4Gi in staging while collaborator APIs use 6Gi.
     staging = {
       upload_bucket_name            = "uploaded_documents_v0"
       replicas                      = 1
       cpu_request                   = "1"
-      memory_request                = "6Gi"
+      memory_request                = "4Gi"
       cpu_limit                     = "1"
-      memory_limit                  = "6Gi"
+      memory_limit                  = "4Gi"
       api_uvicorn_workers           = 2
       processing_job_cpu_request    = "1"
       processing_job_memory_request = "6Gi"

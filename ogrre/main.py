@@ -7,6 +7,9 @@ import multiprocessing
 import logging
 from dotenv import load_dotenv
 import argparse
+import asyncio
+from contextlib import asynccontextmanager, suppress
+from starlette.concurrency import run_in_threadpool
 
 # fetch environment variables
 load_dotenv()
@@ -22,7 +25,30 @@ _log = logging.getLogger(__name__)
 from ogrre.routers import router
 from ogrre.internal import storage_api, auth
 
-app = FastAPI()
+
+async def maintain_jobs():
+    from ogrre.internal.processing_job_runner import maintain_processing_jobs
+
+    while True:
+        try:
+            await run_in_threadpool(maintain_processing_jobs, router.data_manager)
+        except Exception:
+            _log.exception("processing job maintenance failed")
+        await asyncio.sleep(30)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(maintain_jobs())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")

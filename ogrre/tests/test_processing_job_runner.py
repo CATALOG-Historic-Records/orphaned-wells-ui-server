@@ -9,6 +9,15 @@ from ogrre.internal.processing_job_runner import (
 
 
 class ProcessingJobManifestTests(unittest.TestCase):
+    def test_job_names_distinguish_full_session_ids_and_retry_attempts(self):
+        self.assertNotEqual(
+            _processing_job_name("a" * 24 + "b" * 8),
+            _processing_job_name("a" * 24 + "c" * 8),
+        )
+        self.assertNotEqual(
+            _processing_job_name("a" * 32), _processing_job_name("a" * 32, 1)
+        )
+
     def test_worker_manifest_uses_the_durable_job_id_and_configured_resources(self):
         job_id = "a" * 32
         with patch.dict(
