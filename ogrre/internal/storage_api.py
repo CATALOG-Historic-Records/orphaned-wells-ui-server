@@ -677,3 +677,70 @@ def rotate_images_in_storage(
         _log.info(f"[rotate_images_in_storage]   Saved to: {dest_url}")
 
     return results
+
+
+def get_existing_blobs_set(prefixes, bucket_name=BUCKET_NAME):
+    """
+    Build a set of all existing storage keys under the specified prefix or list of prefixes.
+    Prevents making thousands of individual HTTP GET requests for individual file checks.
+    """
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+
+    existing = set()
+    for prefix in prefixes:
+        if not prefix:
+            continue
+        prefix_clean = prefix.strip("/")
+        if _is_local():
+            base = _storage_path(prefix_clean)
+            if os.path.exists(base):
+                if os.path.isfile(base):
+                    existing.add(prefix_clean)
+                else:
+                    for root, _, files in os.walk(base):
+                        for name in files:
+                            full_path = os.path.join(root, name)
+                            rel_path = os.path.relpath(full_path, LOCAL_STORAGE_ROOT).replace("\\", "/")
+                            existing.add(rel_path)
+        else:
+            try:
+                _, bucket = _get_bucket(bucket_name=bucket_name)
+                blobs = bucket.list_blobs(prefix=prefix_clean)
+                for blob in blobs:
+                    existing.add(blob.name)
+            except Exception as e:
+                _log.warning(f"Error listing blobs for prefix {prefix_clean}: {e}")
+
+    return existing
+
+
+def download_files_bytes_parallel(keys, bucket_name=BUCKET_NAME, max_workers=10):
+    """
+    Downloads multiple storage files concurrently using ThreadPoolExecutor.
+    Returns a dict mapping key -> file_bytes.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not keys:
+        return {}
+
+    results = {}
+
+    def _download_one(key):
+        try:
+            data = download_file_bytes(key, bucket_name=bucket_name)
+            return key, data
+        except Exception as e:
+            _log.warning(f"Parallel download failed for {key}: {e}")
+            return key, None
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(keys))) as executor:
+        futures = [executor.submit(_download_one, k) for k in keys]
+        for future in futures:
+            key, data = future.result()
+            if data is not None:
+                results[key] = data
+
+    return results
+

@@ -2121,8 +2121,10 @@ async def download_records(
     export_json: bool = False,
     export_images: bool = False,
     export_embedded_pdfs: bool = False,
+    reconstructed_pdfs: bool = False,
     output_name: str = None,
     user_info: dict = Depends(authenticate),
+
 ):
     """Download records for given project ID.
 
@@ -2272,10 +2274,17 @@ async def download_records(
         else:
             documents = []
 
-        if export_embedded_pdfs:
-            embedded_pdfs = util.compile_embedded_pdfs(records)
+        if export_embedded_pdfs or reconstructed_pdfs:
+            embedded_pdfs = util.compile_embedded_pdfs(
+                records,
+                db=data_manager.db,
+                output_name=output_name,
+                reconstructed_pdfs=reconstructed_pdfs,
+            )
         else:
             embedded_pdfs = []
+
+
 
         ## TODO: make this file name more unique, so multiple downloads dont have the same name
         download_log_file = f"zip_log_{output_file_id}.txt"
@@ -2308,8 +2317,10 @@ async def download_project_records_by_document_types(
     export_json: bool = False,
     export_images: bool = False,
     export_embedded_pdfs: bool = False,
+    reconstructed_pdfs: bool = False,
     output_name: str = None,
     user_info: dict = Depends(authenticate),
+
 ):
     req = await request.json()
 
@@ -2385,10 +2396,17 @@ async def download_project_records_by_document_types(
         else:
             documents = []
 
-        if export_embedded_pdfs:
-            embedded_pdfs = util.compile_embedded_pdfs(records)
+        if export_embedded_pdfs or reconstructed_pdfs:
+            embedded_pdfs = util.compile_embedded_pdfs(
+                records,
+                db=data_manager.db,
+                output_name=output_name,
+                reconstructed_pdfs=reconstructed_pdfs,
+            )
         else:
             embedded_pdfs = []
+
+
 
         download_log_file = f"zip_log_{output_file_id}.txt"
         z = util.zip_files_stream(
