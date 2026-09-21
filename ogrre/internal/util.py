@@ -449,17 +449,15 @@ def extract_original_filename_base(record_name: str) -> str:
     return name
 
 
-def compile_embedded_pdfs(records, db=None, output_name=None, reconstructed_pdfs=False):
+def compile_embedded_pdfs(
+    records, db=None, output_name=None, export_embedded_pdfs=True, reconstructed_pdfs=False
+):
     """
     Generates embedded searchable PDF bytes for each record in-memory using ogrre_embed.
-    When reconstructed_pdfs is True, also reconstructs original pre-split PDF documents
-    using MongoDB splitter_mappings, and creates a single combined master PDF for the project export.
-
-    Optimized using:
-      - fitz for fast in-memory PDF stream merging
-      - ThreadPoolExecutor for parallel image downloads from GCS
-      - Bulk GCS blob pre-checking to eliminate thousands of per-file HTTP GET requests
-      - gc.collect() after processing each document to minimize RAM footprint
+    When export_embedded_pdfs is True, includes individual record PDFs under documents/.
+    When reconstructed_pdfs is True, reconstructs original pre-split PDF documents
+    using MongoDB splitter_mappings, and creates a single combined master PDF for the project export
+    under reconstructed_documents/.
     """
     try:
         from ogrre_embed import make_pdf_searchable
@@ -560,14 +558,17 @@ def compile_embedded_pdfs(records, db=None, output_name=None, reconstructed_pdfs
                 pdf_bytes = doc.tobytes()
                 doc.close()
 
-            arcname = f"documents/{record_name}/{record_name}_searchable.pdf"
-            embedded_pdfs.append((arcname, pdf_bytes))
+            if export_embedded_pdfs:
+                arcname = f"documents/{record_name}/{record_name}_searchable.pdf"
+                embedded_pdfs.append((arcname, pdf_bytes))
+
             record_pdf_map[record_id] = pdf_bytes
         except Exception as e:
             _log.error(f"Failed to generate PDF for record {record_id}: {e}")
             doc.close()
 
         gc.collect()
+
 
     # 5 & 6. Reconstruct Original PDFs and Combine Project PDF only when reconstructed_pdfs == True
     if reconstructed_pdfs:

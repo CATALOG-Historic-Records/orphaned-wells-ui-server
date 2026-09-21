@@ -2279,6 +2279,7 @@ async def download_records(
                 records,
                 db=data_manager.db,
                 output_name=output_name,
+                export_embedded_pdfs=export_embedded_pdfs,
                 reconstructed_pdfs=reconstructed_pdfs,
             )
         else:
@@ -2401,6 +2402,7 @@ async def download_project_records_by_document_types(
                 records,
                 db=data_manager.db,
                 output_name=output_name,
+                export_embedded_pdfs=export_embedded_pdfs,
                 reconstructed_pdfs=reconstructed_pdfs,
             )
         else:
