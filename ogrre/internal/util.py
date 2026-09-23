@@ -8,11 +8,13 @@ import csv
 import io
 import json
 import copy
+import gc
 from pathlib import Path
 import re
 import importlib.metadata as importlib_metadata
 
 import fitz
+
 from ogrre_data_cleaning import CLEANING_FUNCTIONS
 from ogrre.internal import storage_api
 from ogrre.internal import schema_validation
@@ -492,43 +494,117 @@ def compute_total_size(local_file_paths, gcs_paths):
     return total_size
 
 
-def compile_embedded_pdfs(records):
+def extract_original_filename_base(record_name: str) -> str:
+    """
+    Extracts the base filename of the original document before Document AI splitting.
+    Pattern: <original_filename_base>_<doc_type>_<occurrence>
+    e.g. "PLUGGING RECORD_930000042610_1_Formation_Record_V1_1" -> "PLUGGING RECORD_930000042610_1"
+         "Doc123_PLUGGING RECORD_1" -> "Doc123"
+         "01-25 Basin T1_Receipts_Other_Sources_1-A_1" -> "01-25 Basin T1"
+    """
+    if not record_name:
+        return "document"
+    name = record_name[:-4] if record_name.lower().endswith(".pdf") else record_name
+
+    match = re.search(r"^(.*?)(?:_[A-Za-z0-9_ -]+?_\d+)$", name)
+    if match and match.group(1):
+        return match.group(1)
+
+    parts = name.rsplit("_", 2)
+    if len(parts) >= 3 and parts[-1].isdigit():
+        return parts[0]
+
+    return name
+
+
+def compile_embedded_pdfs(
+    records, db=None, output_name=None, export_embedded_pdfs=True, reconstructed_pdfs=False
+):
     """
     Generates embedded searchable PDF bytes for each record in-memory using ogrre_embed.
-    Returns a list of tuples: [(arcname, pdf_bytes), ...]
+    When export_embedded_pdfs is True, includes individual record PDFs under documents/.
+    When reconstructed_pdfs is True, reconstructs original pre-split PDF documents
+    using MongoDB splitter_mappings, and creates a single combined master PDF for the project export
+    under reconstructed_documents/.
     """
     try:
         from ogrre_embed import make_pdf_searchable
     except ImportError:
-        _log.error(
-            "ogrre_embed package is not installed; cannot generate embedded PDFs."
+        make_pdf_searchable = None
+        _log.warning(
+            "ogrre_embed package is not installed; will create standard PDF without OCR text layer."
         )
+
+    if not records:
         return []
 
-    embedded_pdfs = []
-    for record in records or []:
+    # 1. Bulk GCS Pre-Checking for image blobs
+    rg_ids = list(
+        {r.get("record_group_id") for r in records if r.get("record_group_id")}
+    )
+    prefixes = [f"uploads/{rg_id}" for rg_id in rg_ids]
+    existing_blobs = storage_api.get_existing_blobs_set(
+        prefixes, bucket_name=BUCKET_NAME
+    )
+
+    # 2. Collect image keys to download in parallel
+    keys_to_download = []
+    record_images_map = {}
+    for record in records:
         rg_id = record.get("record_group_id")
         record_id = str(record.get("_id", ""))
         if not rg_id or not record_id:
             continue
+
+        image_files = record.get("image_files") or []
+        valid_keys = []
+        for img_name in image_files:
+            if not imageIsValid(img_name):
+                continue
+            key = f"uploads/{rg_id}/{record_id}/{img_name}"
+            if existing_blobs and key not in existing_blobs:
+                continue
+            valid_keys.append(key)
+            keys_to_download.append(key)
+        record_images_map[record_id] = valid_keys
+
+    # 3. Parallel Image Downloading using ThreadPoolExecutor
+    _log.info(
+        f"Downloading {len(keys_to_download)} page images in parallel with ThreadPoolExecutor..."
+    )
+    downloaded_images = storage_api.download_files_bytes_parallel(
+        keys_to_download, bucket_name=BUCKET_NAME, max_workers=10
+    )
+
+    embedded_pdfs = []
+    record_pdf_map = {}
+    grouped_by_orig_base = {}
+
+    # 4. Generate Searchable PDF for each Record
+    for record in records:
+        rg_id = record.get("record_group_id")
+        record_id = str(record.get("_id", ""))
+        if not rg_id or not record_id:
+            continue
+
         record_name = record.get("name") or record.get("filename") or record_id
         if record_name.lower().endswith(".pdf"):
             record_name = record_name[:-4]
 
-        image_files = record.get("image_files") or []
-        if not image_files:
+        orig_base = extract_original_filename_base(record_name)
+        grouped_by_orig_base.setdefault(orig_base, []).append((record, record_name))
+
+        image_keys = record_images_map.get(record_id, [])
+        if not image_keys:
             continue
 
         doc = fitz.open()
         pages_added = 0
-        for img_name in image_files:
-            if not imageIsValid(img_name):
+        for blob_key in image_keys:
+            img_bytes = downloaded_images.get(blob_key)
+            if not img_bytes:
                 continue
-            blob_key = f"uploads/{rg_id}/{record_id}/{img_name}"
             try:
-                img_bytes = storage_api.download_file_bytes(blob_key)
-                if not img_bytes:
-                    continue
                 img_doc = fitz.open(stream=img_bytes, filetype="png")
                 pdf_bytes = img_doc.convert_to_pdf()
                 img_pdf = fitz.open("pdf", pdf_bytes)
@@ -537,23 +613,127 @@ def compile_embedded_pdfs(records):
                 img_pdf.close()
                 pages_added += 1
             except Exception as e:
-                _log.warning(
-                    f"Unable to add image {blob_key} to PDF for embedded pdf: {e}"
-                )
+                _log.warning(f"Unable to add image {blob_key} to PDF: {e}")
 
         if pages_added == 0:
             doc.close()
             continue
 
         try:
-            pdf_bytes = make_pdf_searchable(doc, record)
-            arcname = f"documents/{record_name}/{record_name}_searchable.pdf"
-            embedded_pdfs.append((arcname, pdf_bytes))
+            if make_pdf_searchable:
+                pdf_bytes = make_pdf_searchable(doc, record)
+            else:
+                pdf_bytes = doc.tobytes()
+                doc.close()
+
+            if export_embedded_pdfs:
+                arcname = f"documents/{record_name}/{record_name}_searchable.pdf"
+                embedded_pdfs.append((arcname, pdf_bytes))
+
+            record_pdf_map[record_id] = pdf_bytes
         except Exception as e:
-            _log.error(f"Failed to generate searchable PDF for record {record_id}: {e}")
+            _log.error(f"Failed to generate PDF for record {record_id}: {e}")
             doc.close()
 
+        gc.collect()
+
+
+    # 5 & 6. Reconstruct Original PDFs and Combine Project PDF only when reconstructed_pdfs == True
+    if reconstructed_pdfs:
+        reconstructed_pdfs_list = []
+        for orig_base, rec_tuples in grouped_by_orig_base.items():
+            mapping_doc = None
+            if db is not None:
+                try:
+                    mapping_doc = db.splitter_mappings.find_one(
+                        {"original_filename_base": orig_base}
+                    )
+                except Exception as e:
+                    _log.warning(f"Failed to query splitter_mappings for {orig_base}: {e}")
+
+            ordered_pdf_bytes_list = []
+            if mapping_doc and "segments" in mapping_doc:
+                segments = mapping_doc["segments"]
+                segment_type_map = {}
+                for seg in segments:
+                    seg_type = seg.get("type")
+                    seg_idx = seg.get("segment_index")
+                    if seg_type:
+                        segment_type_map.setdefault(seg_type, []).append(seg_idx)
+
+                type_counter = {}
+                rec_with_index = []
+                for rec_obj, rec_n in rec_tuples:
+                    r_id = str(rec_obj.get("_id", ""))
+                    p_bytes = record_pdf_map.get(r_id)
+                    if not p_bytes:
+                        continue
+
+                    m = re.search(r"_(.+?)_\d+$", rec_n)
+                    d_type = m.group(1) if m else None
+
+                    seg_idx = 999
+                    if d_type and d_type in segment_type_map:
+                        type_counter[d_type] = type_counter.get(d_type, 0)
+                        occ = type_counter[d_type]
+                        type_counter[d_type] += 1
+                        if occ < len(segment_type_map[d_type]):
+                            seg_idx = segment_type_map[d_type][occ]
+
+                    rec_with_index.append((seg_idx, rec_n, p_bytes))
+
+                rec_with_index.sort(key=lambda x: x[0])
+                ordered_pdf_bytes_list = [item[2] for item in rec_with_index]
+            else:
+                def _sort_key(tup):
+                    rec_n = tup[1]
+                    m = re.search(r"_(\d+)$", rec_n)
+                    return int(m.group(1)) if m else rec_n
+
+                rec_tuples_sorted = sorted(rec_tuples, key=_sort_key)
+                for rec_obj, _ in rec_tuples_sorted:
+                    r_id = str(rec_obj.get("_id", ""))
+                    p_bytes = record_pdf_map.get(r_id)
+                    if p_bytes:
+                        ordered_pdf_bytes_list.append(p_bytes)
+
+            if not ordered_pdf_bytes_list:
+                continue
+
+            master_orig_doc = fitz.open()
+            for p_bytes in ordered_pdf_bytes_list:
+                sub_doc = fitz.open("pdf", p_bytes)
+                master_orig_doc.insert_pdf(sub_doc)
+                sub_doc.close()
+
+            reconstructed_bytes = master_orig_doc.tobytes()
+            master_orig_doc.close()
+
+            clean_base = sanitize_filename_component(orig_base, default="reconstructed")
+            reconstructed_arcname = f"reconstructed_documents/{clean_base}.pdf"
+            embedded_pdfs.append((reconstructed_arcname, reconstructed_bytes))
+            reconstructed_pdfs_list.append((clean_base, reconstructed_bytes))
+
+            gc.collect()
+
+        if reconstructed_pdfs_list:
+            combined_doc = fitz.open()
+            for _, rec_bytes in reconstructed_pdfs_list:
+                sub_doc = fitz.open("pdf", rec_bytes)
+                combined_doc.insert_pdf(sub_doc)
+                sub_doc.close()
+
+            combined_bytes = combined_doc.tobytes()
+            combined_doc.close()
+
+            proj_name = sanitize_filename_component(output_name, default="project")
+            combined_arcname = f"reconstructed_documents/{proj_name}_combined.pdf"
+            embedded_pdfs.append((combined_arcname, combined_bytes))
+
+            gc.collect()
+
     return embedded_pdfs
+
 
 
 @time_it
@@ -563,6 +743,7 @@ def zip_files_stream(
     """
     Streams a ZIP file directly without writing to temp files.
     Includes optional local files (JSON and/or csv), skips missing ones gracefully.
+    Uses bulk GCS blob pre-checking to eliminate thousands of per-file HTTP GET calls.
     """
     start_total = time.time()
     log_file = None
@@ -607,12 +788,33 @@ def zip_files_stream(
             zs.write_iter(arcname, [pdf_bytes])
 
     gcs_paths = generate_gcs_paths(documents)
+
+    # Bulk GCS Blob Pre-checking
+    rg_ids = list(
+        {
+            doc.get("rg_id")
+            for doc in (documents.values() if isinstance(documents, dict) else [])
+            if doc.get("rg_id")
+        }
+    )
+    prefixes = [f"uploads/{rg_id}" for rg_id in rg_ids]
+    existing_blobs = (
+        storage_api.get_existing_blobs_set(prefixes, bucket_name=BUCKET_NAME)
+        if prefixes
+        else None
+    )
+
     i = 0
     not_found_amt = 0
     for gcs_path in gcs_paths:
         i += 1
-        # check if blob exists before writing to ZIP
-        if not storage_api.file_exists(gcs_path, bucket_name=BUCKET_NAME):
+        # Check if blob exists in bulk set (or fallback to file_exists)
+        exists = (
+            (gcs_path in existing_blobs)
+            if existing_blobs is not None
+            else storage_api.file_exists(gcs_path, bucket_name=BUCKET_NAME)
+        )
+        if not exists:
             not_found_amt += 1
             logg(f"image #{i} not found, skipping: {gcs_path}", level="info")
             continue
@@ -660,6 +862,7 @@ def zip_files_stream(
         )
 
     return streaming_generator()
+
 
 
 def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
