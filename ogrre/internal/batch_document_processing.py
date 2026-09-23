@@ -920,12 +920,15 @@ def _update_record_with_attributes(
         )
 
     attributes_list = util.normalize_record_attribute_tree(attributes_list)
+    options = {}
 
     for attribute in attributes_list:
         if run_cleaning_functions:
             util.cleanRecordAttribute(
                 processor_attributes=processor_attributes_dictionary,
                 attribute=attribute,
+                attributes_list=attributes_list,
+                options=options,
             )
 
     sorted_attributes_list, _ = util.sortRecordAttributes(

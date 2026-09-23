@@ -686,16 +686,40 @@ def create_processor_attribute_tree(attributes):
     return attribute_tree
 
 
-def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
+def cleanRecordAttribute(
+    processor_attributes,
+    attribute,
+    subattributeKey=None,
+    attributes_list=None,
+    options=None,
+):
+    if options is None:
+        options = {}
+
     unclean_val = attribute.get("value")
     ## regardless of whether we clean the value, we must update uncleaned value
     _log.info(f"updating uncleaned value to {unclean_val}")
     attribute["uncleaned_value"] = unclean_val
-    if not processor_attributes or not isinstance(attribute, dict):
+    if not isinstance(attribute, dict):
         attribute["cleaned"] = False
         return False
 
     attribute_key = subattributeKey or get_attribute_identifier(attribute)
+    raw_key = attribute.get("key")
+
+    target_key = None
+    if raw_key in ["lease_field", "lease_operator"]:
+        target_key = raw_key
+    elif attribute_key in ["lease_field", "lease_operator"]:
+        target_key = attribute_key
+
+    if target_key and unclean_val is not None and unclean_val != "":
+        options[target_key] = unclean_val
+
+    if not processor_attributes:
+        attribute["cleaned"] = False
+        return False
+
     attribute_schema = processor_attributes.get(attribute_key)
     if attribute_schema:
         cleaning_function_name = attribute_schema.get("cleaning_function")
@@ -707,13 +731,18 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
             cleaning_function = CLEANING_FUNCTIONS.get(cleaning_function_name)
             if cleaning_function:
                 try:
-                    cleaned_val = cleaning_function(unclean_val)
+                    options_context = dict(options)
+                    options_context["attribute_key"] = target_key or attribute_key
+                    cleaned_val = cleaning_function(unclean_val, options=options_context)
                     _log.debug(f"CLEANED: {unclean_val} : {cleaned_val}")
                     attribute["value"] = cleaned_val
                     attribute["normalized_value"] = cleaned_val
                     attribute["cleaned"] = True
                     attribute["cleaning_error"] = False
                     attribute["last_cleaned"] = time.time()
+
+                    if target_key and cleaned_val is not None and cleaned_val != "":
+                        options[target_key] = cleaned_val
                 except Exception as e:
                     _log.error(f"unable to clean {attribute_key}: {e}")
                     attribute["cleaning_error"] = f"{e}"
@@ -727,7 +756,11 @@ def cleanRecordAttribute(processor_attributes, attribute, subattributeKey=None):
     for subattribute in attribute.get("subattributes") or []:
         subattribute_key = get_attribute_identifier(subattribute, attribute_key)
         cleanRecordAttribute(
-            processor_attributes, subattribute, subattributeKey=subattribute_key
+            processor_attributes,
+            subattribute,
+            subattributeKey=subattribute_key,
+            attributes_list=attributes_list,
+            options=options,
         )
     return False
 
@@ -762,10 +795,14 @@ def cleanRecords(processor_attributes, documents):
             "attributesList_before": [],
             "attributesList_after": [],
         }
+        options = {}
         for attr in attributes_list:
             attribute_before_cleaning = summarize_attribute_for_cleaning(attr)
             cleanRecordAttribute(
-                processor_attributes=processor_attributes, attribute=attr
+                processor_attributes=processor_attributes,
+                attribute=attr,
+                attributes_list=attributes_list,
+                options=options,
             )
             attribute_after_cleaning = summarize_attribute_for_cleaning(attr)
             current_attributes_list_before_and_after["attributesList_before"].append(

@@ -424,11 +424,14 @@ def process_image(
     )
     _log.info(f"processed document in doc_ai")
     attributesList = util.normalize_record_attribute_tree(attributesList)
+    options = {}
     for attribute in attributesList:
         if run_cleaning_functions:
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=attribute,
+                attributes_list=attributesList,
+                options=options,
             )
 
     ## sort attributes and add attributes that weren't found:
