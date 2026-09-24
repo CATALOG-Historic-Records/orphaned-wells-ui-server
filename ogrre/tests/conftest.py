@@ -23,5 +23,15 @@ def manager(tmp_path):
         result.db = db
         result.app_settings = settings
         result.recordHistory = Mock()
-        result.using_default_processor = False
+        # Job lifecycle tests isolate extraction configuration. Schema tests
+        # remove this stub to exercise the real resolver.
+        result.getRecordGroupProcessingConfig = Mock(
+            return_value={
+                "processor_id": "test-processor",
+                "model_id": "test-model",
+                "processor_attributes": [],
+                "using_default_processor": False,
+            }
+        )
+        result.collaborator = "isgs"
         yield result

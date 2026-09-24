@@ -355,13 +355,10 @@ def _process_batch_documents(
         _log.info(f"no batch documents found in gs://{bucket_name}/{prefix}")
         return
 
-    (
-        processor_id,
-        model_id,
-        processor_attributes,
-    ) = data_manager.getProcessorByRecordGroupID(rg_id, user=user_info)
-    if not processor_id or not model_id:
-        raise ValueError(f"unable to find processor for record group {rg_id}")
+    job = data_manager.getProcessingJob(job_id)
+    processing_config = (job or {}).get(
+        "processing_config"
+    ) or data_manager.getRecordGroupProcessingConfig(rg_id, user_info)
 
     output_prefix = _normalize_output_prefix(output_prefix, rg_id, job_id)
     for wave_start in range(0, len(batches), MAX_CONCURRENT_BATCH_LROS):
@@ -378,9 +375,12 @@ def _process_batch_documents(
                     rg_id=rg_id,
                     user_info=user_info,
                     data_manager=data_manager,
-                    processor_id=processor_id,
-                    model_id=model_id,
-                    processor_attributes=processor_attributes,
+                    processor_id=processing_config["processor_id"],
+                    model_id=processing_config["model_id"],
+                    processor_attributes=processing_config["processor_attributes"],
+                    using_default_processor=processing_config[
+                        "using_default_processor"
+                    ],
                     output_bucket_name=output_bucket_name,
                     output_prefix=output_prefix,
                     run_cleaning_functions=run_cleaning_functions,
@@ -422,6 +422,7 @@ def _process_one_batch(
     run_cleaning_functions=True,
     prevent_duplicates=False,
     duplicate_file_bases=None,
+    using_default_processor=False,
 ):
     partial_summary = _new_summary()
     partial_summary.pop("total_submitted")
@@ -624,7 +625,7 @@ def _process_one_batch(
         try:
             attributes_list = _read_output_attributes(
                 process_status.output_gcs_destination,
-                using_default_processor=data_manager.using_default_processor,
+                using_default_processor=using_default_processor,
                 job_id=job_id,
                 batch_index=batch_index,
                 record_id=prepared.record_id,
@@ -632,6 +633,7 @@ def _process_one_batch(
             )
             _update_record_with_attributes(
                 data_manager=data_manager,
+                user_info=user_info,
                 rg_id=rg_id,
                 record_id=prepared.record_id,
                 file_name=prepared.file_name,
@@ -910,6 +912,7 @@ def _update_record_with_attributes(
     processor_attributes,
     attributes_list,
     run_cleaning_functions=True,
+    user_info=None,
 ):
     if not processor_attributes:
         processor_attributes = []
@@ -919,23 +922,19 @@ def _update_record_with_attributes(
             processor_attributes
         )
 
-    attributes_list = util.normalize_record_attribute_tree(attributes_list)
     options = {}
-
-    for attribute in attributes_list:
-        if run_cleaning_functions:
+    sorted_attributes_list, _ = util.sortRecordAttributes(
+        attributes_list, {"attributes": processor_attributes}, keep_all_attributes=True
+    )
+    if run_cleaning_functions:
+        for attribute in sorted_attributes_list:
             util.cleanRecordAttribute(
                 processor_attributes=processor_attributes_dictionary,
                 attribute=attribute,
-                attributes_list=attributes_list,
+                attributes_list=sorted_attributes_list,
                 options=options,
             )
 
-    sorted_attributes_list, _ = util.sortRecordAttributes(
-        attributes_list,
-        {"attributes": processor_attributes},
-        keep_all_attributes=True,
-    )
     final_duplicate_targets = _target_attribute_duplicates(sorted_attributes_list)
     if final_duplicate_targets:
         _log.warning(
@@ -958,6 +957,7 @@ def _update_record_with_attributes(
         update_type="record",
         forceUpdate=True,
         calling_function="batch_process_document",
+        user_info=user_info,
     )
     _log.info(f"updated batch record in db: {record_id}")
 
