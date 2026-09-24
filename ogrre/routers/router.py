@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from typing import Optional
 
 from ogrre.internal.data_manager import DEFAULT_UNAUTHENTICATED_TEAM, data_manager
+from ogrre.internal.schema_validation import SchemaError
 from ogrre.internal.image_handling import (
     process_document,
     process_zip,
@@ -74,6 +75,37 @@ REFRESH_COOKIE_MAX_AGE_SECONDS = int(
     os.getenv("REFRESH_COOKIE_MAX_AGE_SECONDS", "2592000")
 )
 ROLE_CATEGORIES = {"system", "team"}
+
+
+def schema_operation(handler, *args, **kwargs):
+    try:
+        return handler(*args, **kwargs)
+    except PermissionError as error:
+        raise HTTPException(403, detail=str(error))
+    except SchemaError as error:
+        raise HTTPException(error.status_code, detail=str(error))
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(400, detail=str(error))
+
+
+async def schema_request_body(request, max_bytes=None):
+    try:
+        if max_bytes is None:
+            body = await request.json()
+        else:
+            payload = bytearray()
+            async for chunk in request.stream():
+                if len(payload) + len(chunk) > max_bytes:
+                    raise HTTPException(
+                        413, detail="Schema preview request is too large."
+                    )
+                payload.extend(chunk)
+            body = json.loads(payload)
+    except ValueError:
+        raise HTTPException(400, detail="A JSON object is required.")
+    if not isinstance(body, dict):
+        raise HTTPException(400, detail="A JSON object is required.")
+    return body
 
 
 def anonymous_user(
@@ -536,7 +568,7 @@ async def get_record_groups(project_id: str, user_info: dict = Depends(authentic
     Returns:
         List containing record groups and metadata
     """
-    resp = data_manager.fetchRecordGroups(project_id, user_info.get("email", ""))
+    resp = data_manager.fetchRecordGroups(project_id, user_info)
     return resp
 
 
@@ -685,8 +717,12 @@ async def get_record_data(
     except Exception as e:
         _log.info(f"unable to get page state: {e}")
         page_state = None
-    record, is_locked = data_manager.fetchRecordData(
-        record_id, user_info, page_state=page_state, background_tasks=background_tasks
+    record, is_locked = schema_operation(
+        data_manager.fetchRecordData,
+        record_id,
+        user_info,
+        page_state=page_state,
+        background_tasks=background_tasks,
     )
     if record is None:
         raise HTTPException(
@@ -842,8 +878,8 @@ async def add_record_group(request: Request, user_info: dict = Depends(authentic
             403,
             detail=f"You are not authorized to create record groups for this team. Please contact a team lead.",
         )
-    data = await request.json()
-    new_id = data_manager.createRecordGroup(data, user_info)
+    data = await schema_request_body(request)
+    new_id = schema_operation(data_manager.createRecordGroup, data, user_info)
     return new_id
 
 
@@ -869,7 +905,9 @@ async def import_json_record_group(
         raise HTTPException(400, detail="JSON import request body is required.")
 
     try:
-        return data_manager.createRecordGroupFromJsonImport(project_id, data, user_info)
+        return schema_operation(
+            data_manager.createRecordGroupFromJsonImport, project_id, data, user_info
+        )
     except PermissionError:
         raise HTTPException(
             403,
@@ -908,8 +946,12 @@ async def import_json_records(
             "preventDuplicates", data.get("prevent_duplicates", True)
         )
     try:
-        return data_manager.importJsonRecords(
-            rg_id, data, user_info, prevent_duplicates=prevent_duplicates
+        return schema_operation(
+            data_manager.importJsonRecords,
+            rg_id,
+            data,
+            user_info,
+            prevent_duplicates=prevent_duplicates,
         )
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
@@ -939,7 +981,8 @@ async def import_record_file_record_group(
 
     try:
         import_package = data_manager.parseImportFile(file.filename, await file.read())
-        return data_manager.createRecordGroupFromJsonImport(
+        return schema_operation(
+            data_manager.createRecordGroupFromJsonImport,
             project_id,
             {
                 "record_group": {
@@ -984,7 +1027,8 @@ async def import_record_file_records(
 
     try:
         import_package = data_manager.parseImportFile(file.filename, await file.read())
-        return data_manager.importJsonRecords(
+        return schema_operation(
+            data_manager.importJsonRecords,
             rg_id,
             {"import_package": import_package},
             user_info,
@@ -1065,24 +1109,15 @@ async def preview_record_file_records(
 async def connect_record_group_processor(
     rg_id: str, request: Request, user_info: dict = Depends(authenticate)
 ):
-    """Connect or replace the processor associated with a record group."""
-    if not data_manager.hasPermission(user_info["email"], "create_record_group"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to connect processors for this team. Please contact a team lead.",
-        )
-
-    data = await request.json()
-    processor_id = data.get("processorId") or data.get("processor_id")
-    try:
-        return data_manager.connectRecordGroupProcessor(rg_id, processor_id, user_info)
-    except PermissionError:
-        raise HTTPException(
-            403,
-            detail=f"You do not have access to this record group, please contact the project creator to gain access.",
-        )
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+    data = await schema_request_body(request)
+    return await run_in_threadpool(
+        schema_operation,
+        data_manager.connectRecordGroupProcessor,
+        rg_id,
+        data.get("processorId") or data.get("processor_id"),
+        user_info,
+        schema_id=data.get("schema_id"),
+    )
 
 
 @router.post("/upload_record_images/{record_id}")
@@ -1214,6 +1249,7 @@ async def upload_document(
     project_is_valid = data_manager.checkRecordGroupValidity(rg_id)
     if not project_is_valid:
         raise HTTPException(404, detail=f"Project not found")
+    schema_operation(data_manager.getRecordGroupProcessingConfig, rg_id, user_info)
     filename, file_ext = os.path.splitext(file.filename)
 
     if file_ext.lower() == ".zip":
@@ -1800,8 +1836,10 @@ async def update_record_group(
             403,
             detail=f"You are not authorized to update projects. Please contact a team lead or project manager.",
         )
-    data = await request.json()
-    return data_manager.updateRecordGroup(rg_id, data, user_info)
+    data = await schema_request_body(request)
+    return await run_in_threadpool(
+        schema_operation, data_manager.updateRecordGroup, rg_id, data, user_info
+    )
 
 
 @router.post("/update_record/{record_id}")
@@ -1830,13 +1868,15 @@ async def update_record(
     if update_type == "record_notes":
         update = data_manager.updateRecordNotes(record_id, data, user_info)
     else:
-        update = data_manager.updateRecord(
+        update = schema_operation(
+            data_manager.updateRecord,
             record_id,
             data,
             update_type,
             field_to_clean,
             user_info,
             calling_function="update_record",
+            expected_attribute_revision=req.get("attribute_revision"),
         )
     if not update:
         raise HTTPException(status_code=403, detail=f"Record is locked by another user")
@@ -1846,30 +1886,13 @@ async def update_record(
 
 @router.post("/delete_processor/{processor_name}")
 async def delete_processor(
-    processor_name: str,
-    user_info: dict = Depends(authenticate),
+    processor_name: str, schema_id: str = None, user_info: dict = Depends(authenticate)
 ):
-    """Delete processor.
-
-    Args:
-        processor_id: google processor id
-        model_id: model id
-
-    Returns:
-        Delete query
-    """
-    if not data_manager.hasPermission(user_info["email"], "delete"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to delete processors. Please contact a team lead or project manager.",
-        )
-    if not processor_name:
-        raise HTTPException(
-            400,
-            detail=f"Please provide processor name.",
-        )
-    return data_manager.deleteProcessorSchema(
-        processorName=processor_name, user_info=user_info
+    return schema_operation(
+        data_manager.deleteProcessorSchema,
+        processor_name,
+        user_info,
+        schema_id=schema_id,
     )
 
 
@@ -2435,7 +2458,7 @@ async def run_cleaning_functions(
             detail=f"You are not authorized to run cleaning functions. Please contact a team lead or project manager.",
         )
 
-    data_manager.cleanCollection(location, _id, user_info)
+    schema_operation(data_manager.cleanCollection, location, _id, user_info)
 
     return _id
 
@@ -2467,20 +2490,22 @@ async def add_user(
         ## check if this user exists already. if not add to database
         new_user = data_manager.getUser(email)
         if new_user is None:
-            resp = data_manager.addUser({"email": email}, team, team_lead, sys_admin)
-
+            data_manager.addUser({"email": email}, team, team_lead, sys_admin)
         else:
-            ## this user exists already. add them to this team
-            new_user_team = new_user["default_team"]
-            if new_user_team == team:
+            # Membership uses teams.users, just like getUsers. A default_team
+            # alone does not establish membership and may need repairing.
+            resp = data_manager.addUserToTeam(email, team)
+            if resp == "already_exists":
                 _log.info(f"{email} is already on team {team}")
                 raise HTTPException(
                     status_code=406, detail=f"This user is already on this team."
                 )
-            else:
-                ## in this case, just add user to team without creating new user
-                resp = data_manager.addUserToTeam(email, team)
-                return resp
+        data_manager.recordHistory(
+            "addUser",
+            user=user_info["email"],
+            query={"email": email, "team": team},
+        )
+        return "success"
     else:
         raise HTTPException(
             status_code=403, detail=f"User is not authorized to perform this operation"
@@ -2551,7 +2576,7 @@ async def get_schema(user_info: dict = Depends(authenticate)):
             403,
             detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
         )
-    return data_manager.getSchema(user_info)
+    return schema_operation(data_manager.getSchema, user_info)
 
 
 @router.get("/get_cleaning_functions")
@@ -2563,6 +2588,55 @@ async def get_cleaning_functions(user_info: dict = Depends(authenticate)):
             detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
         )
     return {"cleaning_functions": list(util.CLEANING_FUNCTIONS.keys())}
+
+
+@router.get("/get_repo_schema_import")
+def get_repo_schema_import(user_info: dict = Depends(authenticate)):
+    return schema_operation(data_manager.getRepoSchemaImport, user_info)
+
+
+@router.post("/record_groups/{rg_id}/schema/preview")
+async def preview_record_group_schema(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    from ogrre.internal.schema_inference import MAX_PAYLOAD_BYTES
+
+    data = await schema_request_body(request, MAX_PAYLOAD_BYTES)
+    return await run_in_threadpool(
+        schema_operation, data_manager.previewRecordGroupSchema, rg_id, data, user_info
+    )
+
+
+@router.post("/record_groups/{rg_id}/schema/apply")
+async def apply_record_group_schema(
+    rg_id: str, request: Request, user_info: dict = Depends(authenticate)
+):
+    from ogrre.internal.schema_inference import MAX_PAYLOAD_BYTES
+
+    data = await schema_request_body(request, MAX_PAYLOAD_BYTES)
+    return await run_in_threadpool(
+        schema_operation, data_manager.applyRecordGroupSchema, rg_id, data, user_info
+    )
+
+
+@router.post("/preview_repo_schema_import")
+async def preview_repo_schema_import(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    data = await schema_request_body(request)
+    return await run_in_threadpool(
+        schema_operation, data_manager.previewRepoSchemaImport, data, user_info
+    )
+
+
+@router.post("/apply_repo_schema_import")
+async def apply_repo_schema_import(
+    request: Request, user_info: dict = Depends(authenticate)
+):
+    data = await schema_request_body(request)
+    return await run_in_threadpool(
+        schema_operation, data_manager.applyRepoSchemaImport, data, user_info
+    )
 
 
 @router.get("/get_ogrre_version")
@@ -2584,6 +2658,8 @@ async def upload_processor_schema(
     modelId: str = None,
     documentType: str = None,
     img: str = None,
+    schema_id: str = None,
+    parser_type: str = None,
     file: UploadFile = File(...),
     user_info: dict = Depends(authenticate),
 ):
@@ -2605,16 +2681,10 @@ async def upload_processor_schema(
             403,
             detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
         )
-    if (
-        not name
-        or not displayName
-        or not processorId
-        or not modelId
-        or not documentType
-    ):
+    if not name or not displayName or not documentType:
         raise HTTPException(
             400,
-            detail=f"Please provide each of the following as query parameters: name, displayName, processorId, modelId, documentType.",
+            detail="Provide name, displayName, and documentType.",
         )
     schema_meta = {
         "name": name,
@@ -2623,9 +2693,15 @@ async def upload_processor_schema(
         "modelId": modelId,
         "documentType": documentType,
         "img": img,
+        "parser_type": parser_type,
     }
-    return data_manager.uploadProcessorSchema(
-        file=file, schema_meta=schema_meta, user_info=user_info
+    return await run_in_threadpool(
+        schema_operation,
+        data_manager.uploadProcessorSchema,
+        file=file,
+        schema_meta=schema_meta,
+        user_info=user_info,
+        schema_id=schema_id,
     )
 
 
@@ -2635,12 +2711,9 @@ async def upload_sample_image(
     file: UploadFile = File(...),
     user_info: dict = Depends(authenticate),
 ):
-    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
-        )
-    if not file.content_type.startswith("image/"):
+    schema_operation(data_manager.requireSchemaPermission, user_info)
+    schema_operation(data_manager._findUniqueProcessor, {"name": processor_name})
+    if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image.")
 
     file_bytes = await file.read()
@@ -2657,132 +2730,31 @@ async def get_image_url(processor_name: str, user_info: dict = Depends(authentic
 
 @router.post("/update_processor")
 async def update_processor(request: Request, user_info: dict = Depends(authenticate)):
-    """Update processor
+    data = await schema_request_body(request)
+    return schema_operation(data_manager.updateProcessor, data, user_info)
 
-    Args:
-        processor: processor data
 
-    Returns:
-
-    """
-    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
-        )
-
-    req = await request.json()
-
-    request_fields = [
-        "name",
-        "displayName",
-        "processorId",
-        "modelId",
-        "documentType",
-        "img",
-    ]
-
-    new_schema_data = {
-        key: req.get(key) for key in request_fields if req.get(key) is not None
-    }
-
-    return data_manager.updateProcessor(new_schema_data, user_info)
+@router.post("/create_schema")
+async def create_schema(request: Request, user_info: dict = Depends(authenticate)):
+    data = await schema_request_body(request)
+    return schema_operation(data_manager.createSchema, data, user_info)
 
 
 @router.post("/update_processor_attribute")
 async def update_processor_attribute(
     request: Request, user_info: dict = Depends(authenticate)
 ):
-    """Update a processor schema attribute field."""
-    if not data_manager.hasPermission(user_info["email"], "manage_schema"):
-        raise HTTPException(
-            403,
-            detail=f"You are not authorized to manage schema. Please contact a team lead or project manager.",
-        )
-
-    req = await request.json()
-    processor_name = req.get("processor_name")
-    field_name = req.get("field_name")
-    updates = req.get("updates", {})
-    operation = req.get("operation", "update")
-
-    if operation not in {"update", "add", "delete"}:
-        raise HTTPException(
-            400,
-            detail="operation must be one of: update, add, delete",
-        )
-
-    if not processor_name:
-        raise HTTPException(
-            400,
-            detail="Please provide processor_name in the request body.",
-        )
-
-    allowed_update_fields = {
-        "name",
-        "alias",
-        "cleaning_function",
-        "data_type",
-        "database_data_type",
-        "page_order_sort",
-    }
-    if not isinstance(updates, dict):
-        raise HTTPException(
-            400,
-            detail="updates must be an object when provided.",
-        )
-
-    invalid_fields = set(updates.keys()) - allowed_update_fields
-    if invalid_fields:
-        raise HTTPException(
-            400,
-            detail=f"Unsupported processor attribute update fields: {sorted(invalid_fields)}",
-        )
-
-    if operation == "update":
-        if not field_name or not updates:
-            raise HTTPException(
-                400,
-                detail="Update operation requires field_name and a non-empty updates object.",
-            )
-    elif operation == "add":
-        if not updates:
-            raise HTTPException(
-                400,
-                detail="Add operation requires a non-empty updates object.",
-            )
-        if not updates.get("name") and not field_name:
-            raise HTTPException(
-                400,
-                detail="Add operation requires a field name in updates.name or field_name.",
-            )
-        missing_required_fields = [
-            key for key in ("data_type", "database_data_type") if not updates.get(key)
-        ]
-        if missing_required_fields:
-            raise HTTPException(
-                400,
-                detail=(
-                    "Add operation requires the following fields in updates: "
-                    f"{missing_required_fields}"
-                ),
-            )
-    elif operation == "delete" and not field_name:
-        raise HTTPException(
-            400,
-            detail="Delete operation requires field_name.",
-        )
-
-    try:
-        return data_manager.updateProcessorAttribute(
-            processor_name=processor_name,
-            field_name=field_name,
-            updates=updates,
-            user_info=user_info,
-            operation=operation,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    data = await schema_request_body(request)
+    return await run_in_threadpool(
+        schema_operation,
+        data_manager.updateProcessorAttribute,
+        processor_name=data.get("processor_name"),
+        field_name=data.get("field_name"),
+        updates=data.get("updates", {}),
+        user_info=user_info,
+        operation=data.get("operation", "update"),
+        schema_id=data.get("schema_id"),
+    )
 
 
 @router.post("/update_default_team")
