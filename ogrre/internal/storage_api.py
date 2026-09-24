@@ -25,6 +25,7 @@ import io
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import quote, urlparse, unquote
@@ -419,6 +420,55 @@ def get_file_size(key, bucket_name=BUCKET_NAME):
     except Exception as e:
         _log.error(f"Error retrieving blob size for {key}: {e}")
         return None
+
+
+def get_file_sizes(keys, bucket_name=BUCKET_NAME, max_workers=16):
+    """Return ({storage_key: size}, missing_count) for storage keys."""
+    keys = list(dict.fromkeys(key for key in (keys or []) if key))
+    if not keys:
+        return {}, 0
+
+    if _is_local():
+        sizes = {}
+        missing_count = 0
+        for key in keys:
+            try:
+                sizes[key] = os.path.getsize(_storage_path(key))
+            except OSError:
+                missing_count += 1
+        return sizes, missing_count
+
+    try:
+        _, bucket = _get_bucket(bucket_name=bucket_name)
+    except Exception as e:
+        _log.error(f"Error preparing bucket for blob size lookup: {e}")
+        return {}, len(keys)
+
+    def load_size(key):
+        try:
+            blob = bucket.get_blob(key, timeout=10)
+            if blob is None or blob.size is None:
+                return key, None
+            return key, blob.size
+        except NotFound:
+            return key, None
+        except Exception as e:
+            _log.debug(f"Error retrieving blob size for {key}: {e}")
+            return key, None
+
+    worker_count = max(1, min(max_workers, len(keys)))
+    sizes = {}
+    missing_count = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(load_size, key) for key in keys]
+        for future in as_completed(futures):
+            key, size = future.result()
+            if size is None:
+                missing_count += 1
+            else:
+                sizes[key] = size
+
+    return sizes, missing_count
 
 
 def upload_sample_image(file_bytes: bytes, original_filename: str, processor_name: str):

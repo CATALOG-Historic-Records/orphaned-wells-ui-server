@@ -61,18 +61,34 @@ def parse_target(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "environment,replicas,api_memory,worker_cpu,worker_memory",
-    [("staging", "1", "4Gi", "1", "6Gi"), ("isgs", "2", "6Gi", "1850m", "12Gi")],
+    (
+        "environment,replicas,api_cpu_request,api_cpu_limit,"
+        "api_memory_request,api_memory_limit,worker_cpu,worker_memory"
+    ),
+    [
+        ("staging", "1", "500m", "1", "1Gi", "2Gi", "1", "6Gi"),
+        ("isgs", "2", "1", "1", "4Gi", "4Gi", "1850m", "12Gi"),
+    ],
 )
 def test_defaults_size_api_and_worker_independently(
-    parse_target, environment, replicas, api_memory, worker_cpu, worker_memory
+    parse_target,
+    environment,
+    replicas,
+    api_cpu_request,
+    api_cpu_limit,
+    api_memory_request,
+    api_memory_limit,
+    worker_cpu,
+    worker_memory,
 ):
     target = parse_target(environment)
     assert target["replicas"] == replicas
     assert target["api_uvicorn_workers"] == "2"
+    assert target["cpu_request"] == api_cpu_request
+    assert target["cpu_limit"] == api_cpu_limit
+    assert target["memory_request"] == api_memory_request
+    assert target["memory_limit"] == api_memory_limit
     for field in ("request", "limit"):
-        assert target[f"cpu_{field}"] == "1"
-        assert target[f"memory_{field}"] == api_memory
         assert target[f"processing_job_cpu_{field}"] == worker_cpu
         assert target[f"processing_job_memory_{field}"] == worker_memory
 

@@ -293,10 +293,10 @@ HOSTNAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].host' <<< "$TARGETS_JSON")"
 STATIC_IP_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].static_ip_name' <<< "$TARGETS_JSON")"
 STORAGE_BUCKET_NAME="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].storage_bucket_name' <<< "$TARGETS_JSON")"
 REPLICAS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].replicas // 2' <<< "$TARGETS_JSON")"
-CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_request // "1"' <<< "$TARGETS_JSON")"
-MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // (if $env == "staging" then "4Gi" else "6Gi" end)' <<< "$TARGETS_JSON")"
+CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_request // "500m"' <<< "$TARGETS_JSON")"
+MEMORY_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_request // "1Gi"' <<< "$TARGETS_JSON")"
 CPU_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].cpu_limit // "1"' <<< "$TARGETS_JSON")"
-MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_limit // (if $env == "staging" then "4Gi" else "6Gi" end)' <<< "$TARGETS_JSON")"
+MEMORY_LIMIT="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].memory_limit // "2Gi"' <<< "$TARGETS_JSON")"
 PERSISTENT_DISK_SIZE="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].persistent_disk_size // "20Gi"' <<< "$TARGETS_JSON")"
 API_UVICORN_WORKERS="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].api_uvicorn_workers // 2' <<< "$TARGETS_JSON")"
 PROCESSING_JOB_CPU_REQUEST="$(jq -r --arg env "$DEPLOY_ENV" '.[$env].processing_job_cpu_request // "1850m"' <<< "$TARGETS_JSON")"
@@ -568,11 +568,11 @@ gke_backend_overrides = {
   boots = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
-    replicas             = 1
+    replicas             = 2
     cpu_request          = "1"
-    memory_request       = "6Gi"
+    memory_request       = "4Gi"
     cpu_limit            = "1"
-    memory_limit         = "6Gi"
+    memory_limit         = "4Gi"
     persistent_disk_size = "20Gi"
   }
 }
@@ -616,13 +616,13 @@ curl -f https://boots-server.uow-carbon.org/health
 
 ## Notes
 
-- GKE replaces VM nginx/certbot with GKE Ingress, `ManagedCertificate`, `FrontendConfig`, and `BackendConfig`.
+- GKE replaces the legacy VM nginx/certbot path with GKE Ingress, `ManagedCertificate`, `FrontendConfig`, and `BackendConfig`.
 - Google-managed certificates require the DNS name to point at the GKE load balancer before they become active.
 - DNS pointing at the load balancer is not enough by itself. The rendered Kubernetes Ingress `host` and ManagedCertificate domain must also match the hostname.
-- The backend timeout is configured to 180 seconds through `BackendConfig`, matching the current nginx timeout.
+- The backend timeout is configured to 180 seconds through `BackendConfig`, matching the former VM nginx timeout.
 - The Kubernetes Deployment uses pod-local `emptyDir` volumes for `/logs` and `/data`. Real document storage should continue using Google Cloud Storage.
 - The app receives `storage-service-key.json` and `document-ai-service-key.json` at `/code/ogrre/...`. The runtime env sets `STORAGE_SERVICE_KEY` and `DOCUMENT_AI_SERVICE_KEY` to those absolute paths so packaged Python imports do not resolve key filenames relative to `site-packages`.
-- Collaborator APIs target two replicas at 1 CPU and 6 GiB memory each; their processing workers retain 1850m CPU and 12 GiB. Staging targets one API replica at 1 CPU and 4 GiB; its workers retain 1 CPU and 6 GiB.
+- Collaborator APIs target two replicas at 1 CPU and 4 GiB memory each; their processing workers retain 1850m CPU and 12 GiB. Staging targets one API replica with a 500m CPU / 1 GiB request and 1 CPU / 2 GiB limit; its workers retain 1 CPU and 6 GiB.
 - Batch workers use separate per-environment resource requests. The initial rollout permits one active batch worker per environment and sets `backoffLimit: 0`; retry failed batches only after reviewing their durable job status and affected records.
 
 
@@ -664,9 +664,10 @@ Kubernetes permission is required. API and worker labels still distinguish
 
 ### Staging checks before reducing API resources
 
-The configured staging API target is 1 CPU / 4 GiB (requests and limits), with
-one replica and two Uvicorn workers. Staging processing workers retain
-1 CPU / 6 GiB. Production targets two API replicas at 1 CPU / 6 GiB each;
+The configured staging API target is a 500m CPU / 1 GiB request and a
+1 CPU / 2 GiB limit, with one replica and two Uvicorn workers.
+Staging processing workers retain
+1 CPU / 6 GiB. Production targets two API replicas at 1 CPU / 4 GiB each;
 its processing workers retain 1850m CPU / 12 GiB.
 
 1. Verify real bucket CORS from the frontend origin and test a transfer larger
@@ -695,10 +696,10 @@ its processing workers retain 1850m CPU / 12 GiB.
 
 Apply Terraform, refresh `K8S_DEPLOY_TARGETS`, and deploy the affected environments
 with the updated workflow to activate their smaller targets. For an otherwise
-up-to-date workspace, the plan updates production API output requests and
-limits from 1850m CPU / 12 GiB to 1 CPU / 6 GiB, plus staging memory from 6 GiB
-to 4 GiB if that output change has not already been applied. It does not resize
-running pods itself. Old deploy-target secrets continue to select the old sizes.
+up-to-date workspace, the plan updates staging API output from a 1 CPU / 4 GiB
+request and limit to a 500m CPU / 1 GiB request and 1 CPU / 2 GiB limit. It
+does not resize running pods itself. Old deploy-target secrets continue to
+select the old sizes.
 Verify the admitted pod resources because Autopilot can adjust requests:
 
 ```bash
@@ -707,29 +708,30 @@ kubectl -n uow-staging get pods -l app.kubernetes.io/component=api \
 kubectl -n uow-staging top pods -l app.kubernetes.io/component=api
 ```
 
-Deploy production environments one at a time at 1 CPU / 6 GiB per API pod,
-keeping two replicas and worker settings intact. Continue validating 4 GiB in
-staging before considering a further production reduction. Update API requests
-and limits together and compare peak usage, throttling, and latency after each
-deployment.
+If reducing production later, deploy production environments one at a time at
+1 CPU / 4 GiB per API pod, keeping two replicas and worker settings intact.
+Update API requests and limits together and compare peak usage, throttling, and
+latency after each deployment.
 
-To roll staging back to its previous memory allocation, merge this entry into
+To roll staging back to its previous API allocation, merge this entry into
 the existing `gke_backend_overrides` map in `terraform.tfvars`, then apply,
 refresh `K8S_DEPLOY_TARGETS`, and redeploy staging:
 
 ```hcl
 gke_backend_overrides = {
   staging = {
-    memory_request = "6Gi"
-    memory_limit   = "6Gi"
+    cpu_request    = "1"
+    memory_request = "4Gi"
+    cpu_limit      = "1"
+    memory_limit   = "4Gi"
   }
 }
 ```
 
-Remove that override when resuming validation at `4Gi`. To restore a production
-API to its previous size, add `cpu_request = "1850m"`, `cpu_limit = "1850m"`,
-`memory_request = "12Gi"`, and `memory_limit = "12Gi"` under that environment in
-`gke_backend_overrides`, then apply, refresh the secret, and redeploy it.
+Remove that override when resuming validation at the smaller staging target. To restore a production
+API to its previous memory allocation, add `memory_request = "6Gi"` and
+`memory_limit = "6Gi"` under that environment in `gke_backend_overrides`, then
+apply, refresh the secret, and redeploy it.
 
 Autopilot bills these
 general-purpose workloads by pod resource requests, so the cost reduction starts
