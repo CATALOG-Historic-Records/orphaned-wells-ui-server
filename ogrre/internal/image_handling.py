@@ -160,6 +160,10 @@ def process_document(
     run_cleaning_functions=True,
     undeployProcessor=True,
 ):
+    processing_config = data_manager.getRecordGroupProcessingConfig(rg_id, user_info)
+    processor_id = processing_config["processor_id"]
+    model_id = processing_config["model_id"]
+    processor_attributes = processing_config["processor_attributes"]
     if file_ext == ".tif" or file_ext == ".tiff":
         output_paths = convert_tiff(
             filename, file_ext, data_manager.app_settings.img_dir
@@ -193,13 +197,6 @@ def process_document(
         "image_files": [output_path.split("/")[-1] for output_path in output_paths],
     }
     new_record_id = data_manager.createRecord(new_record, user_info)
-
-    ## fetch processor id
-    (
-        processor_id,
-        model_id,
-        processor_attributes,
-    ) = data_manager.getProcessorByRecordGroupID(rg_id, user=user_info)
 
     ## upload to cloud storage, detect whitespace
     def on_all_bytes_read(all_file_bytes):
@@ -249,6 +246,8 @@ def process_document(
             processor_id=processor_id,
             model_id=model_id,
             processor_attributes=processor_attributes,
+            using_default_processor=processing_config["using_default_processor"],
+            user_info=user_info,
             doc_ai_input_path=doc_ai_input_path,
             reprocessed=reprocessed,
             files_to_delete=files_to_delete,
@@ -265,6 +264,8 @@ def process_document(
             processor_id=processor_id,
             model_id=model_id,
             processor_attributes=processor_attributes,
+            using_default_processor=processing_config["using_default_processor"],
+            user_info=user_info,
             data_manager=data_manager,
             doc_ai_input_path=doc_ai_input_path,
             reprocessed=reprocessed,
@@ -349,6 +350,8 @@ def process_image(
     files_to_delete=[],
     run_cleaning_functions=True,
     undeployProcessor=True,
+    using_default_processor=False,
+    user_info=None,
 ):
     snapshot_start = _maybe_take_snapshot()
     try:
@@ -368,6 +371,7 @@ def process_image(
             update_type="record",
             forceUpdate=True,
             calling_function="process_image",
+            user_info=user_info,
         )
         return
 
@@ -394,7 +398,7 @@ def process_image(
             mime_type=mime_type,
             processor_id=processor_id,
             model_id=model_id,
-            using_default_processor=data_manager.using_default_processor,
+            using_default_processor=using_default_processor,
         )
     except Exception as e:
         _log.error(f"error on google document ai processing: {e}")
@@ -410,6 +414,7 @@ def process_image(
             update_type="record",
             forceUpdate=True,
             calling_function="process_image",
+            user_info=user_info,
         )
         return
 
@@ -423,20 +428,15 @@ def process_image(
         record_id=record_id,
     )
     _log.info(f"processed document in doc_ai")
-    attributesList = util.normalize_record_attribute_tree(attributesList)
-    for attribute in attributesList:
-        if run_cleaning_functions:
+    sortedAttributesList, _ = util.sortRecordAttributes(
+        attributesList, {"attributes": processor_attributes}, keep_all_attributes=True
+    )
+    if run_cleaning_functions:
+        for attribute in sortedAttributesList:
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=attribute,
             )
-
-    ## sort attributes and add attributes that weren't found:
-    sortedAttributesList, _ = util.sortRecordAttributes(
-        attributesList,
-        {"attributes": processor_attributes},
-        keep_all_attributes=True,
-    )
 
     ## gotta update the record in the db
     record = {
@@ -453,6 +453,7 @@ def process_image(
         update_type="record",
         forceUpdate=True,
         calling_function="process_image",
+        user_info=user_info,
     )
 
     ## delete objects to free up memory

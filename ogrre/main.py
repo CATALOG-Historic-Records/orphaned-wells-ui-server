@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -24,6 +25,7 @@ _log = logging.getLogger(__name__)
 
 from ogrre.routers import router
 from ogrre.internal import storage_api, auth
+from ogrre.internal.schema_validation import SchemaError
 
 
 async def maintain_jobs():
@@ -49,6 +51,11 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(SchemaError)
+async def schema_error_response(request, error):
+    return JSONResponse(status_code=error.status_code, content={"detail": str(error)})
 
 
 @app.get("/health")

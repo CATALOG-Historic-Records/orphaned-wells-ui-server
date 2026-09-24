@@ -189,27 +189,28 @@ Each backend may set these optional `gke_backends` or
   `true`; CA intentionally sets it to `false` until it is ready for GKE.
 
 The default collaborator worker is 1850m CPU and 12Gi memory. Staging workers
-retain 1 CPU and 6Gi while the staging API targets 1 CPU and 4Gi with two
-Uvicorn workers. Production API defaults target two replicas, each with 1 CPU
-and 6Gi. Production workers retain their larger allocation independently.
+retain 1 CPU and 6Gi while the staging API requests 500m CPU and 1Gi memory,
+with limits of 1 CPU and 2Gi, across one replica with two Uvicorn workers.
+Production API defaults target two replicas, each with 1 CPU and 4Gi.
+Production workers retain their larger allocation independently.
 After Terraform changes these output values, update `K8S_DEPLOY_TARGETS` and
 deploy the backend; no resource setting takes effect from Terraform alone.
 
 ### API resource reduction
 
-API requests and limits use these targets; replica counts and all worker
-settings remain unchanged:
+API requests and limits use these targets; production replica counts and all
+worker settings remain unchanged:
 
-| Environment | API replicas | API CPU / memory per pod | Worker CPU / memory |
-| --- | --- | --- | --- |
-| Staging | 1 | 1 CPU / 4Gi | 1 CPU / 6Gi |
-| Production collaborators | 2 | 1 CPU / 6Gi | 1850m CPU / 12Gi |
+| Environment | API replicas | API request per pod | API limit per pod | Worker CPU / memory |
+| --- | --- | --- | --- | --- |
+| Staging | 1 | 500m CPU / 1Gi | 1 CPU / 2Gi | 1 CPU / 6Gi |
+| Production collaborators | 2 | 1 CPU / 4Gi | 1 CPU / 4Gi | 1850m CPU / 12Gi |
 
 For an otherwise up-to-date workspace, `terraform plan` should show only
-changes under `kubernetes_deploy_targets`: production `cpu_request` and
-`cpu_limit` change from `1850m` to `1`, and `memory_request` and `memory_limit`
-change from `12Gi` to `6Gi`. If the staging reduction has not already been
-applied, its memory outputs also change from `6Gi` to `4Gi`.
+changes under `kubernetes_deploy_targets`: staging `cpu_request` changes from
+`1` to `500m`, staging `memory_request` changes from `4Gi` to `1Gi`, and
+staging `memory_limit` changes from `4Gi` to `2Gi`. Staging `cpu_limit` stays
+at `1`, production targets stay unchanged, and worker settings stay unchanged.
 
 There should be no infrastructure resources to add, change, or destroy from
 this sizing change. Review any other changes separately. Apply the output
@@ -220,9 +221,8 @@ the previous pod sizes until refreshed. Applying and exporting these values
 does not resize live pods; each backend deployment activates its new target.
 
 Follow the [staging checks and rollback instructions](../kubernetes/README.md#staging-checks-before-reducing-api-resources)
-and deploy production environments one at a time, preserving replicas and
-worker settings. Keep production at 1 CPU / 6Gi while validating 4Gi in staging;
-any further production reduction requires measured headroom. Use
+before considering production changes. Validate production with real traffic
+before considering any further API reduction. Use
 `gke_backend_overrides` for environment-specific adjustments or rollback.
 
 ### Primary DNS state migration
@@ -470,11 +470,11 @@ gke_backend_overrides = {
   boots = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
-    replicas             = 1
+    replicas             = 2
     cpu_request          = "1"
-    memory_request       = "6Gi"
+    memory_request       = "4Gi"
     cpu_limit            = "1"
-    memory_limit         = "6Gi"
+    memory_limit         = "4Gi"
     persistent_disk_size = "20Gi"
   }
 }
