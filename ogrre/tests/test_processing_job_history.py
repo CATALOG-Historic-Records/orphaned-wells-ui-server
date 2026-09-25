@@ -51,8 +51,10 @@ def test_combined_history_is_scoped_named_and_globally_paginated(
     make_job(manager, "active-b", "queued", group=other_group)
     make_job(manager, "private", group=hidden)
     make_job(manager, "private-active", "running", group=hidden)
-    # History is readable with existing project access, independent of admin/upload actions.
-    manager.hasPermission.return_value = False
+    # History reads require upload access, then remain scoped by project access.
+    manager.hasPermission.side_effect = (
+        lambda _email, permission: permission == "upload_document"
+    )
     scopes = client.get("/processing_jobs/scopes").json()
     assert [project["id"] for project in scopes] == [first, second]
     assert scopes[0]["record_groups"] == [{"id": GROUP, "name": "First records"}]
@@ -109,6 +111,16 @@ def test_combined_history_rejects_invalid_and_unauthorized_scopes(
     assert client.get("/processing_jobs/scopes").json() == []
     result = client.post("/processing_jobs/history", json={}).json()
     assert result == {"active_jobs": [], "active_count": 0, "jobs": [], "count": 0}
+
+
+def test_history_requires_upload_permission(client, manager):
+    manager.hasPermission.return_value = False
+    assert client.get("/processing_jobs/scopes").status_code == 403
+    assert client.post("/processing_jobs/history", json={}).status_code == 403
+    assert client.get(f"/processing_jobs/{GROUP}").status_code == 403
+    assert client.post(f"/processing_jobs/{GROUP}/history", json={}).status_code == 403
+    assert client.get(f"/processing_jobs/{GROUP}/job").status_code == 403
+    assert client.get("/batch_process_documents/job/status").status_code == 403
 
 
 def test_history_keeps_older_active_jobs_separate_and_omits_large_details(
@@ -244,7 +256,7 @@ def test_retry_explains_expiry_ownership_permissions_and_worker_state(
     router.processing_worker_has_stopped.return_value = True
     assert client.get(endpoint).json()["retry"]["allowed"]
     manager.hasPermission.return_value = False
-    assert "permission" in client.get(endpoint).json()["retry"]["reason"]
+    assert client.get(endpoint).status_code == 403
     manager.hasPermission.return_value = True
     manager.db.directory_uploads.update_one(
         {"_id": session["_id"]}, {"$set": {"expires_at": time.time() - 1}}
