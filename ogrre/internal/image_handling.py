@@ -437,7 +437,6 @@ def process_image(
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=attribute,
-                attributes_list=sortedAttributesList,
                 options=options,
             )
 

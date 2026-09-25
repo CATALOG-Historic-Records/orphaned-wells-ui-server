@@ -771,7 +771,6 @@ def cleanRecordAttribute(
     processor_attributes,
     attribute,
     subattributeKey=None,
-    attributes_list=None,
     options=None,
 ):
     if options is None:
@@ -842,7 +841,6 @@ def cleanRecordAttribute(
             processor_attributes,
             subattribute,
             subattributeKey=subattribute_key,
-            attributes_list=attributes_list,
             options=options,
         )
     return False
@@ -887,7 +885,6 @@ def cleanRecords(processor_attributes, documents):
             cleanRecordAttribute(
                 processor_attributes=processor_attributes,
                 attribute=attr,
-                attributes_list=attributes_list,
                 options=options,
             )
             attribute_after_cleaning = summarize_attribute_for_cleaning(attr)

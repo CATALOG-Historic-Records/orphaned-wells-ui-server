@@ -931,7 +931,6 @@ def _update_record_with_attributes(
             util.cleanRecordAttribute(
                 processor_attributes=processor_attributes_dictionary,
                 attribute=attribute,
-                attributes_list=sorted_attributes_list,
                 options=options,
             )
 
