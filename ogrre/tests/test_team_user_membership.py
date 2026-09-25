@@ -74,6 +74,13 @@ def test_new_user_is_created_and_listed(team_client, manager):
     assert user["roles"]["team"]["isgs"] == ["team_member"]
 
 
+def test_get_users_requires_manage_team(team_client, manager):
+    manager.hasPermission.side_effect = (
+        lambda _email, permission: permission != "manage_team"
+    )
+    assert team_client.get("/get_users").status_code == 403
+
+
 def test_add_requires_permission_before_repairing_membership(team_client, manager):
     manager.db.users.insert_one({"email": EMAIL, "default_team": "isgs"})
     manager.hasPermission.return_value = False
