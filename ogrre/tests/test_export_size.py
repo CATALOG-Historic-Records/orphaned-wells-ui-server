@@ -1,5 +1,9 @@
+import io
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from ogrre.internal import storage_api, util
 
@@ -40,6 +44,34 @@ def test_compute_total_size_logs_missing_blob_summary(caplog):
 
     assert total_size == 30
     assert "Skipped 2 missing or unreadable blob(s)" in caplog.text
+
+
+@pytest.mark.parametrize("extension", ["json", "csv"])
+@pytest.mark.parametrize("include_pdf", [False, True])
+def test_zip_files_stream_without_images(tmp_path, extension, include_pdf):
+    export_file = tmp_path / f"records.{extension}"
+    contents = b'[{"file": "well.pdf"}]' if extension == "json" else b"file\nwell.pdf\n"
+    export_file.write_bytes(contents)
+    embedded_pdfs = [("documents/well.pdf", b"pdf-bytes")] if include_pdf else []
+
+    with patch.object(storage_api, "_get_bucket") as get_bucket:
+        archive_bytes = b"".join(
+            util.zip_files_stream(
+                [str(export_file)],
+                [],
+                log_to_file=str(tmp_path / "zip_log.txt"),
+                embedded_pdfs=embedded_pdfs,
+            )
+        )
+
+    get_bucket.assert_not_called()
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        assert archive.read(export_file.name) == contents
+        assert archive.namelist() == [export_file.name] + [
+            name for name, _ in embedded_pdfs
+        ]
+        for name, content in embedded_pdfs:
+            assert archive.read(name) == content
 
 
 def test_zip_files_stream_uses_bulk_size_lookup_before_streaming_images():

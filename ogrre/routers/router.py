@@ -1514,8 +1514,7 @@ def finalize_directory_upload(
 def get_processing_history_scopes(
     request: Request, user_info: dict = Depends(authenticate)
 ):
-    if not REQUIRE_AUTH:
-        user_info = _get_anonymous_user_from_request(request)
+    user_info = _require_processing_history_permission(request, user_info)
     return data_manager.getProcessingHistoryProjects(user_info)
 
 
@@ -1523,8 +1522,7 @@ def get_processing_history_scopes(
 async def get_all_processing_job_history(
     request: Request, user_info: dict = Depends(authenticate)
 ):
-    if not REQUIRE_AUTH:
-        user_info = _get_anonymous_user_from_request(request)
+    user_info = _require_processing_history_permission(request, user_info)
     try:
         body = await request.json()
         return await run_in_threadpool(
@@ -1540,18 +1538,22 @@ async def get_all_processing_job_history(
 def list_processing_jobs(
     rg_id: str, request: Request, user_info: dict = Depends(authenticate)
 ):
-    if not REQUIRE_AUTH:
-        user_info = _get_anonymous_user_from_request(request)
-    if rg_id not in data_manager.getUserRecordGroups(user_info):
-        raise HTTPException(
-            403, detail="You are not authorized to view these processing jobs"
-        )
+    user_info = _require_processing_history_access(rg_id, request, user_info)
     return data_manager.listProcessingJobs(rg_id)
 
 
-def _require_processing_history_access(rg_id, request, user_info):
+def _require_processing_history_permission(request, user_info):
     if not REQUIRE_AUTH:
         user_info = _get_anonymous_user_from_request(request)
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403, detail="You are not authorized to view upload history."
+        )
+    return user_info
+
+
+def _require_processing_history_access(rg_id, request, user_info):
+    user_info = _require_processing_history_permission(request, user_info)
     if rg_id not in data_manager.getUserRecordGroups(user_info):
         raise HTTPException(
             403, detail="You are not authorized to view these processing jobs"
@@ -1707,6 +1709,10 @@ async def get_batch_process_documents_status(
     """Return status for a batch Document AI processing job."""
     if not REQUIRE_AUTH:
         user_info = _get_anonymous_user_from_request(request)
+    if not data_manager.hasPermission(user_info["email"], "upload_document"):
+        raise HTTPException(
+            403, detail="You are not authorized to view upload history."
+        )
     job = data_manager.getProcessingJob(job_id)
     if job is None:
         raise HTTPException(404, detail="Batch document processing job not found")
@@ -2316,6 +2322,7 @@ async def download_records(
         # _log.info(f"returning streaming response")
         return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
+        _log.exception("Failed to export records for %s %s", location, _id)
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 
@@ -2426,6 +2433,7 @@ async def download_project_records_by_document_types(
         headers = {"Content-Disposition": "attachment; filename=records.zip"}
         return StreamingResponse(z, media_type="application/zip", headers=headers)
     except Exception as e:
+        _log.exception("Failed to export records for project %s", project_id)
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 
@@ -2437,6 +2445,11 @@ async def get_users(user_info: dict = Depends(authenticate)):
         List of users, role types
     """
     require_authenticated_admin_route()
+    if not data_manager.hasPermission(user_info["email"], "manage_team"):
+        raise HTTPException(
+            403,
+            detail="You are not authorized to manage users. Please contact a team lead or project manager.",
+        )
     users = data_manager.getUsers(user_info)
     return users
 
