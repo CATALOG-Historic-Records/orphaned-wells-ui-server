@@ -71,3 +71,26 @@ def test_zip_files_stream_uses_bulk_size_lookup_before_streaming_images():
     iter_file_bytes.assert_called_once_with(
         existing_path, bucket_name=util.BUCKET_NAME, chunk_size=65536
     )
+
+
+def test_generate_gcs_paths_returns_dict_when_documents_empty():
+    assert util.generate_gcs_paths([]) == {}
+    assert util.generate_gcs_paths({}) == {}
+    assert util.generate_gcs_paths(None) == {}
+
+
+def test_zip_files_stream_with_empty_documents_succeeds(tmp_path):
+    dummy_file = tmp_path / "records.csv"
+    dummy_file.write_text("id,name\n1,well_1\n")
+    log_file = tmp_path / "zip_log.txt"
+
+    chunks = list(
+        util.zip_files_stream(
+            [str(dummy_file)],
+            documents=[],
+            log_to_file=str(log_file),
+            embedded_pdfs=[],
+        )
+    )
+    assert chunks
+
