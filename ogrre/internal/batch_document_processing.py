@@ -922,6 +922,7 @@ def _update_record_with_attributes(
             processor_attributes
         )
 
+    options = {}
     sorted_attributes_list, _ = util.sortRecordAttributes(
         attributes_list, {"attributes": processor_attributes}, keep_all_attributes=True
     )
@@ -930,6 +931,7 @@ def _update_record_with_attributes(
             util.cleanRecordAttribute(
                 processor_attributes=processor_attributes_dictionary,
                 attribute=attribute,
+                options=options,
             )
 
     final_duplicate_targets = _target_attribute_duplicates(sorted_attributes_list)

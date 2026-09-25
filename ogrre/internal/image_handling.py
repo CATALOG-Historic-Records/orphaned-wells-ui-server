@@ -428,6 +428,7 @@ def process_image(
         record_id=record_id,
     )
     _log.info(f"processed document in doc_ai")
+    options = {}
     sortedAttributesList, _ = util.sortRecordAttributes(
         attributesList, {"attributes": processor_attributes}, keep_all_attributes=True
     )
@@ -436,6 +437,7 @@ def process_image(
             util.cleanRecordAttribute(
                 processor_attributes=prcoessor_attributes_dictionary,
                 attribute=attribute,
+                options=options,
             )
 
     ## gotta update the record in the db
