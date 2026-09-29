@@ -1,0 +1,144 @@
+name: Reconcile Terraform infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      force_plan:
+        description: Plan again even when the recorded inputs and state are current
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_WORKSPACE: ${{ vars.TF_WORKSPACE }}
+  TF_CI_BUCKET: ${{ vars.TF_CI_BUCKET }}
+
+jobs:
+  plan:
+    if: >-
+      github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' &&
+      github.ref == 'refs/heads/main' && vars.ENABLE_TERRAFORM_CI == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      needed: ${{ steps.needed.outputs.value }}
+      plan_uri: ${{ steps.plan.outputs.plan_uri }}
+      sha256: ${{ steps.plan.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the approval environment is protected
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployment/ci/terraform_ci.py approval
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_PLAN_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: gke-gcloud-auth-plugin
+      - id: status
+        run: python3 deployment/ci/terraform_ci.py status
+      - id: needed
+        env:
+          READY: ${{ steps.status.outputs.ready }}
+          FORCE_PLAN: ${{ inputs.force_plan }}
+        run: |
+          if [ "$READY" = true ] && [ "$FORCE_PLAN" != true ]; then
+            echo 'value=false' >> "$GITHUB_OUTPUT"
+            echo 'Terraform inputs and state match the last successful apply.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'value=true' >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.needed.outputs.value == 'true'
+        uses: ./.github/actions/setup-terraform
+        with:
+          workspace: ${{ vars.TF_WORKSPACE }}
+      - if: steps.needed.outputs.value == 'true'
+        run: |
+          python3 deployment/ci/terraform_ci.py current
+          terraform -chdir=deployment/terraform fmt -check -recursive
+          terraform -chdir=deployment/terraform validate
+      - id: plan
+        if: steps.needed.outputs.value == 'true'
+        run: python3 deployment/ci/terraform_ci.py plan
+      # Direct federation has main-plan-only object creation rights. The shared
+      # plan service account cannot publish an executable plan from a PR.
+      - if: steps.needed.outputs.value == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
+      - if: steps.needed.outputs.value == 'true'
+        name: Store the saved plan privately
+        env:
+          PLAN_URI: ${{ steps.plan.outputs.plan_uri }}
+        run: |
+          gcloud storage cp --if-generation-match=0 "$RUNNER_TEMP/tfplan" "$PLAN_URI/tfplan"
+          gcloud storage cp --if-generation-match=0 "$RUNNER_TEMP/tfplan.json" "$PLAN_URI/tfplan.json"
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.needed == 'true'
+    environment: terraform-apply
+    concurrency:
+      group: ogrre-infrastructure-${{ vars.TF_WORKSPACE }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recheck approval protection before authenticating
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployment/ci/terraform_ci.py approval
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_APPLY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: gke-gcloud-auth-plugin
+      - uses: ./.github/actions/setup-terraform
+        with:
+          workspace: ${{ vars.TF_WORKSPACE }}
+      - name: Retrieve the approved plan
+        env:
+          PLAN_URI: ${{ needs.plan.outputs.plan_uri }}
+        run: |
+          gcloud storage cp "$PLAN_URI/tfplan" "$RUNNER_TEMP/tfplan"
+          gcloud storage cp "$PLAN_URI/tfplan.json" "$RUNNER_TEMP/tfplan.json"
+      - name: Verify and apply the approved plan
+        env:
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.sha256 }}
+        run: python3 deployment/ci/terraform_ci.py apply
+
+  ready:
+    needs: [plan, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful reconciliation
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          APPLY_RESULT: ${{ needs.apply.result }}
+          APPLY_NEEDED: ${{ needs.plan.outputs.needed }}
+        run: |
+          test "$PLAN_RESULT" = success
+          if [ "$APPLY_NEEDED" = true ]; then
+            test "$APPLY_RESULT" = success
+          else
+            test "$APPLY_NEEDED" = false
+            test "$APPLY_RESULT" = skipped
+          fi
