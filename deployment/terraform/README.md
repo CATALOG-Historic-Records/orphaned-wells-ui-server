@@ -2,6 +2,12 @@
 
 This directory contains the Terraform configuration used to manage OGRRE backend infrastructure.
 
+For approval-gated fork PR plans and applies, follow
+[Terraform CI setup and rollout](../ci/README.md). When `ENABLE_TERRAFORM_CI=true`,
+merge infrastructure changes to `main` and approve the saved plan in GitHub.
+Updated backend workflows read deploy targets live from the shared workspace;
+the secret-update commands below apply only to the disabled rollout fallback.
+
 ## What is included
 
 - `variables.tf` defines the shared defaults, including the default GKE backends and legacy VM inventory.
@@ -17,8 +23,9 @@ This directory contains the Terraform configuration used to manage OGRRE backend
 
 ## Prerequisites
 
-- Terraform installed (compatible with Terraform 1.x)
+- Terraform installed at the version in `.terraform-version` (1.13.5)
 - Google Cloud SDK installed
+- `gke-gcloud-auth-plugin` installed (`gcloud components install gke-gcloud-auth-plugin`)
 - `jq` installed
 - GitHub CLI `gh` installed and authenticated when updating GitHub Actions secrets from the command line
 - Access to the target GCP project for this deployment
@@ -82,23 +89,114 @@ The import script also unsets `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_AUTHORIZ
 
 ## Terraform commands
 
-Initialize the working directory, backend, and providers:
+Manual planning and applying remain supported alongside GitHub Actions. Both
+paths operate on the same remote workspace and the same shared infrastructure;
+using the staging workflow does not isolate Terraform changes to staging.
+
+### Provider lockfile maintenance
+
+CI and the manual commands below use `-lockfile=readonly`. Commit provider
+checksums for every supported platform before using that mode. The lockfile
+includes Linux x86-64 for GitHub Actions, Linux ARM64 for local containers, and
+both Intel and Apple Silicon macOS.
+
+After changing provider selections, regenerate the platform checksums using
+the pinned Terraform CLI. From the backend repository root:
 
 ```bash
-terraform init
+terraform -chdir=deployment/terraform get
+terraform -chdir=deployment/terraform providers lock \
+  -platform=linux_amd64 \
+  -platform=linux_arm64 \
+  -platform=darwin_amd64 \
+  -platform=darwin_arm64
+git diff -- deployment/terraform/.terraform.lock.hcl
 ```
 
-Create an execution plan with the configured variables:
+These commands prepare modules and fetch provider checksums without accessing
+remote state or applying infrastructure. Review the reported HashiCorp signatures
+and lockfile diff, then commit the updated lockfile. The lock command retains
+existing provider versions that satisfy the configuration constraints.
+
+If initialization warns **Provider lock file not updated**, followed by
+validation reporting **missing or corrupted provider plugins**, check for
+missing platform checksums. Signed archive (`zh:`) checksums can verify a
+download, but validation needs a matching extracted-package (`h1:`) checksum.
+Read-only initialization cannot save that additional checksum. Regenerate the
+lockfile as above instead of disabling checksum verification in CI. See
+[HashiCorp's platform-locking documentation](https://developer.hashicorp.com/terraform/cli/commands/providers/lock#specifying-target-platforms).
+
+### Manual plan
+
+Use Terraform at the version in `.terraform-version` and install the Kubernetes
+authentication plugin. For human ADC authentication, start with:
 
 ```bash
-terraform plan
+cd orphaned-wells-ui-server/deployment/terraform
+unset GOOGLE_APPLICATION_CREDENTIALS GOOGLE_AUTHORIZED_USER_CREDENTIALS CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
+gcloud auth login
+gcloud config set project tidy-outlet-412020
+gcloud auth application-default login
+gcloud components install gke-gcloud-auth-plugin
+
+terraform version
+terraform init -input=false -lockfile=readonly
+terraform workspace select ogrre
+terraform workspace show
+terraform fmt -check -recursive
+terraform validate
+terraform plan -input=false -lock-timeout=5m
 ```
 
-Apply the planned changes:
+Confirm the CLI matches `.terraform-version` and the workspace is `ogrre`
+before proceeding. A speculative plan does not apply changes. It can run while
+CI is enabled, although it may wait for the Terraform state lock. Never disable
+state locking to work around a concurrent operation.
+
+Local `terraform.tfvars` files are loaded automatically. CI uses the committed
+defaults, so reconcile any required production overrides into reviewed shared
+configuration before comparing local and CI plans.
+
+### Manual apply
+
+Use the reviewed infrastructure configuration from current `main`. Coordinate
+the operation with other operators. If Terraform CI is enabled, follow
+[pause and resume for manual operations](../ci/README.md#manual-plan-and-apply)
+before changing the shared infrastructure. Keep the CI flag enabled while
+pausing workflows so deploys do not switch back to stale secret-based targets.
+
+Create a saved plan outside the repository, inspect it, and apply that exact
+plan as a separate deliberate step:
 
 ```bash
-terraform apply
+OGRRE_PLAN_DIR="$(mktemp -d)"
+chmod 700 "$OGRRE_PLAN_DIR"
+terraform plan -input=false -lock-timeout=5m -out="$OGRRE_PLAN_DIR/manual.tfplan"
+terraform show -no-color "$OGRRE_PLAN_DIR/manual.tfplan"
 ```
+
+After reviewing all proposed changes:
+
+```bash
+terraform apply -input=false -lock-timeout=5m "$OGRRE_PLAN_DIR/manual.tfplan"
+terraform output -json kubernetes_deploy_targets | jq .
+rm -f "$OGRRE_PLAN_DIR/manual.tfplan"
+rmdir "$OGRRE_PLAN_DIR"
+```
+
+Passing a saved plan to `terraform apply` executes it without another approval
+prompt. Keep the plan private; it can contain sensitive values. If the state or
+desired configuration changes before apply, generate and review a new plan.
+
+When CI is enabled, a manual state write invalidates the recorded successful
+apply. Resume the staging workflow first and dispatch a fresh run with
+`force_terraform_plan=true`. Review and approve the reconciliation plan (normally
+no resource changes if local inputs match `main`), then resume the remaining
+deployment workflows. Never fabricate or manually edit the CI readiness record.
+
+When CI is disabled, refresh the fallback `K8S_DEPLOY_TARGETS` secret using the
+commands below before deploying. Keep `DEPLOYMENT_SERVICE_KEY_JSON` in either
+mode for phase one.
 
 ## Existing GKE namespaces
 
@@ -151,7 +249,7 @@ Export the GitHub Actions target map:
 terraform output -json kubernetes_deploy_targets | jq -c .
 ```
 
-Store that JSON as the GitHub secret `K8S_DEPLOY_TARGETS`:
+Only for the disabled CI rollout fallback, store that JSON as `K8S_DEPLOY_TARGETS`:
 
 ```bash
 gh auth login
@@ -193,8 +291,9 @@ retain 1 CPU and 6Gi while the staging API requests 500m CPU and 1Gi memory,
 with limits of 1 CPU and 2Gi, across one replica with two Uvicorn workers.
 Production API defaults target two replicas, each with 1 CPU and 4Gi.
 Production workers retain their larger allocation independently.
-After Terraform changes these output values, update `K8S_DEPLOY_TARGETS` and
-deploy the backend; no resource setting takes effect from Terraform alone.
+After approving Terraform changes to these outputs, deploy the backend; no
+resource setting takes effect from Terraform alone. Refresh `K8S_DEPLOY_TARGETS`
+only when the CI rollout flag is disabled.
 
 ### API resource reduction
 
@@ -488,7 +587,7 @@ terraform apply
 terraform output -json kubernetes_deploy_targets | jq -c .
 ```
 
-Store the updated output as the backend repository secret `K8S_DEPLOY_TARGETS`:
+Only for the disabled CI rollout fallback, update the `K8S_DEPLOY_TARGETS` secret:
 
 ```bash
 gh secret set K8S_DEPLOY_TARGETS \

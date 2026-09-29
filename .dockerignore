@@ -27,3 +27,9 @@ uploaded_images/
 deployment/logs/
 deployment/certbot-webroot/
 deployment/secrets/
+gha-creds-*.json
+.infra/
+.terraform-pr/
+**/.terraform/
+**/*.tfstate*
+**/*.tfplan
