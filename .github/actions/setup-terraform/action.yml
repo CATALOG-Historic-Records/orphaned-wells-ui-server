@@ -1,0 +1,55 @@
+name: Set up OGRRE Terraform
+description: Install the pinned CLI and select existing remote state without creating a workspace.
+inputs:
+  directory:
+    description: Terraform configuration directory
+    default: deployment/terraform
+  workspace:
+    description: Existing remote workspace (required for remote initialization)
+    default: ''
+  mode:
+    description: remote, validate (no backend), or output (backend only)
+    default: remote
+outputs:
+  directory:
+    description: Initialized Terraform directory
+    value: ${{ steps.directory.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      env:
+        TF_DIRECTORY: ${{ inputs.directory }}
+      run: echo "version=$(cat "$TF_DIRECTORY/.terraform-version")" >> "$GITHUB_OUTPUT"
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ steps.version.outputs.version }}
+        terraform_wrapper: false
+    - id: directory
+      shell: bash
+      env:
+        TF_DIRECTORY: ${{ inputs.directory }}
+        TF_WORKSPACE: ${{ inputs.workspace }}
+        TF_MODE: ${{ inputs.mode }}
+        TF_IN_AUTOMATION: 'true'
+      run: |
+        set -euo pipefail
+        case "$TF_MODE" in
+          validate)
+            unset TF_WORKSPACE
+            terraform -chdir="$TF_DIRECTORY" init -backend=false -input=false -lockfile=readonly
+            ;;
+          remote|output)
+            [[ "$TF_WORKSPACE" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo '::error::Set TF_WORKSPACE to an existing workspace.'; exit 1; }
+            if [ "$TF_MODE" = output ]; then
+              output_directory="$(mktemp -d "$RUNNER_TEMP/terraform-output.XXXXXX")"
+              cp "$TF_DIRECTORY/backend.tf" "$output_directory/backend.tf"
+              TF_DIRECTORY="$output_directory"
+            fi
+            terraform -chdir="$TF_DIRECTORY" init -input=false -lockfile=readonly
+            terraform -chdir="$TF_DIRECTORY" workspace select "$TF_WORKSPACE"
+            ;;
+          *) echo '::error::Unknown Terraform initialization mode.'; exit 1 ;;
+        esac
+        echo "path=$TF_DIRECTORY" >> "$GITHUB_OUTPUT"

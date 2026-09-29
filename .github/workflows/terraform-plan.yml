@@ -1,0 +1,125 @@
+name: Terraform PR plan
+run-name: Terraform PR plan after deployment checks ${{ github.event.workflow_run.id }}
+
+# workflow_run uses upstream main, including for fork PRs. No candidate code,
+# caches, or artifacts are executed or restored before environment approval.
+on:
+  workflow_run:
+    workflows: [Deployment checks]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-pr-plan-${{ github.event.workflow_run.head_repository.id }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: >-
+      vars.ENABLE_TERRAFORM_CI == 'true' &&
+      github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      needed: ${{ steps.pr.outputs.needed }}
+      number: ${{ steps.pr.outputs.number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: pr
+        name: Identify the PR revision and verify plan approval protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployment/ci/terraform_pr_plan.py prepare
+
+  plan:
+    needs: prepare
+    if: needs.prepare.outputs.needed == 'true'
+    name: Plan PR ${{ needs.prepare.outputs.number }} at ${{ needs.prepare.outputs.head_sha }}
+    environment:
+      name: terraform-plan
+      url: https://github.com/CATALOG-Historic-Records/orphaned-wells-ui-server/pull/${{ needs.prepare.outputs.number }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_WORKSPACE: ${{ vars.TF_WORKSPACE }}
+      TF_CI_BUCKET: ${{ vars.TF_CI_BUCKET }}
+      PR_NUMBER: ${{ needs.prepare.outputs.number }}
+      PR_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      PR_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Recheck the approved revision before authenticating
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deployment/ci/terraform_pr_plan.py check
+      - name: Checkout only the approved PR commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          path: .terraform-pr
+          persist-credentials: false
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_PLAN_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: gke-gcloud-auth-plugin
+      - uses: ./.github/actions/setup-terraform
+        with:
+          directory: .terraform-pr/deployment/terraform
+          workspace: ${{ vars.TF_WORKSPACE }}
+      - name: Plan the approved revision using trusted helpers
+        run: |
+          terraform -chdir=.terraform-pr/deployment/terraform fmt -check -recursive
+          terraform -chdir=.terraform-pr/deployment/terraform validate
+          python3 deployment/ci/terraform_pr_plan.py plan
+      # PR plans are informational only; no executable plan is uploaded.
+
+  report:
+    needs: [prepare, plan]
+    if: always() && needs.prepare.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish the result on the PR commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          PR_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          PR_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: python3 deployment/ci/terraform_pr_plan.py report

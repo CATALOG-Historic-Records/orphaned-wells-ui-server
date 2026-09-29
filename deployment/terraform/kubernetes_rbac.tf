@@ -1,15 +1,19 @@
-data "google_client_config" "current" {}
-
 # Terraform owns long-lived Kubernetes identity and authorization objects.
 # GitHub Actions deploys the application workload but cannot grant Kubernetes
 # permissions to itself or to the runtime Pods.
 provider "kubernetes" {
-  host  = try("https://${google_container_cluster.backend[0].endpoint}", null)
-  token = try(data.google_client_config.current.access_token, null)
+  host = try("https://${google_container_cluster.backend[0].endpoint}", null)
   cluster_ca_certificate = try(
     base64decode(google_container_cluster.backend[0].master_auth[0].cluster_ca_certificate),
     null,
   )
+
+  # Obtain a fresh ADC token at apply time, after the approval wait.
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "gke-gcloud-auth-plugin"
+    args        = ["--use_application_default_credentials"]
+  }
 }
 
 resource "kubernetes_namespace_v1" "backend" {

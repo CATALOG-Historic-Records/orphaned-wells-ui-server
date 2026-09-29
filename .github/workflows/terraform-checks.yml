@@ -1,0 +1,61 @@
+name: Deployment checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - deployment/terraform/**
+      - deployment/kubernetes/**
+      - deployment/ci/**
+      - .github/actions/setup-terraform/**
+      - .github/workflows/terraform-*.yml
+      - .github/workflows/deploy-k8s-*.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.changes.outputs.terraform }}
+      kubernetes: ${{ steps.changes.outputs.kubernetes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 deployment/ci/changed_paths.py "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terraform
+        with:
+          mode: validate
+      - run: |
+          terraform -chdir=deployment/terraform fmt -check -recursive
+          terraform -chdir=deployment/terraform validate
+
+  kubernetes:
+    needs: changes
+    if: needs.changes.outputs.kubernetes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.2
+      - run: python deployment/ci/validate_manifest.py
