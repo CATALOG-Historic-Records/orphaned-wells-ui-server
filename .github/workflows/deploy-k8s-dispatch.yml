@@ -32,7 +32,8 @@ on:
         type: string
     secrets:
       K8S_DEPLOY_TARGETS:
-        required: true
+        description: Rollout fallback only; unused when ENABLE_TERRAFORM_CI is true
+        required: false
       DEPLOYMENT_SERVICE_KEY_JSON:
         required: true
       STORAGE_SERVICE_KEY_JSON:
@@ -68,11 +69,16 @@ env:
 
 jobs:
   deploy:
-    # if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
     name: Deploy ${{ inputs.DEPLOY_ENV }} to GKE
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Applies and all deployment entry points share this lock. The staging
+    # orchestrator uses a different group so nested workflows cannot deadlock.
+    concurrency:
+      group: ${{ vars.ENABLE_TERRAFORM_CI == 'true' && format('ogrre-infrastructure-{0}', vars.TF_WORKSPACE) || format('deploy-k8s-workload-{0}', inputs.DEPLOY_ENV) }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -129,6 +135,50 @@ jobs:
       - name: Prepare deployment workspace
         run: mkdir -p deployment/secrets deployment/kubernetes/rendered
 
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.DEPLOYMENT_SERVICE_KEY_JSON }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Checkout current infrastructure configuration
+        if: vars.ENABLE_TERRAFORM_CI == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: .infra
+
+      - name: Require applied infrastructure
+        if: vars.ENABLE_TERRAFORM_CI == 'true'
+        env:
+          TF_WORKSPACE: ${{ vars.TF_WORKSPACE }}
+          TF_CI_BUCKET: ${{ vars.TF_CI_BUCKET }}
+        run: python3 .infra/deployment/ci/terraform_ci.py ready
+
+      - name: Initialize live Terraform outputs
+        if: vars.ENABLE_TERRAFORM_CI == 'true'
+        id: terraform
+        uses: ./.infra/.github/actions/setup-terraform
+        with:
+          directory: .infra/deployment/terraform
+          workspace: ${{ vars.TF_WORKSPACE }}
+          mode: output
+
+      - name: Read live deploy targets
+        if: vars.ENABLE_TERRAFORM_CI == 'true'
+        env:
+          TF_DIRECTORY: ${{ steps.terraform.outputs.directory }}
+          TF_WORKSPACE: ${{ vars.TF_WORKSPACE }}
+        run: terraform -chdir="$TF_DIRECTORY" output -json kubernetes_deploy_targets > deployment/secrets/k8s-deploy-targets.json
+
+      - name: Read rollout fallback targets
+        if: vars.ENABLE_TERRAFORM_CI != 'true'
+        env:
+          K8S_DEPLOY_TARGETS_JSON: ${{ secrets.K8S_DEPLOY_TARGETS }}
+        run: printf '%s' "$K8S_DEPLOY_TARGETS_JSON" > deployment/secrets/k8s-deploy-targets.json
+
       - name: Add storage service key json file
         uses: jsdaniell/create-json@v1.2.3
         with:
@@ -145,13 +195,16 @@ jobs:
         id: target
         env:
           DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
-          K8S_DEPLOY_TARGETS_JSON: ${{ secrets.K8S_DEPLOY_TARGETS }}
         run: |
           targets_file="deployment/secrets/k8s-deploy-targets.json"
-          printf '%s' "$K8S_DEPLOY_TARGETS_JSON" > "$targets_file"
 
-          if ! jq -e --arg env "$DEPLOY_ENV" '.[$env]' "$targets_file" > /dev/null; then
-            echo "::error::K8S_DEPLOY_TARGETS does not contain an entry for ${DEPLOY_ENV}"
+          if ! jq -e --arg env "$DEPLOY_ENV" 'type == "object" and (.[$env] | type == "object")' "$targets_file" > /dev/null; then
+            echo "::error::Terraform deploy targets do not contain an enabled entry for ${DEPLOY_ENV}"
+            exit 1
+          fi
+
+          if ! jq -e --arg env "$DEPLOY_ENV" '.[$env] | all(.[]; (type == "string" or type == "number" or . == null) and (tostring | test("[\\r\\n]") | not))' "$targets_file" > /dev/null; then
+            echo "::error::Terraform deploy targets contain invalid field values"
             exit 1
           fi
 
@@ -226,7 +279,7 @@ jobs:
             key="${item%%:*}"
             value="${item#*:}"
             if [ -z "$value" ]; then
-              echo "::error::Missing ${key} in K8S_DEPLOY_TARGETS for ${DEPLOY_ENV}"
+              echo "::error::Missing ${key} in Terraform deploy targets for ${DEPLOY_ENV}"
               exit 1
             fi
           done
@@ -370,14 +423,6 @@ jobs:
             echo "::error::${DEPLOY_ENV^^}_ENV did not provide required runtime key(s): ${missing_keys[*]}"
             exit 1
           fi
-
-      - name: Authenticate to GCP
-        uses: google-github-actions/auth@v3
-        with:
-          credentials_json: ${{ secrets.DEPLOYMENT_SERVICE_KEY_JSON }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v3
 
       - name: Get GKE credentials
         uses: google-github-actions/get-gke-credentials@v3

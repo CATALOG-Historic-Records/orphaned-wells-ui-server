@@ -31,7 +31,7 @@ def parse_target(tmp_path):
     (tmp_path / "deployment/secrets").mkdir(parents=True)
     output = tmp_path / "github-output"
 
-    def parse(environment, resources=None):
+    def parse(environment, resources=None, raw=None):
         target = {
             "cluster_name": "test-cluster",
             "cluster_location": "us-central1",
@@ -41,13 +41,15 @@ def parse_target(tmp_path):
             "storage_bucket_name": "test-uploads",
             **(resources or {}),
         }
+        (tmp_path / "deployment/secrets/k8s-deploy-targets.json").write_text(
+            json.dumps({environment: target}) if raw is None else raw
+        )
         subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
             cwd=tmp_path,
             env={
                 "PATH": os.environ["PATH"],
                 "DEPLOY_ENV": environment,
-                "K8S_DEPLOY_TARGETS_JSON": json.dumps({environment: target}),
                 "GITHUB_OUTPUT": str(output),
             },
             check=True,
@@ -113,3 +115,17 @@ def test_explicit_resources_are_preserved(
     }
     target = parse_target(environment, resources)
     assert {key: target[key] for key in resources} == resources
+
+
+@pytest.mark.parametrize(
+    "raw", ["", "not json", "[]", "{}", '{"ca": null}', '{"ca": []}']
+)
+def test_missing_disabled_or_malformed_target_stops_deployment(parse_target, raw):
+    with pytest.raises(subprocess.CalledProcessError):
+        parse_target("ca", raw=raw)
+
+
+@pytest.mark.parametrize("value", ["", None, [], {}, "host\ninjected_output=value"])
+def test_invalid_required_field_stops_deployment(parse_target, value):
+    with pytest.raises(subprocess.CalledProcessError):
+        parse_target("staging", {"host": value})

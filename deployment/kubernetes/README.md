@@ -154,7 +154,20 @@ To explicitly disable GKE planning:
 terraform plan -var='enable_gke=false'
 ```
 
-## Derive `K8S_DEPLOY_TARGETS`
+## Live deploy targets and rollout fallback
+
+With `ENABLE_TERRAFORM_CI=true`, updated deployment workflows authenticate using
+`DEPLOYMENT_SERVICE_KEY_JSON`, select the existing Terraform workspace, and read
+`kubernetes_deploy_targets` live. They require a successful apply of current
+`main` infrastructure before mutating workloads. Follow the
+[Terraform CI rollout guide](../ci/README.md) before enabling this flag,
+including propagating the workflows to collaborator branches.
+
+The `K8S_DEPLOY_TARGETS` export/update instructions below are only for the rollout
+fallback while the flag is disabled. Once enabled, apply through GitHub and
+redeploy; manual secret refreshes are unnecessary.
+
+### Derive `K8S_DEPLOY_TARGETS` for the rollout fallback
 
 After Terraform apply, export the deployment target map:
 
@@ -181,7 +194,7 @@ terraform output -json kubernetes_deploy_targets | jq '.staging'
 terraform output -json kubernetes_deploy_targets | jq '.newts'
 ```
 
-The `host` field controls the Kubernetes Ingress host and the Google-managed certificate domain. DNS alone is not enough; after changing hostnames in Terraform, update `K8S_DEPLOY_TARGETS` and redeploy the backend.
+The `host` field controls the Kubernetes Ingress host and the Google-managed certificate domain. DNS alone is not enough; after applying hostname changes, redeploy the backend. Refresh `K8S_DEPLOY_TARGETS` first only for the disabled CI rollout fallback.
 
 The target map also includes worker resource configuration. GitHub Actions
 generates `UVICORN_WORKERS`, `PROCESSING_JOB_*`, and
@@ -200,7 +213,7 @@ Keep the existing deployment secrets:
 - `DEPLOYMENT_SERVICE_KEY_JSON`
 - `STORAGE_SERVICE_KEY_JSON`
 - `DOCUMENT_AI_SERVICE_KEY_JSON`
-- `K8S_DEPLOY_TARGETS`
+- `K8S_DEPLOY_TARGETS` (only for the disabled Terraform CI rollout fallback)
 
 Each backend environment also needs an environment-file secret:
 
@@ -558,7 +571,7 @@ gke_backend_overrides = {
 Set `enable_kubernetes_workloads = false` for a collaborator whose cloud
 configuration should remain managed but which is not ready to deploy to GKE.
 Terraform then omits the namespace, runtime ServiceAccounts/RBAC, and
-`K8S_DEPLOY_TARGETS` entry. CA currently uses this setting; change it to
+`kubernetes_deploy_targets` entry. CA currently uses this setting; change it to
 `true` before deploying CA through its existing workflow.
 
 Optional per-backend settings can be added in the same map:
@@ -586,7 +599,7 @@ terraform plan
 terraform apply
 ```
 
-3. Export and update `K8S_DEPLOY_TARGETS`. Run `gh auth login` first if this machine has not been authenticated:
+3. Enabled CI reads targets live after the approved apply. Only for the disabled rollout fallback, update `K8S_DEPLOY_TARGETS` (authenticate with `gh auth login` first):
 
 ```bash
 gh secret set K8S_DEPLOY_TARGETS \
@@ -694,7 +707,7 @@ its processing workers retain 1850m CPU / 12 GiB.
    Use peak usage and response times under load to assess headroom; an idle
    `kubectl top` snapshot does not establish a safe limit.
 
-Apply Terraform, refresh `K8S_DEPLOY_TARGETS`, and deploy the affected environments
+Approve Terraform apply and deploy the affected environments
 with the updated workflow to activate their smaller targets. For an otherwise
 up-to-date workspace, the plan updates staging API output from a 1 CPU / 4 GiB
 request and limit to a 500m CPU / 1 GiB request and 1 CPU / 2 GiB limit. It
@@ -714,8 +727,7 @@ Update API requests and limits together and compare peak usage, throttling, and
 latency after each deployment.
 
 To roll staging back to its previous API allocation, merge this entry into
-the existing `gke_backend_overrides` map in `terraform.tfvars`, then apply,
-refresh `K8S_DEPLOY_TARGETS`, and redeploy staging:
+the existing `gke_backend_overrides` map in `terraform.tfvars`, then apply and redeploy staging (refresh the target secret only for the disabled CI fallback):
 
 ```hcl
 gke_backend_overrides = {

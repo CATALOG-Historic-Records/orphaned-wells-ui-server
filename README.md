@@ -1,6 +1,14 @@
 # orphaned-wells-ui-server
 Backend server-side code for the orphaned wells UI
 
+Backend infrastructure automation and the approval-gated deployment rollout are
+documented in [Terraform CI](deployment/ci/README.md). The new flow is disabled
+until `ENABLE_TERRAFORM_CI=true`; phase one retains the existing deployment key.
+Terraform changes in fork PRs automatically queue a cloud plan after static
+checks, with approval through `terraform-plan`. Authorized reviewers may approve
+their own plan runs; normal PR merge reviews and `terraform-apply` approval remain
+separate. Manual Terraform plan/apply remains supported in the deployment guide.
+
 ## Getting started (developer)
 
 ### Prerequisites
