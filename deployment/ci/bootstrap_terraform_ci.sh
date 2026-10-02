@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Operator-run bootstrap, deliberately outside the application Terraform state.
+# Requires gcloud, gh, and python3 on PATH.
 # Requires project IAM/service-account/WIF administration and bucket administration.
 set -euo pipefail
 
@@ -34,10 +35,9 @@ if ! gcloud iam workload-identity-pools describe "$POOL" --location=global --pro
   gcloud iam workload-identity-pools create "$POOL" --location=global --project="$PROJECT_ID" --display-name='OGRRE Terraform CI'
 fi
 
-# Claims identify upstream workflow code and the appropriate approval environment.
+# Only main reconciliation can authenticate; PR and workflow_run events are denied.
 apply_workflow="$REPOSITORY/.github/workflows/terraform-apply.yml@refs/heads/main"
-plan_workflow="$REPOSITORY/.github/workflows/terraform-plan.yml@refs/heads/main"
-pipeline="('job_workflow_ref' in assertion && assertion.job_workflow_ref == '$apply_workflow' && assertion.ref == 'refs/heads/main' && assertion.event_name in ['push', 'workflow_dispatch']) ? (assertion.sub == 'repo:$REPOSITORY:environment:terraform-apply' ? 'apply' : 'main-plan') : ((assertion.workflow_ref == '$plan_workflow' && assertion.ref == 'refs/heads/main' && assertion.event_name == 'workflow_run' && assertion.sub == 'repo:$REPOSITORY:environment:terraform-plan') ? 'pr-plan' : 'denied')"
+pipeline="('job_workflow_ref' in assertion && assertion.job_workflow_ref == '$apply_workflow' && assertion.ref == 'refs/heads/main' && assertion.event_name in ['push', 'workflow_dispatch']) ? (assertion.sub == 'repo:$REPOSITORY:environment:terraform-apply' ? 'apply' : 'main-plan') : 'denied'"
 condition="assertion.repository_id == '$repository_id' && assertion.repository_owner_id == '$owner_id' && attribute.pipeline != 'denied'"
 if gcloud iam workload-identity-pools providers describe "$PROVIDER" --workload-identity-pool="$POOL" --location=global --project="$PROJECT_ID" >/dev/null 2>&1; then
   provider_operation=update-oidc
@@ -52,12 +52,25 @@ gcloud iam workload-identity-pools providers "$provider_operation" "$PROVIDER" \
   --attribute-condition="$condition"
 
 principal_base="principalSet://iam.googleapis.com/projects/$project_number/locations/global/workloadIdentityPools/$POOL/attribute.pipeline"
-for pipeline_name in pr-plan main-plan; do
-  gcloud iam service-accounts add-iam-policy-binding "$PLAN_ACCOUNT" --project="$PROJECT_ID" \
-    --role=roles/iam.workloadIdentityUser --member="$principal_base/$pipeline_name" >/dev/null
-done
+# Retire the grant from the former approval-gated fork plan workflow. Fetch and
+# parse separately so an IAM read failure cannot be mistaken for an absent grant.
+plan_policy="$(gcloud iam service-accounts get-iam-policy "$PLAN_ACCOUNT" --project="$PROJECT_ID" --format=json)"
+has_pr_binding="$(python3 -c '
+import json, sys
+policy = json.load(sys.stdin)
+print(any(binding.get("role") == "roles/iam.workloadIdentityUser"
+          and not binding.get("condition") and sys.argv[1] in binding.get("members", [])
+          for binding in policy.get("bindings", [])))
+' "$principal_base/pr-plan" <<< "$plan_policy")"
+if [[ "$has_pr_binding" == True ]]; then
+  gcloud iam service-accounts remove-iam-policy-binding "$PLAN_ACCOUNT" --project="$PROJECT_ID" \
+    --role=roles/iam.workloadIdentityUser --member="$principal_base/pr-plan" --condition=None >/dev/null
+fi
+# Explicit None avoids prompts when a policy already has conditional bindings.
+gcloud iam service-accounts add-iam-policy-binding "$PLAN_ACCOUNT" --project="$PROJECT_ID" \
+  --role=roles/iam.workloadIdentityUser --member="$principal_base/main-plan" --condition=None >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$APPLY_ACCOUNT" --project="$PROJECT_ID" \
-  --role=roles/iam.workloadIdentityUser --member="$principal_base/apply" >/dev/null
+  --role=roles/iam.workloadIdentityUser --member="$principal_base/apply" --condition=None >/dev/null
 
 for role in roles/container.admin roles/compute.networkAdmin roles/dns.admin roles/storage.admin roles/serviceusage.serviceUsageAdmin; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$APPLY_ACCOUNT" --role="$role" --condition=None >/dev/null
@@ -81,7 +94,7 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$P
 
 for account in "$PLAN_ACCOUNT" "$DEPLOY_SERVICE_ACCOUNT"; do
   gcloud storage buckets add-iam-policy-binding "gs://$STATE_BUCKET" \
-    --member="serviceAccount:$account" --role=roles/storage.objectViewer >/dev/null
+    --member="serviceAccount:$account" --role=roles/storage.objectViewer --condition=None >/dev/null
 done
 # Planning can acquire/release this workspace's lock, but cannot write state.
 gcloud storage buckets add-iam-policy-binding "gs://$STATE_BUCKET" \
@@ -100,8 +113,13 @@ JSON
 gcloud storage buckets update "gs://$TF_CI_BUCKET" --lifecycle-file="$lifecycle_file"
 for account in "$PLAN_ACCOUNT" "$DEPLOY_SERVICE_ACCOUNT"; do
   gcloud storage buckets add-iam-policy-binding "gs://$TF_CI_BUCKET" \
-    --member="serviceAccount:$account" --role=roles/storage.objectViewer >/dev/null
+    --member="serviceAccount:$account" --role=roles/storage.objectViewer --condition=None >/dev/null
 done
+# No-change completion may replace only this workspace's CI readiness record.
+# It gains no Terraform state writes, artifact writes, or infrastructure writes.
+gcloud storage buckets add-iam-policy-binding "gs://$TF_CI_BUCKET" \
+  --member="serviceAccount:$PLAN_ACCOUNT" --role=roles/storage.objectAdmin \
+  --condition="expression=resource.name == 'projects/_/buckets/$TF_CI_BUCKET/objects/status/$TF_WORKSPACE.json',title=terraform-readiness" >/dev/null
 # No PR identity can publish plans or readiness records. Object Creator cannot
 # overwrite another run's saved plan; apply additionally verifies its checksum.
 gcloud storage buckets add-iam-policy-binding "gs://$TF_CI_BUCKET" \
@@ -116,6 +134,6 @@ TF_APPLY_SERVICE_ACCOUNT=$APPLY_ACCOUNT
 TF_WORKSPACE=$TF_WORKSPACE
 TF_CI_BUCKET=$TF_CI_BUCKET
 
-Create and protect the terraform-plan and terraform-apply GitHub Environments before setting
+Create and protect the terraform-apply GitHub Environment before setting
 ENABLE_TERRAFORM_CI=true. See deployment/ci/README.md for the rollout procedure.
 EOF

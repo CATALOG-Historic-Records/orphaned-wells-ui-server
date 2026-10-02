@@ -7,6 +7,7 @@ on:
 
 jobs:
   deploy_gke_rrc:
+    name: Deploy to GKE (Texas RRC)
     if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
     uses: ./.github/workflows/deploy-k8s-dispatch.yml
     with:

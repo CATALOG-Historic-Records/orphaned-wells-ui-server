@@ -2,9 +2,10 @@
 
 This directory contains the Terraform configuration used to manage OGRRE backend infrastructure.
 
-For approval-gated fork PR plans and applies, follow
+For credential-free PR checks and approval-gated applies from `main`, follow
 [Terraform CI setup and rollout](../ci/README.md). When `ENABLE_TERRAFORM_CI=true`,
-merge infrastructure changes to `main` and approve the saved plan in GitHub.
+merge infrastructure changes to `main` and approve saved plans containing changes.
+Verified no-change plans finish automatically without applying.
 Updated backend workflows read deploy targets live from the shared workspace;
 the secret-update commands below apply only to the disabled rollout fallback.
 
@@ -34,7 +35,9 @@ the secret-update commands below apply only to the disabled rollout fallback.
 
 ## Service Accounts
 
-Terraform uses the Terraform platform identity only. Do not run Terraform with the backend storage or Document AI runtime keys.
+Manual Terraform operations use a human or dedicated platform identity. CI uses
+separate plan and apply accounts through WIF. Do not run Terraform with the
+backend storage or Document AI runtime keys.
 
 Recommended identities:
 
@@ -44,6 +47,11 @@ Recommended identities:
 | Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | Local `ogrre/.env` as `DOCUMENT_AI_SERVICE_KEY`; GitHub secret `DOCUMENT_AI_SERVICE_KEY_JSON` |
 | Terraform platform, for example a privileged human operator or dedicated infrastructure account | Terraform cloud infrastructure plus Kubernetes namespaces and runtime RBAC | Local `GOOGLE_APPLICATION_CREDENTIALS` or user ADC |
 | GitHub deployment, `ogrre-deployment-ci` | Workload-only Kubernetes deployments | GitHub secret `DEPLOYMENT_SERVICE_KEY_JSON` |
+| Terraform CI plan, `github-terraform-plan` | Live planning and automatic no-change completion | WIF; repository variable `TF_PLAN_SERVICE_ACCOUNT` |
+| Terraform CI apply, `github-terraform-ci` | Approved saved-plan apply | WIF and protected `terraform-apply` Environment; variable `TF_APPLY_SERVICE_ACCOUNT` |
+
+See [CI identity permissions](../ci/README.md#identities-and-artifact-permissions)
+for the narrower plan account and bootstrap configuration.
 
 The Terraform platform identity needs enough project and Kubernetes access to manage the infrastructure in this directory:
 
@@ -140,6 +148,7 @@ gcloud auth application-default login
 gcloud components install gke-gcloud-auth-plugin
 
 terraform version
+unset TF_WORKSPACE
 terraform init -input=false -lockfile=readonly
 terraform workspace select ogrre
 terraform workspace show
@@ -190,8 +199,9 @@ desired configuration changes before apply, generate and review a new plan.
 
 When CI is enabled, a manual state write invalidates the recorded successful
 apply. Resume the staging workflow first and dispatch a fresh run with
-`force_terraform_plan=true`. Review and approve the reconciliation plan (normally
-no resource changes if local inputs match `main`), then resume the remaining
+`force_terraform_plan=true`. Review the reconciliation plan. If local inputs match
+`main`, no-change verification restores readiness automatically; otherwise review
+and approve the proposed changes. After reconciliation succeeds, resume the remaining
 deployment workflows. Never fabricate or manually edit the CI readiness record.
 
 When CI is disabled, refresh the fallback `K8S_DEPLOY_TARGETS` secret using the

@@ -1,5 +1,6 @@
 name: Deployment checks
 
+# PR code is checked without cloud credentials, OIDC, or remote Terraform state.
 on:
   pull_request:
     branches: [main]
@@ -20,42 +21,80 @@ concurrency:
 
 jobs:
   changes:
+    name: Detect deployment changes
     runs-on: ubuntu-latest
     outputs:
       terraform: ${{ steps.changes.outputs.terraform }}
       kubernetes: ${{ steps.changes.outputs.kubernetes }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out pull request and base history
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: changes
+          persist-credentials: false
+      - name: Identify Terraform and Kubernetes changes
+        id: changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 deployment/ci/changed_paths.py "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - name: Summarize detected changes and required checks
+        env:
+          TERRAFORM_CHANGED: ${{ steps.changes.outputs.terraform }}
+          KUBERNETES_CHANGED: ${{ steps.changes.outputs.kubernetes }}
+        run: |
+          {
+            echo '### Deployment change detection'
+            echo
+            if [ "$TERRAFORM_CHANGED" = true ]; then
+              echo '- Terraform: relevant file changes detected; configuration validation will run.'
+            else
+              echo '- Terraform: no relevant file changes detected; configuration validation will be skipped.'
+            fi
+            if [ "$KUBERNETES_CHANGED" = true ]; then
+              echo '- Kubernetes: relevant file changes detected; manifest checks will run.'
+            else
+              echo '- Kubernetes: no relevant file changes detected; manifest checks will be skipped.'
+            fi
+            echo
+            echo 'This detects changed PR files, not changes to live infrastructure. Check the validation jobs for their results.'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   terraform:
+    name: Validate Terraform configuration
     needs: changes
     if: needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-terraform
+      - name: Check out pull request
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Initialize Terraform without a backend
+        uses: ./.github/actions/setup-terraform
         with:
           mode: validate
-      - run: |
+      - name: Check Terraform formatting and validate configuration
+        run: |
           terraform -chdir=deployment/terraform fmt -check -recursive
           terraform -chdir=deployment/terraform validate
 
   kubernetes:
+    name: Check Kubernetes manifest
     needs: changes
     if: needs.changes.outputs.kubernetes == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out pull request
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install PyYAML==6.0.2
-      - run: python deployment/ci/validate_manifest.py
+      - name: Install manifest validation dependency
+        run: python -m pip install PyYAML==6.0.2
+      - name: Render and validate Kubernetes manifest
+        run: python deployment/ci/validate_manifest.py
