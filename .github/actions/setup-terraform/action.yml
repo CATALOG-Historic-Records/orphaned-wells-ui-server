@@ -17,16 +17,19 @@ outputs:
 runs:
   using: composite
   steps:
-    - id: version
+    - name: Read pinned Terraform version
+      id: version
       shell: bash
       env:
         TF_DIRECTORY: ${{ inputs.directory }}
       run: echo "version=$(cat "$TF_DIRECTORY/.terraform-version")" >> "$GITHUB_OUTPUT"
-    - uses: hashicorp/setup-terraform@v3
+    - name: Install pinned Terraform CLI
+      uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ steps.version.outputs.version }}
         terraform_wrapper: false
-    - id: directory
+    - name: Initialize Terraform directory
+      id: directory
       shell: bash
       env:
         TF_DIRECTORY: ${{ inputs.directory }}
@@ -44,11 +47,13 @@ runs:
             [[ "$TF_WORKSPACE" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo '::error::Set TF_WORKSPACE to an existing workspace.'; exit 1; }
             if [ "$TF_MODE" = output ]; then
               output_directory="$(mktemp -d "$RUNNER_TEMP/terraform-output.XXXXXX")"
-              cp "$TF_DIRECTORY/backend.tf" "$output_directory/backend.tf"
+              # init also discovers providers in state, even without resources in config.
+              cp "$TF_DIRECTORY/backend.tf" "$TF_DIRECTORY/.terraform.lock.hcl" "$output_directory/"
               TF_DIRECTORY="$output_directory"
             fi
             terraform -chdir="$TF_DIRECTORY" init -input=false -lockfile=readonly
-            terraform -chdir="$TF_DIRECTORY" workspace select "$TF_WORKSPACE"
+            # select rejects TF_WORKSPACE even when it names the same workspace.
+            env -u TF_WORKSPACE terraform -chdir="$TF_DIRECTORY" workspace select "$TF_WORKSPACE"
             ;;
           *) echo '::error::Unknown Terraform initialization mode.'; exit 1 ;;
         esac

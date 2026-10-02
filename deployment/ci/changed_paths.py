@@ -15,7 +15,7 @@ def classify(paths):
         or path
         in (
             "deployment/ci/terraform_ci.py",
-            "deployment/ci/terraform_pr_plan.py",
+            "deployment/ci/bootstrap_terraform_ci.sh",
             "deployment/ci/changed_paths.py",
         )
         for path in paths
