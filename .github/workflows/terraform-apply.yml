@@ -32,61 +32,108 @@ jobs:
       needed: ${{ steps.needed.outputs.value }}
       plan_uri: ${{ steps.plan.outputs.plan_uri }}
       sha256: ${{ steps.plan.outputs.sha256 }}
+      generation: ${{ steps.plan.outputs.generation }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out infrastructure configuration
+        uses: actions/checkout@v4
       - name: Verify the approval environment is protected
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 deployment/ci/terraform_ci.py approval
-      - uses: google-github-actions/auth@v3
+      - name: Authenticate for Terraform planning
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
           service_account: ${{ vars.TF_PLAN_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v3
+      - name: Set up Google Cloud CLI and GKE authentication plugin
+        uses: google-github-actions/setup-gcloud@v3
         with:
           install_components: gke-gcloud-auth-plugin
-      - id: status
+      - name: Check infrastructure readiness
+        id: status
         run: python3 deployment/ci/terraform_ci.py status
-      - id: needed
+      - name: Decide whether Terraform reconciliation is needed
+        id: needed
         env:
           READY: ${{ steps.status.outputs.ready }}
           FORCE_PLAN: ${{ inputs.force_plan }}
         run: |
           if [ "$READY" = true ] && [ "$FORCE_PLAN" != true ]; then
             echo 'value=false' >> "$GITHUB_OUTPUT"
-            echo 'Terraform inputs and state match the last successful apply.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Terraform inputs and state match the last successful reconciliation.' >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'value=true' >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.needed.outputs.value == 'true'
+      - name: Initialize Terraform workspace
+        if: steps.needed.outputs.value == 'true'
         uses: ./.github/actions/setup-terraform
         with:
           workspace: ${{ vars.TF_WORKSPACE }}
-      - if: steps.needed.outputs.value == 'true'
+      - name: Verify current Terraform configuration and formatting
+        if: steps.needed.outputs.value == 'true'
         run: |
           python3 deployment/ci/terraform_ci.py current
           terraform -chdir=deployment/terraform fmt -check -recursive
           terraform -chdir=deployment/terraform validate
-      - id: plan
+      - name: Generate Terraform plan
+        id: plan
         if: steps.needed.outputs.value == 'true'
         run: python3 deployment/ci/terraform_ci.py plan
-      # Direct federation has main-plan-only object creation rights. The shared
-      # plan service account cannot publish an executable plan from a PR.
-      - if: steps.needed.outputs.value == 'true'
+      # Direct federation has main-plan-only object creation rights. The plan
+      # service account itself has no artifact publication permission.
+      - name: Authenticate for plan upload
+        if: steps.needed.outputs.value == 'true'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
       - if: steps.needed.outputs.value == 'true'
         name: Store the saved plan privately
+        run: python3 deployment/ci/terraform_ci.py upload
+
+  noop:
+    needs: plan
+    if: needs.plan.outputs.needed == 'true' && needs.plan.outputs.has_changes == 'false'
+    concurrency:
+      group: ogrre-infrastructure-${{ vars.TF_WORKSPACE }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out infrastructure configuration
+        uses: actions/checkout@v4
+      - name: Authenticate for no-change verification
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_PLAN_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+      - name: Initialize live Terraform outputs
+        id: terraform
+        uses: ./.github/actions/setup-terraform
+        with:
+          workspace: ${{ vars.TF_WORKSPACE }}
+          mode: output
+      - name: Retrieve the saved no-change plan
         env:
-          PLAN_URI: ${{ steps.plan.outputs.plan_uri }}
+          PLAN_URI: ${{ needs.plan.outputs.plan_uri }}
         run: |
-          gcloud storage cp --if-generation-match=0 "$RUNNER_TEMP/tfplan" "$PLAN_URI/tfplan"
-          gcloud storage cp --if-generation-match=0 "$RUNNER_TEMP/tfplan.json" "$PLAN_URI/tfplan.json"
+          gcloud storage cp "$PLAN_URI/tfplan" "$RUNNER_TEMP/tfplan"
+          gcloud storage cp "$PLAN_URI/tfplan.json" "$RUNNER_TEMP/tfplan.json"
+      - name: Verify no changes and record infrastructure readiness
+        env:
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.sha256 }}
+          EXPECTED_STATE_GENERATION: ${{ needs.plan.outputs.generation }}
+          TF_OUTPUT_DIRECTORY: ${{ steps.terraform.outputs.directory }}
+        run: python3 deployment/ci/terraform_ci.py noop
 
   apply:
     needs: plan
-    if: needs.plan.outputs.needed == 'true'
+    if: needs.plan.outputs.needed == 'true' && needs.plan.outputs.has_changes == 'true'
     environment: terraform-apply
     concurrency:
       group: ogrre-infrastructure-${{ vars.TF_WORKSPACE }}
@@ -98,19 +145,23 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out infrastructure configuration
+        uses: actions/checkout@v4
       - name: Recheck approval protection before authenticating
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 deployment/ci/terraform_ci.py approval
-      - uses: google-github-actions/auth@v3
+      - name: Authenticate for Terraform apply
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.TF_WIF_PROVIDER }}
           service_account: ${{ vars.TF_APPLY_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v3
+      - name: Set up Google Cloud CLI and GKE authentication plugin
+        uses: google-github-actions/setup-gcloud@v3
         with:
           install_components: gke-gcloud-auth-plugin
-      - uses: ./.github/actions/setup-terraform
+      - name: Initialize Terraform workspace
+        uses: ./.github/actions/setup-terraform
         with:
           workspace: ${{ vars.TF_WORKSPACE }}
       - name: Retrieve the approved plan
@@ -122,23 +173,39 @@ jobs:
       - name: Verify and apply the approved plan
         env:
           EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.sha256 }}
+          EXPECTED_STATE_GENERATION: ${{ needs.plan.outputs.generation }}
         run: python3 deployment/ci/terraform_ci.py apply
 
   ready:
-    needs: [plan, apply]
-    if: always()
+    needs: [plan, noop, apply]
+    if: >-
+      always() &&
+      github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' &&
+      github.ref == 'refs/heads/main' && vars.ENABLE_TERRAFORM_CI == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - name: Require successful reconciliation
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           APPLY_RESULT: ${{ needs.apply.result }}
-          APPLY_NEEDED: ${{ needs.plan.outputs.needed }}
+          NOOP_RESULT: ${{ needs.noop.result }}
+          RECONCILIATION_NEEDED: ${{ needs.plan.outputs.needed }}
+          HAS_CHANGES: ${{ needs.plan.outputs.has_changes }}
         run: |
           test "$PLAN_RESULT" = success
-          if [ "$APPLY_NEEDED" = true ]; then
-            test "$APPLY_RESULT" = success
+          if [ "$RECONCILIATION_NEEDED" = true ]; then
+            if [ "$HAS_CHANGES" = true ]; then
+              test "$APPLY_RESULT" = success
+              test "$NOOP_RESULT" = skipped
+            else
+              test "$HAS_CHANGES" = false
+              test "$NOOP_RESULT" = success
+              test "$APPLY_RESULT" = skipped
+            fi
           else
-            test "$APPLY_NEEDED" = false
+            test "$RECONCILIATION_NEEDED" = false
+            test -z "$HAS_CHANGES"
             test "$APPLY_RESULT" = skipped
+            test "$NOOP_RESULT" = skipped
           fi

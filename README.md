@@ -2,12 +2,14 @@
 Backend server-side code for the orphaned wells UI
 
 Backend infrastructure automation and the approval-gated deployment rollout are
-documented in [Terraform CI](deployment/ci/README.md). The new flow is disabled
+documented in [Terraform CI](deployment/ci/README.md). Cloud plan/apply is disabled
 until `ENABLE_TERRAFORM_CI=true`; phase one retains the existing deployment key.
-Terraform changes in fork PRs automatically queue a cloud plan after static
-checks, with approval through `terraform-plan`. Authorized reviewers may approve
-their own plan runs; normal PR merge reviews and `terraform-apply` approval remain
-separate. Manual Terraform plan/apply remains supported in the deployment guide.
+Terraform PRs, including forks, run formatting and validation without cloud
+credentials or remote state. Live plans run from reviewed `main`; plans with
+changes require separate `terraform-apply` approval. Verified no-change plans
+finish automatically without applying. Manual Terraform
+plan/apply remains supported in the deployment guide. Existing installations
+should follow the [PR workflow migration](deployment/ci/README.md#migrating-from-approved-fork-plans).
 
 ## Getting started (developer)
 

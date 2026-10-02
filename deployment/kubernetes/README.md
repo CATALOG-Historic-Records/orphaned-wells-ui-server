@@ -110,7 +110,7 @@ The identity running Terraform needs permissions to manage GKE, Compute addresse
 
 ## Identities and Kubernetes authorization
 
-Use three service accounts for the backend system:
+Keep runtime, application deployment, and infrastructure identities separate:
 
 | Service account | Used for | GitHub/local credential |
 | --- | --- | --- |
@@ -118,6 +118,11 @@ Use three service accounts for the backend system:
 | Document AI runtime, for example `ogrre-document-ai` | Backend online/batch Document AI processing and processor deployment/undeployment | `DOCUMENT_AI_SERVICE_KEY_JSON` in GitHub; local `DOCUMENT_AI_SERVICE_KEY` in `ogrre/.env` |
 | Terraform platform identity, for example a privileged human operator or dedicated infrastructure account | Terraform cloud infrastructure plus namespaces, runtime ServiceAccounts, and runtime RBAC | Local ADC or a dedicated Terraform credential |
 | GitHub deployment identity, `ogrre-deployment-ci` | Creates deployment Secrets and applies the workload-only manifest | `DEPLOYMENT_SERVICE_KEY_JSON` in GitHub |
+| Terraform CI plan, `github-terraform-plan` | Live planning and automatic no-change completion | WIF; repository variable `TF_PLAN_SERVICE_ACCOUNT` |
+| Terraform CI apply, `github-terraform-ci` | Approved saved-plan apply | WIF and protected `terraform-apply` Environment; variable `TF_APPLY_SERVICE_ACCOUNT` |
+
+See [CI identity permissions](../ci/README.md#identities-and-artifact-permissions)
+for the scoped grants created by bootstrap.
 
 The Terraform platform identity must be authorized to create Kubernetes Roles
 and RoleBindings. The documented `roles/container.admin` is sufficient, though
@@ -137,13 +142,19 @@ bootstrap: it is superseded by Terraform ownership.
 
 ## Deploy or update GKE infrastructure
 
-From the Terraform directory:
+Use the [Terraform CI workflow](../ci/README.md) or follow the
+[manual plan/apply procedure](../terraform/README.md#terraform-commands), which
+covers authentication, workspace selection, and coordination with CI. For manual
+operations, pause and drain CI before running Terraform, then initialize the
+existing workspace:
 
 ```bash
 cd orphaned-wells-ui-server/deployment/terraform
-terraform init
-terraform plan
-terraform apply
+unset TF_WORKSPACE
+terraform init -lockfile=readonly
+terraform workspace select ogrre
+terraform plan -out=tfplan
+terraform apply tfplan
 ```
 
 `enable_gke` defaults to `true`, so the GKE cluster, static IPs, and related GKE resources are included unless explicitly disabled.
@@ -158,13 +169,14 @@ terraform plan -var='enable_gke=false'
 
 With `ENABLE_TERRAFORM_CI=true`, updated deployment workflows authenticate using
 `DEPLOYMENT_SERVICE_KEY_JSON`, select the existing Terraform workspace, and read
-`kubernetes_deploy_targets` live. They require a successful apply of current
-`main` infrastructure before mutating workloads. Follow the
+`kubernetes_deploy_targets` live. They require successful reconciliation of current
+`main` infrastructure through verified no-change completion or approved apply
+before mutating workloads. Follow the
 [Terraform CI rollout guide](../ci/README.md) before enabling this flag,
 including propagating the workflows to collaborator branches.
 
 The `K8S_DEPLOY_TARGETS` export/update instructions below are only for the rollout
-fallback while the flag is disabled. Once enabled, apply through GitHub and
+fallback while the flag is disabled. Once enabled, reconcile through GitHub and
 redeploy; manual secret refreshes are unnecessary.
 
 ### Derive `K8S_DEPLOY_TARGETS` for the rollout fallback
@@ -185,7 +197,7 @@ gh secret set K8S_DEPLOY_TARGETS \
   --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
 ```
 
-If you are working from a fork, replace `--repo` with the fork repository.
+Configure deployment secrets on the upstream repository; fork staging jobs skip.
 
 The JSON must contain the environment you deploy. For example:
 
