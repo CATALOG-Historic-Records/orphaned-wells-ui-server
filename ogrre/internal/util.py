@@ -1547,3 +1547,10 @@ def build_ogrre_version_info() -> dict:
         ],
         "deployment": _get_deployment_metadata(),
     }
+
+
+from ogrre.internal.RRC_utils import (
+    FILE_TYPES_ORDER,
+    parse_record_filename_order,
+    reconstruct_records_by_original_filename,
+)
