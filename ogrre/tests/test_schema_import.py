@@ -347,10 +347,20 @@ def test_ambiguous_legacy_groups_block_affected_import(admin, package):
     admin.db.record_groups.update_one(
         {}, {"$unset": {"schema_id": ""}, "$set": {"processorId": "extractor"}}
     )
-    plan = preview(admin, mode="replace")
-    assert not plan["can_apply"] and any(
-        "ambiguous" in message for message in plan["errors"]
+    package["Package well"]["Processor ID"] = "extractor"
+    plan_add = preview(
+        admin,
+        mode="add",
+        decisions={
+            "Package well": {"action": "replace", "schema_id": str(original["_id"])}
+        },
     )
+    assert not plan_add["can_apply"] and any(
+        "ambiguous" in message for message in plan_add["errors"]
+    )
+    plan_replace = preview(admin, mode="replace")
+    assert plan_replace["can_apply"] and not plan_replace["errors"]
+    assert plan_replace["counts"]["detached"] == 1
 
 
 def test_repo_mode_rejects_import_and_requests_are_validated(
@@ -369,6 +379,7 @@ def test_repo_mode_rejects_import_and_requests_are_validated(
         ).status_code
         == 400
     )
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     assert client.get("/get_repo_schema_import").status_code == 409
     assert (

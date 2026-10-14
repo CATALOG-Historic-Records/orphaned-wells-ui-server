@@ -1,9 +1,59 @@
-# Defaults for the shared OGRRE project live in variables.tf.
-# Copy this file to terraform.tfvars only when you need local overrides.
+# OGRRE Infrastructure Configuration Template
+# Copy this file to terraform.tfvars and customize the values for your deployment.
 
-# Staging already allows http://localhost:3000 (development) and :3001 (E2E).
-# Add alternate hosts/ports by replacing the bucket's complete origin list.
-# Retain its frontend domain and any local origins still in use.
+# ==============================================================================
+# 1. Required Project Identity
+# ==============================================================================
+project_id         = "your-gcp-project-id"
+dns_managed_zone   = "your-dns-zone"
+backend_dns_domain = "your-domain.org"
+
+# Optional: default region for resources (defaults to "us-central1")
+# region = "us-central1"
+
+# ==============================================================================
+# 2. Environments and Collaborator Backends
+# ==============================================================================
+# Define the backends/collaborators to deploy on GKE. Keys are backend names.
+# Default naming conventions:
+# - Namespace: uow-<name>
+# - Hostname: <name>-server.<backend_dns_domain>
+# - Test hostname: <name>-k8s-server.<backend_dns_domain>
+# - Upload bucket: <name>_uploads
+gke_backends = {
+  staging = {
+    upload_bucket_name = "staging-uploads"
+    replicas           = 1
+  }
+  # Example collaborator definition:
+  # boots = {
+  #   upload_bucket_name = "boots_uploads"
+  #   replicas           = 1
+  # }
+}
+
+# ==============================================================================
+# 3. Optional Per-Backend Overrides
+# ==============================================================================
+# Overrides merged over gke_backends for fine-tuning resources or custom domains.
+# gke_backend_overrides = {
+#   boots = {
+#     replicas             = 2
+#     cpu_request          = "1"
+#     memory_request       = "4Gi"
+#     cpu_limit            = "1"
+#     memory_limit         = "4Gi"
+#     persistent_disk_size = "20Gi"
+#     api_uvicorn_workers  = 2
+#     create_test_dns_record = false
+#   }
+# }
+
+# ==============================================================================
+# 4. Optional CORS Origins
+# ==============================================================================
+# Optional complete CORS origin list per upload bucket. Defaults to frontend
+# custom domains, plus http://localhost:3000 and http://localhost:3001 for staging.
 # upload_bucket_cors_origins = {
 #   uploaded_documents_v0 = [
 #     "https://uow-carbon.org",
@@ -11,57 +61,4 @@
 #     "http://localhost:3001",
 #     "http://localhost:3002",
 #   ]
-# }
-
-# Legacy Compute Engine VMs are disabled by default. Re-enable specific
-# legacy VMs by listing names from legacy_backend_vms:
-#
-# enabled_legacy_backend_vms = ["isgs"]
-#
-# Add a GKE-only collaborator without creating a legacy Compute Engine VM:
-#
-# gke_backend_overrides = {
-#   boots = {}
-# }
-
-# The default upload bucket name is <collaborator>_uploads.
-# Override it only for existing buckets or intentional shared buckets:
-#
-# gke_backend_overrides = {
-#   boots = {
-#     upload_bucket_name = "custom_upload_bucket"
-#   }
-# }
-#
-# Override per-backend GKE settings when defaults are not enough:
-#
-# gke_backend_overrides = {
-#   boots = {
-#     hostname             = "boots-server.uow-carbon.org"
-#     upload_bucket_name   = "boots_uploads"
-#     replicas             = 2
-#     cpu_request          = "1"
-#     memory_request       = "4Gi"
-#     cpu_limit            = "1"
-#     memory_limit         = "4Gi"
-#     persistent_disk_size = "20Gi"
-#     api_uvicorn_workers                      = 2
-#     processing_job_cpu_request                = "1850m"
-#     processing_job_memory_request             = "12Gi"
-#     processing_job_cpu_limit                  = "1850m"
-#     processing_job_memory_limit               = "12Gi"
-#     processing_job_ephemeral_storage          = "10Gi"
-#     processing_job_active_deadline_seconds    = 86400
-#     processing_job_ttl_seconds_after_finished = 604800
-#     processing_job_max_active                 = 1
-#   }
-# }
-
-# Set create_test_dns_record = false if you do not want
-# boots-k8s-server.uow-carbon.org created for a backend:
-#
-# gke_backend_overrides = {
-#   boots = {
-#     create_test_dns_record = false
-#   }
 # }

@@ -62,12 +62,57 @@ def same_definition(before, after):
     return not any(differences(before, after).values())
 
 
+def find_catalog_match(pid=None, name=None, display_name=None, catalog_dict=None):
+    if not catalog_dict:
+        return None
+    if pid:
+        by_pid = [sid for sid, s in catalog_dict.items() if s.get("processorId") == pid]
+        if len(by_pid) == 1:
+            return by_pid[0]
+        if len(by_pid) > 1 and (name or display_name):
+            tie_break = [
+                sid
+                for sid in by_pid
+                if (name and catalog_dict[sid].get("name") == name)
+                or (
+                    display_name
+                    and (
+                        catalog_dict[sid].get("displayName") == display_name
+                        or catalog_dict[sid].get("name") == display_name
+                    )
+                )
+            ]
+            if len(tie_break) == 1:
+                return tie_break[0]
+    if name:
+        by_name = [sid for sid, s in catalog_dict.items() if s.get("name") == name]
+        if len(by_name) == 1:
+            return by_name[0]
+    if display_name:
+        by_display = [
+            sid
+            for sid, s in catalog_dict.items()
+            if s.get("displayName") == display_name or s.get("name") == display_name
+        ]
+        if len(by_display) == 1:
+            return by_display[0]
+    if pid:
+        by_pid_name = [
+            sid
+            for sid, s in catalog_dict.items()
+            if s.get("name") == pid or s.get("displayName") == pid
+        ]
+        if len(by_pid_name) == 1:
+            return by_pid_name[0]
+    return None
+
+
 def build_plan(package, catalog, groups, request, creator, now):
     mode = request.get("mode")
     selected = request.get("selected")
     decisions = request.get("decisions", {})
-    if mode not in ("add", "replace"):
-        raise rules.SchemaError("Choose Add or Replace.")
+    if mode not in ("refresh", "add", "replace"):
+        raise rules.SchemaError("Choose Refresh, Add, or Replace.")
     if (
         not isinstance(selected, list)
         or not selected
@@ -93,9 +138,9 @@ def build_plan(package, catalog, groups, request, creator, now):
             )
         if "schema_id" in decision and not isinstance(decision["schema_id"], str):
             raise rules.SchemaError("Choose an existing schema for this conflict.")
-        if mode == "replace" and decision["action"] == "keep":
+        if mode in ("replace", "refresh") and decision["action"] == "keep":
             raise rules.SchemaError(
-                "Replace uses the selected repo versions. Use Add to keep existing definitions."
+                f"{mode.capitalize()} uses the selected repo versions. Use Add to keep existing definitions."
             )
 
     entries, errors, changes, retained = [], [], [], set()
@@ -136,6 +181,20 @@ def build_plan(package, catalog, groups, request, creator, now):
                 definition.get("processorId")
                 and schema.get("processorId") == definition["processorId"]
             )
+            or (
+                definition.get("displayName")
+                and (
+                    schema.get("displayName") == definition["displayName"]
+                    or schema.get("name") == definition["displayName"]
+                )
+            )
+            or (
+                schema.get("displayName")
+                and (
+                    schema.get("displayName") == definition["name"]
+                    or schema.get("name") == definition.get("displayName")
+                )
+            )
         ]
         entry = {
             "source_id": key,
@@ -156,34 +215,105 @@ def build_plan(package, catalog, groups, request, creator, now):
             )
         decision = decisions.get(key)
         target = None
-        if matches:
-            if (
-                len(matches) == 1
-                and same_definition(matches[0], definition)
-                and not decision
-            ):
-                target, entry["action"] = matches[0], "unchanged"
-            elif not decision:
-                entry["action"] = "conflict"
-                retained.update(str(item["_id"]) for item in matches)
-            else:
+        if mode in ("replace", "refresh"):
+            if decision and decision.get("schema_id"):
                 target = next(
                     (
                         schema
                         for schema in matches
                         if str(schema["_id"]) == decision.get("schema_id")
+                        and str(schema["_id"]) not in retained
                     ),
                     None,
                 )
-                if target is None:
-                    raise rules.SchemaError(
-                        "Choose which existing schema to keep or replace."
+            if target is None and matches:
+                target = (
+                    next(
+                        (
+                            s
+                            for s in matches
+                            if str(s["_id"]) not in retained
+                            and s.get("repo_origin", {}).get("collaborator")
+                            == package["source"]["collaborator"]
+                            and s.get("repo_origin", {}).get("source_id") == key
+                        ),
+                        None,
                     )
-                entry["action"] = "kept" if decision["action"] == "keep" else "updated"
-        elif decision:
-            raise rules.SchemaError(
-                "This schema has no conflict to resolve. Refresh the preview.", 409
-            )
+                    or next(
+                        (
+                            s
+                            for s in matches
+                            if str(s["_id"]) not in retained
+                            and s.get("name") == definition["name"]
+                        ),
+                        None,
+                    )
+                    or next(
+                        (
+                            s
+                            for s in matches
+                            if str(s["_id"]) not in retained
+                            and definition.get("processorId")
+                            and s.get("processorId") == definition["processorId"]
+                        ),
+                        None,
+                    )
+                    or next(
+                        (
+                            s
+                            for s in matches
+                            if str(s["_id"]) not in retained
+                            and definition.get("displayName")
+                            and (
+                                s.get("displayName") == definition["displayName"]
+                                or s.get("name") == definition["displayName"]
+                            )
+                        ),
+                        None,
+                    )
+                    or next(
+                        (s for s in matches if str(s["_id"]) not in retained),
+                        None,
+                    )
+                )
+            if target is not None:
+                if same_definition(target, definition):
+                    entry["action"] = "unchanged"
+                else:
+                    entry["action"] = "updated"
+            else:
+                entry["action"] = "added"
+        else:
+            if matches:
+                if (
+                    len(matches) == 1
+                    and same_definition(matches[0], definition)
+                    and not decision
+                ):
+                    target, entry["action"] = matches[0], "unchanged"
+                elif not decision:
+                    entry["action"] = "conflict"
+                    retained.update(str(item["_id"]) for item in matches)
+                else:
+                    target = next(
+                        (
+                            schema
+                            for schema in matches
+                            if str(schema["_id"]) == decision.get("schema_id")
+                        ),
+                        None,
+                    )
+                    if target is None:
+                        raise rules.SchemaError(
+                            "Choose which existing schema to keep or replace."
+                        )
+                    entry["action"] = (
+                        "kept" if decision["action"] == "keep" else "updated"
+                    )
+            elif decision:
+                raise rules.SchemaError(
+                    "This schema has no conflict to resolve. Refresh the preview.", 409
+                )
         if target is not None:
             target_id = str(target["_id"])
             if target_id in retained:
@@ -222,11 +352,16 @@ def build_plan(package, catalog, groups, request, creator, now):
             )
         entries.append(entry)
 
-    removed = [
-        schema
-        for schema in catalog
-        if mode == "replace" and str(schema["_id"]) not in retained
-    ]
+    if mode == "replace":
+        removed = [schema for schema in catalog if str(schema["_id"]) not in retained]
+    elif mode == "refresh":
+        removed = [
+            schema
+            for schema in catalog
+            if str(schema["_id"]) not in retained and not users(str(schema["_id"]))
+        ]
+    else:
+        removed = []
     removed_ids = {str(schema["_id"]) for schema in removed}
     affected_ids = removed_ids | {
         str(op["before"]["_id"]) for op in changes if op["before"]
@@ -248,42 +383,86 @@ def build_plan(package, catalog, groups, request, creator, now):
         current_id = group.get("schema_id")
         target_id = current_id
         binding_needed = False
-        if "schema_id" in group:
+        if group.get("schema_id"):
             if current_id in affected_ids:
                 affected[group_id] = group_label(group)
             if current_id in removed_ids:
-                target_id, binding_needed = None, True
-        elif group.get("processorId") in changed_pids and group.get("processorId"):
+                old_schema = by_id.get(current_id)
+                replacement = None
+                if old_schema:
+                    replacement = find_catalog_match(
+                        pid=old_schema.get("processorId"),
+                        name=old_schema.get("name"),
+                        display_name=old_schema.get("displayName"),
+                        catalog_dict=final_catalog,
+                    )
+                if replacement is not None:
+                    target_id = replacement
+                    binding_needed = True
+                else:
+                    target_id = None
+                    binding_needed = True
+        else:
+            pid = group.get("processorId")
             matches = legacy.get(group_id, [])
             if len(matches) > 1:
-                errors.append(
-                    f"Resolve the ambiguous schema for record group {group.get('name', group_id)} before importing."
-                )
-                continue
-            if matches:
-                current_id = matches[0]
-                if group.get("attributes") and not same_definition(
-                    {**by_id[current_id], "attributes": group["attributes"]},
-                    by_id[current_id],
-                ):
+                if mode == "replace":
+                    target_id, binding_needed = None, True
+                elif mode == "refresh":
+                    binding_needed = False
+                else:
                     errors.append(
-                        f"Migrate the different embedded schema for record group {group.get('name', group_id)} before importing."
+                        f"Resolve the ambiguous schema for record group {group.get('name', group_id)} before importing."
                     )
                     continue
-                target_id = None if current_id in removed_ids else current_id
+            elif matches:
+                current_id = matches[0]
+                if mode in ("replace", "refresh"):
+                    if current_id in removed_ids:
+                        old_schema = by_id.get(current_id)
+                        replacement = None
+                        if old_schema:
+                            replacement = find_catalog_match(
+                                pid=old_schema.get("processorId"),
+                                name=old_schema.get("name"),
+                                display_name=old_schema.get("displayName"),
+                                catalog_dict=final_catalog,
+                            )
+                        target_id = replacement if replacement is not None else None
+                    else:
+                        target_id = current_id
+                    binding_needed = True
+                else:
+                    if group.get("attributes") and not same_definition(
+                        {**by_id[current_id], "attributes": group["attributes"]},
+                        by_id[current_id],
+                    ):
+                        errors.append(
+                            f"Migrate the different embedded schema for record group {group.get('name', group_id)} before importing."
+                        )
+                        continue
+                    else:
+                        target_id = None if current_id in removed_ids else current_id
+                        binding_needed = True
             else:
-                new_matches = [
-                    key
-                    for key, schema in final_catalog.items()
-                    if schema.get("processorId") == group["processorId"]
-                ]
-                if len(new_matches) != 1:
+                new_match = find_catalog_match(
+                    pid=pid,
+                    name=group.get("name"),
+                    catalog_dict=final_catalog,
+                )
+                if new_match is not None:
+                    target_id = new_match
+                    binding_needed = True
+                elif mode == "replace":
+                    if pid:
+                        target_id, binding_needed = None, True
+                elif mode == "refresh":
+                    binding_needed = False
+                elif pid in changed_pids and pid:
                     errors.append(
                         f"Select a schema or detach record group {group.get('name', group_id)} before importing."
                     )
                     continue
-                target_id = new_matches[0]
-            binding_needed = True
         if binding_needed:
             bindings.append(
                 {
@@ -296,9 +475,12 @@ def build_plan(package, catalog, groups, request, creator, now):
             if target_id is None:
                 detaching.append(group_label(group))
 
-    reconcile = [
+    detaching_group_ids = {
+        str(op["before"]["_id"]) for op in bindings if op["after"]["schema_id"] is None
+    }
+    pre_reconcile = [
         {"kind": "reconcile", "group_id": key}
-        for key in affected
+        for key in detaching_group_ids
         if next(
             (
                 group.get("schema_id") or (legacy.get(key) or [None])[0]
@@ -315,13 +497,18 @@ def build_plan(package, catalog, groups, request, creator, now):
         if op["after"]["schema_id"] is None or op["after"]["schema_id"] in by_id
     ]
     late_bindings = [op for op in bindings if op not in early_bindings]
+    post_reconcile = [
+        {"kind": "reconcile", "group_id": key}
+        for key in affected
+        if key not in detaching_group_ids
+    ]
     operations = (
-        reconcile
+        pre_reconcile
         + early_bindings
         + changes
         + late_bindings
         + [{"kind": "remove", "before": schema} for schema in removed]
-        + [{"kind": "reconcile", "group_id": key} for key in affected]
+        + post_reconcile
     )
     return {
         "source": package["source"],
@@ -348,7 +535,7 @@ def build_plan(package, catalog, groups, request, creator, now):
             "removed": len(removed),
             "detached": len(detaching),
         },
-        "destructive": mode == "replace"
+        "destructive": mode in ("replace", "refresh")
         or any(entry["action"] == "updated" for entry in entries)
         or bool(late_bindings),
         "operations": operations,

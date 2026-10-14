@@ -20,6 +20,17 @@ def _resolve_document_ai_service_account_path():
     service_path = Path(service_key).expanduser()
     if service_path.is_absolute():
         return str(service_path)
+
+    candidates = [
+        PACKAGE_DIR / service_path,
+        Path.cwd() / service_path,
+        Path.cwd() / "ogrre" / service_path,
+        Path.cwd() / "orphaned-wells-ui-server" / "ogrre" / service_path,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
     return str(PACKAGE_DIR / service_path)
 
 

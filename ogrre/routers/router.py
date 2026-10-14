@@ -2637,8 +2637,16 @@ async def get_cleaning_functions(user_info: dict = Depends(authenticate)):
 
 
 @router.get("/get_repo_schema_import")
-def get_repo_schema_import(user_info: dict = Depends(authenticate)):
-    return schema_operation(data_manager.getRepoSchemaImport, user_info)
+def get_repo_schema_import(
+    source_type: Optional[str] = Query(None),
+    ref: Optional[str] = Query(None),
+    repo: Optional[str] = Query(None),
+    user_info: dict = Depends(authenticate),
+):
+    source_options = None
+    if source_type:
+        source_options = {"type": source_type, "ref": ref, "repo": repo}
+    return schema_operation(data_manager.getRepoSchemaImport, user_info, source_options)
 
 
 @router.post("/record_groups/{rg_id}/schema/preview")

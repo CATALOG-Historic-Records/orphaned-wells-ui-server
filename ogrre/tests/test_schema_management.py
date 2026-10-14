@@ -37,6 +37,7 @@ def schema_manager(manager, monkeypatch):
 
     del manager.getRecordGroupProcessingConfig
 
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", True)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", True)
     monkeypatch.setattr(data_manager, "REQUIRE_AUTH", True)
     monkeypatch.setattr(
@@ -214,6 +215,7 @@ def test_repo_mode_reads_package_and_rejects_mongo_mutations(
 ):
     from ogrre.internal import data_manager
 
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     monkeypatch.setattr(schema_manager, "getCollaboratorForUser", lambda user: "isgs")
     monkeypatch.setattr(
