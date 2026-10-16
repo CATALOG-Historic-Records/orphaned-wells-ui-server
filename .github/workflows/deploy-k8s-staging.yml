@@ -44,10 +44,11 @@ jobs:
     uses: ./.github/workflows/terraform-apply.yml
     with:
       force_plan: ${{ inputs.force_terraform_plan || false }}
+    secrets: inherit
 
   docker_build_and_push:
     needs: check_ref
-    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_STAGING_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_DEPLOYMENTS != 'false')
     name: Push docker image to Docker Hub
     runs-on: ubuntu-latest
     steps:
@@ -86,7 +87,7 @@ jobs:
       (needs.infrastructure.result == 'success' ||
        (vars.ENABLE_TERRAFORM_CI != 'true' && needs.infrastructure.result == 'skipped')) &&
       github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server' &&
-      (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_STAGING_DEPLOY == 'true' || vars.ENABLE_GKE_DEPLOYMENTS == 'true')
+      (github.event_name == 'workflow_dispatch' || vars.ENABLE_GKE_DEPLOYMENTS != 'false')
     needs: [docker_build_and_push, infrastructure]
     uses: ./.github/workflows/deploy-k8s-dispatch.yml
     with:

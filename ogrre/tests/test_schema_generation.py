@@ -349,6 +349,7 @@ def test_mode_permission_group_scope_empty_group_and_ownership(generation, monke
             GROUP, request_for(result), {"email": "other@example.com"}
         )
     with monkeypatch.context() as patch:
+        patch.setattr(data_manager, "USE_DB_SCHEMAS", False)
         patch.setattr(data_manager, "USE_DB_PROCESSORS", False)
         with pytest.raises(SchemaError):
             preview(manager)

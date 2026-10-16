@@ -18,31 +18,6 @@ provider "google" {
 }
 
 locals {
-  managed_legacy_backend_vms = {
-    for name in var.enabled_legacy_backend_vms :
-    name => var.legacy_backend_vms[name]
-  }
-}
-
-module "backend_vms" {
-  for_each = local.managed_legacy_backend_vms
-
-  source = "./modules/backend_vm"
-
-  collaborator = each.key
-  zone         = each.value.zone
-
-  machine_type           = each.value.machine_type
-  boot_image             = each.value.boot_image
-  boot_disk_size         = each.value.boot_disk_size
-  boot_disk_device_name  = each.value.boot_disk_device_name
-  boot_resource_policies = each.value.boot_resource_policies
-
-  enable_startup_script = each.value.enable_startup_script
-
-  backend_dns_domain = var.backend_dns_domain
-  dns_managed_zone   = var.dns_managed_zone
-  create_dns_record  = !(var.enable_gke && try(local.gke_backends[each.key].create_primary_dns_record, false))
 }
 
 resource "google_compute_firewall" "backend_http_https" {
