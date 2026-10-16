@@ -1,0 +1,51 @@
+name: Deploy Collaborator Backend
+
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    runs-on: ubuntu-latest
+    outputs:
+      env: ${{ steps.collab.outputs.env }}
+      should_deploy: ${{ steps.collab.outputs.should_deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if branch is a collaborator
+        id: collab
+        env:
+          IS_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+          ENABLE_GKE_DEPLOYMENTS: ${{ vars.ENABLE_GKE_DEPLOYMENTS }}
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          if [ -f collaborators.json ] && jq -e --arg b "$BRANCH" 'index($b) != null' collaborators.json > /dev/null; then
+            echo "env=$BRANCH" >> "$GITHUB_OUTPUT"
+            if [ "$IS_DISPATCH" = "true" ] || [ "$ENABLE_GKE_DEPLOYMENTS" != "false" ]; then
+              echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+              echo "Deploying to collaborator environment: $BRANCH"
+            else
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              echo "Branch '$BRANCH' is a recognized collaborator, but deployments are paused (ENABLE_GKE_DEPLOYMENTS is set to 'false')."
+            fi
+          else
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Branch '$BRANCH' is not a recognized collaborator in collaborators.json. Skipping deployment."
+          fi
+
+  deploy:
+    needs: check
+    if: needs.check.outputs.should_deploy == 'true'
+    uses: ./.github/workflows/deploy-k8s-dispatch.yml
+    with:
+      DEPLOY_ENV: ${{ needs.check.outputs.env }}
+      IMAGE_TAG: auto
+    secrets: inherit

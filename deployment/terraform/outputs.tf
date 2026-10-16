@@ -1,29 +1,17 @@
 output "server_ips" {
-  description = "Enabled legacy VM external IPs. GKE backend IPs are exposed separately by gke_backend_static_ips."
-
-  value = {
-    for name, vm in module.backend_vms :
-    name => vm.ip
-  }
-}
-
-output "isgs_ip" {
-  description = "Legacy ISGS VM external IP, when that legacy VM is enabled."
-
-  value = try(module.backend_vms["isgs"].ip, null)
+  description = "GKE backend external IPs."
+  value = var.enable_gke ? {
+    for name, address in google_compute_global_address.gke_backend :
+    name => address.address
+  } : {}
 }
 
 output "dns_names" {
-  description = "Primary backend DNS records, including GKE-owned records and any remaining legacy VM-owned records."
-
-  value = merge({
-    for name, vm in module.backend_vms :
-    name => vm.dns_name
-    if vm.dns_name != null
-    }, var.enable_gke ? {
+  description = "Primary backend DNS records."
+  value = var.enable_gke ? {
     for name, dns in google_dns_record_set.gke_backend_primary :
     name => dns.name
-  } : {})
+  } : {}
 }
 
 output "gke_cluster_name" {
