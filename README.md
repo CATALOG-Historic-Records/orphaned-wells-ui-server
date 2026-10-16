@@ -92,9 +92,10 @@ docker compose --env-file ../ogrre/.env up web
 
 ## Schema management
 
-`USE_DB_PROCESSORS=false` uses the installed `ogrre_data_cleaning` package and
-shows its schemas read-only. `USE_DB_PROCESSORS=true` enables Mongo schema
-management. The setting defaults to `false` when omitted; enable database mode
+`USE_DB_SCHEMAS=false` uses the installed `ogrre_data_cleaning` package and
+shows its schemas read-only. `USE_DB_SCHEMAS=true` enables Mongo schema
+management (with `USE_DB_PROCESSORS` supported as a backward-compatible alias).
+The setting defaults to `false` when omitted; enable database mode
 explicitly when the deployment should use the Mongo catalog. The Mongo catalog
 is shared by all teams in the database.
 
@@ -108,6 +109,8 @@ and document processing still require the appropriate valid schema or processor.
 Run the binding migration to enable legacy Mongo schemas, not to restore access
 to the records themselves.
 
+- `view_schema` permits viewing schemas, cleaning functions, and version
+  information in read-only mode.
 - `manage_schema` permits viewing schemas, editing cleaning functions, aliases,
   data types, database data types, order and display metadata, adding fields,
   and uploading new schemas. Type combinations and parent/child structure are
@@ -242,7 +245,7 @@ fields. Existing group-local schemas require migration before use in Mongo mode.
 
 Deploy the frontend, API, and processing worker updates together. Pause record
 and schema edits during migration and back up the target catalog, groups, and
-history. With `USE_DB_PROCESSORS=true` and the intended database configured,
+history. With `USE_DB_SCHEMAS=true` and the intended database configured,
 preview without writing:
 
 ```sh
@@ -445,9 +448,9 @@ Any other answer, end of input, or Ctrl+C cancels without writing. If the previe
 changes while awaiting confirmation, the migration stops and requires a new
 preview. When no changes are needed, it exits without prompting.
 
-The migration grants `manage_schema` to `team_lead` and all system roles, grants
-`manage_schema_destructive` only to `sys_admin`, and removes that permission
-from other roles. Other permissions are preserved. It is idempotent, records
+The migration grants `manage_schema` and `view_schema` to all system roles, removes
+`manage_schema` and `view_schema` from `team_lead`, grants `manage_schema_destructive`
+only to `sys_admin`, and removes that permission from other roles. Other permissions are preserved. It is idempotent, records
 applied changes in history, and rejects concurrent role changes; preview and
 retry after resolving a conflict. Have users refresh their permission state
 after rollout. Neither API startup nor changing schema mode runs the migration.
@@ -714,7 +717,7 @@ credentials or cloud credentials. The test job starts an isolated MongoDB 7
 service and sets its blocking-sort limit to 32 MiB. Query regressions verify
 index use, pagination/navigation, and retired-field filtering with disk spilling
 disabled. Loading integration tests exercise projects, record groups, records,
-columns, and schemas with `USE_DB_PROCESSORS` both disabled and enabled. Frontend
+columns, and schemas with `USE_DB_SCHEMAS` both disabled and enabled. Frontend
 E2E testing starts only after both jobs pass, so backend failures are reported
 before starting the Docker/browser suite.
 

@@ -179,6 +179,30 @@ def test_first_rollout_requests_reconciliation_but_blocks_deployment(
     assert output.read_text() == "ready=false\nrevision=current\n"
 
 
+def test_status_require_ready_reports_detailed_reason(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        ci, "configuration", lambda: ("ogrre", "gs://bucket", "gs://state")
+    )
+    monkeypatch.setattr(ci, "revision", lambda: "expected_rev")
+    monkeypatch.setattr(ci, "state_generation", lambda state: "42")
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    marker_mismatched = {
+        "status": "applied",
+        "revision": "stale_rev",
+        "state": "gs://state",
+        "generation": "42",
+    }
+    monkeypatch.setattr(ci, "read_marker", lambda uri: marker_mismatched)
+
+    with pytest.raises(
+        ValueError,
+        match=r"marker revision \(stale_rev\) does not match expected revision \(expected_rev\)",
+    ):
+        ci.status(require_ready=True)
+
+
 @pytest.mark.parametrize("content", ["not JSON", "[]", "null"])
 def test_invalid_marker_content_still_blocks_readiness(monkeypatch, content):
     monkeypatch.setattr(ci, "run", lambda *args: content)

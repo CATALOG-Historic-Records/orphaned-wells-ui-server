@@ -153,6 +153,7 @@ def test_schema_less_csv_export_preserves_all_group_records(
 ):
     from ogrre.internal import data_manager
 
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", database_mode)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", database_mode)
     admin.db.record_groups.update_one(
         {"_id": ObjectId(GROUP)},
@@ -193,6 +194,7 @@ def test_attached_schema_export_name_uses_schema_name(admin):
 def test_repo_mode_ignores_mongo_and_embedded_fields(admin, monkeypatch):
     from ogrre.internal import data_manager
 
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     monkeypatch.setattr(
         data_manager.processor_api,
@@ -219,6 +221,7 @@ def test_missing_repo_configuration_never_pairs_old_id_with_default_model(
 ):
     from ogrre.internal import data_manager
 
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     monkeypatch.setattr(
         data_manager.processor_api, "get_processor_by_id", lambda *args: None

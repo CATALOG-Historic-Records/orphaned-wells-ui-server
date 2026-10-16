@@ -13,6 +13,9 @@ from contextvars import ContextVar
 from importlib.metadata import version, PackageNotFoundError
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import urllib.request
+import urllib.error
+import urllib.parse
 
 from bson import BSON, ObjectId
 from pymongo import ASCENDING, DESCENDING, InsertOne, UpdateOne, ReturnDocument
@@ -51,11 +54,14 @@ DEFAULT_PROCESSORS = [
     },
 ]
 
-USE_DB_PROCESSORS = os.getenv("USE_DB_PROCESSORS", "false").lower() in (
+USE_DB_SCHEMAS = (
+    os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "false")
+).lower() in (
     "1",
     "true",
     "yes",
 )
+USE_DB_PROCESSORS = USE_DB_SCHEMAS
 
 
 class DataManager:
@@ -379,7 +385,7 @@ class DataManager:
 
     def _resolveRecordGroupSchema(self, group, user=None):
         """Resolve one active source. An explicit null binding never uses legacy fallback."""
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             if "schema_id" in group:
                 return (
                     self._schemaDocument(group["schema_id"])
@@ -441,12 +447,12 @@ class DataManager:
 
     def _recordGroupSchemaInfo(self, group, user=None):
         result = dict(group)
-        result["schema_source"] = "database" if USE_DB_PROCESSORS else "repo"
+        result["schema_source"] = "database" if USE_DB_SCHEMAS else "repo"
         try:
             schema = self.resolveRecordGroupSchema(group, user, strict=True)
             result.update(
                 has_schema=schema is not None
-                and (USE_DB_PROCESSORS or "attributes" in schema),
+                and (USE_DB_SCHEMAS or "attributes" in schema),
                 can_process=bool(
                     schema and schema.get("processorId") and schema.get("modelId")
                 ),
@@ -502,7 +508,7 @@ class DataManager:
         return self._normalizeCollaborator(self.collaborator)
 
     def getProcessorById(self, google_id=None, user=None):
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             processor = self.getMongoProcessorByID(google_id=google_id)
         else:
             collaborator = self.getCollaboratorForUser(user)
@@ -519,7 +525,7 @@ class DataManager:
         return processor
 
     def getProcessorsByIds(self, google_ids=None, user=None):
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             processors = [
                 self.getMongoProcessorByID(google_id) for google_id in google_ids or []
             ]
@@ -535,7 +541,7 @@ class DataManager:
         return [self._serializeSchema(schema) for schema in self.db.processors.find({})]
 
     def createProcessorsList(self, user=None):
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             _log.info(f"creating processor list using db")
             processor_list = self.createProcessorsListFromDB()
         else:
@@ -543,7 +549,7 @@ class DataManager:
             _log.info(f"creating processor list using processor_api for {collaborator}")
             processor_list = processor_api.get_processor_list(collaborator)
 
-        if not processor_list and not USE_DB_PROCESSORS:
+        if not processor_list and not USE_DB_SCHEMAS:
             _log.info(f"no processors found, using default extractor")
             processor_list = DEFAULT_PROCESSORS
         return processor_list
@@ -612,13 +618,22 @@ class DataManager:
             _log.error(f"error trying to lock record: {e}")
             return False
 
-    def requireSchemaPermission(self, user_info, destructive=False, require_db=True):
-        if require_db and not USE_DB_PROCESSORS:
+    def requireSchemaPermission(
+        self, user_info, destructive=False, require_db=True, read_only=False
+    ):
+        if require_db and not USE_DB_SCHEMAS:
             raise schema_rules.SchemaError(
                 "Repo schemas are read-only. Enable DB schema mode to manage schemas.",
                 409,
             )
         email = (user_info or {}).get("email")
+        if read_only:
+            if not (
+                self.hasPermission(email, "view_schema")
+                or self.hasPermission(email, "manage_schema")
+            ):
+                raise PermissionError("You are not authorized to view schemas.")
+            return
         if not self.hasPermission(email, "manage_schema"):
             raise PermissionError("You are not authorized to manage schemas.")
         if destructive and (
@@ -638,7 +653,7 @@ class DataManager:
         a process crash, operators stop writers before clearing the owner (README).
         A partial import retains pending_import until its saved steps finish.
         """
-        if not USE_DB_PROCESSORS or _catalog_writer.get() is self:
+        if not USE_DB_SCHEMAS or _catalog_writer.get() is self:
             yield
             return
         guards = self.db.schema_catalog_guard
@@ -707,8 +722,11 @@ class DataManager:
                     )
                 canonical = self._canonicalRepoProcessor(definition)
                 fields = schema_rules.validate_fields(
-                    canonical["attributes"], util.CLEANING_FUNCTIONS
+                    canonical["attributes"],
+                    util.CLEANING_FUNCTIONS,
+                    allow_warnings=True,
                 )
+                warnings = schema_rules.collect_field_warnings(fields)
                 normalized = {
                     key: canonical.get(key) for key in ("name", *schema_import.METADATA)
                 }
@@ -717,17 +735,164 @@ class DataManager:
                     definition={**normalized, "attributes": fields},
                     field_count=len(fields),
                 )
+                if warnings:
+                    result["warnings"] = warnings
             except schema_rules.SchemaError as error:
                 result["error"] = str(error)
             schemas.append(result)
         return {
             "source": {
+                "type": "installed",
                 "package": "ogrre_data_cleaning",
                 "version": package_version,
                 "collaborator": collaborator,
             },
             "schemas": schemas,
         }
+
+    def _remoteGithubSchemaPackage(
+        self,
+        collaborator,
+        repo="CATALOG-Historic-Records/OGRRE_data_cleaning",
+        ref="main",
+    ):
+        if not repo or not isinstance(repo, str):
+            repo = "CATALOG-Historic-Records/OGRRE_data_cleaning"
+        repo = repo.strip()
+        if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
+            raise schema_rules.SchemaError(
+                "Invalid GitHub repository format. Expected 'owner/repo'."
+            )
+        if not ref or not isinstance(ref, str):
+            ref = "main"
+        ref = ref.strip()
+        if ".." in ref or not re.match(r"^[A-Za-z0-9_./-]+$", ref):
+            raise schema_rules.SchemaError("Invalid branch, tag, or commit reference.")
+
+        def _fetch_github_json(url):
+            headers = {
+                "User-Agent": "OGRRE-Backend",
+                "Accept": "application/json",
+            }
+            token = os.environ.get("GITHUB_TOKEN")
+            if token:
+                headers["Authorization"] = f"Bearer {token.strip()}"
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as err:
+                if err.code == 404:
+                    return None
+                if err.code in (403, 429):
+                    raise schema_rules.SchemaError(
+                        "GitHub request rate limit exceeded or access forbidden.", 403
+                    )
+                raise schema_rules.SchemaError(
+                    f"GitHub returned HTTP error {err.code}."
+                )
+            except urllib.error.URLError as err:
+                raise schema_rules.SchemaError(
+                    f"Failed to connect to GitHub: {err.reason}."
+                )
+            except json.JSONDecodeError:
+                raise schema_rules.SchemaError("GitHub returned invalid JSON.")
+
+        candidate_bases = [
+            f"src/ogrre_data_cleaning/processor_schemas/{collaborator}_extractors",
+            f"ogrre_data_cleaning/processor_schemas/{collaborator}_extractors",
+        ]
+        metadata = None
+        active_base = None
+        for base in candidate_bases:
+            catalog_url = f"https://raw.githubusercontent.com/{repo}/{ref}/{base}/Extractor%20Processors.json"
+            metadata = _fetch_github_json(catalog_url)
+            if metadata is not None:
+                active_base = base
+                break
+
+        if metadata is None:
+            raise schema_rules.SchemaError(
+                f"No schema catalog found on GitHub repository '{repo}' at ref '{ref}' for collaborator '{collaborator}'.",
+                404,
+            )
+        if not isinstance(metadata, list) or len(metadata) > 250:
+            raise schema_rules.SchemaError(
+                "The remote GitHub schema catalog is invalid or exceeds 250 schemas."
+            )
+
+        seen = set()
+        for item in metadata:
+            name = item.get("Processor Name") if isinstance(item, dict) else None
+            if not isinstance(name, str) or not name or name in seen:
+                raise schema_rules.SchemaError(
+                    "The remote GitHub package contains missing or duplicate schema names."
+                )
+            seen.add(name)
+
+        def fetch_schema_definition(item):
+            name = item["Processor Name"]
+            attr_url = f"https://raw.githubusercontent.com/{repo}/{ref}/{active_base}/{urllib.parse.quote(name)}.json"
+            attrs = _fetch_github_json(attr_url)
+            return name, item, attrs
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            fetched_definitions = list(pool.map(fetch_schema_definition, metadata))
+
+        schemas = []
+        for name, item, attrs in fetched_definitions:
+            result = {"source_id": name, "name": item.get("displayName") or name}
+            try:
+                if attrs is None or not isinstance(attrs, list):
+                    raise schema_rules.SchemaError(
+                        "The remote schema file was not found on GitHub; it cannot be imported as an empty schema."
+                    )
+                definition = {**item, "attributes": attrs}
+                canonical = self._canonicalRepoProcessor(definition)
+                fields = schema_rules.validate_fields(
+                    canonical["attributes"],
+                    util.CLEANING_FUNCTIONS,
+                    allow_warnings=True,
+                )
+                warnings = schema_rules.collect_field_warnings(fields)
+                normalized = {
+                    key: canonical.get(key) for key in ("name", *schema_import.METADATA)
+                }
+                self._checkProcessorMetadata(normalized)
+                result.update(
+                    definition={**normalized, "attributes": fields},
+                    field_count=len(fields),
+                )
+                if warnings:
+                    result["warnings"] = warnings
+            except schema_rules.SchemaError as error:
+                result["error"] = str(error)
+            schemas.append(result)
+
+        return {
+            "source": {
+                "type": "github",
+                "package": "ogrre_data_cleaning",
+                "version": ref,
+                "collaborator": collaborator,
+                "repo": repo,
+                "ref": ref,
+            },
+            "schemas": schemas,
+        }
+
+    def _loadSchemaPackage(self, source_options, user_info):
+        if not source_options or source_options.get("type") in (None, "installed"):
+            return self._installedSchemaPackage(user_info)
+        if source_options.get("type") == "github":
+            collaborator = self.getCollaboratorForUser(user_info)
+            repo = (
+                source_options.get("repo")
+                or "CATALOG-Historic-Records/OGRRE_data_cleaning"
+            )
+            ref = source_options.get("ref") or "main"
+            return self._remoteGithubSchemaPackage(collaborator, repo=repo, ref=ref)
+        raise schema_rules.SchemaError("Unsupported schema source type.")
 
     def _schemaImportState(self):
         return {
@@ -756,7 +921,7 @@ class DataManager:
             }
         }
 
-    def getRepoSchemaImport(self, user_info):
+    def getRepoSchemaImport(self, user_info, source_options=None):
         self.requireSchemaPermission(user_info)
         guard = self.db.schema_catalog_guard.find_one({"_id": "catalog"}) or {}
         pending = (
@@ -764,9 +929,12 @@ class DataManager:
             if guard.get("pending_import")
             else None
         )
-        # A saved import can be resumed even if the installed package changes.
+        # A saved import can be resumed even if the source package changes.
         try:
-            package = self._installedSchemaPackage(user_info)
+            package = self._loadSchemaPackage(
+                source_options or (pending.get("source") if pending else None),
+                user_info,
+            )
         except schema_rules.SchemaError as error:
             if not pending:
                 raise
@@ -786,12 +954,14 @@ class DataManager:
             "mode",
             "selected",
             "decisions",
+            "source",
+            "reconcile_records",
         }:
             raise schema_rules.SchemaError("Invalid schema import request.")
         self.requireSchemaPermission(
             user_info, destructive=request.get("mode") == "replace"
         )
-        package = self._installedSchemaPackage(user_info)
+        package = self._loadSchemaPackage(request.get("source"), user_info)
         with self._schemaCatalogWrite():
             state = self._schemaImportState()
             now = time.time()
@@ -918,10 +1088,12 @@ class DataManager:
                     or job["snapshot"]
                     != self._attributeDigest(self._schemaImportState())
                     or job["package_digest"]
-                    != self._attributeDigest(self._installedSchemaPackage(user_info))
+                    != self._attributeDigest(
+                        self._loadSchemaPackage(job.get("source"), user_info)
+                    )
                 ):
                     raise schema_rules.SchemaError(
-                        "The catalog, groups, or installed package changed, or the preview expired. Review a new preview.",
+                        "The catalog, groups, or source package changed, or the preview expired. Review a new preview.",
                         409,
                     )
                 now = time.time()
@@ -947,8 +1119,26 @@ class DataManager:
                 },
             )
             try:
-                for index in range(job["next_step"], len(job["operations"])):
+                total_ops = len(job["operations"])
+                for index in range(job["next_step"], total_ops):
                     operation = job["operations"][index]
+                    op_kind = operation["kind"]
+                    target_info = (
+                        operation.get("group_id")
+                        or (operation.get("after") or {}).get("displayName")
+                        or (operation.get("after") or {}).get("name")
+                        or (operation.get("before") or {}).get("displayName")
+                        or (operation.get("before") or {}).get("name")
+                        or ""
+                    )
+                    _log.info(
+                        "Schema import %s: step %d/%d (%s%s)",
+                        import_id,
+                        index + 1,
+                        total_ops,
+                        op_kind,
+                        f" - {target_info}" if target_info else "",
+                    )
                     self._applySchemaImportStep(operation, job, user_info)
                     self.db.history.update_one(
                         {"_id": f"schema-import:{import_id}:{index}"},
@@ -1320,7 +1510,8 @@ class DataManager:
                         )
                         if not field.get("deleted")
                     ]
-                    + fields
+                    + fields,
+                    parent_check_names={field["name"] for field in fields},
                 )
                 after = {
                     **current_schema,
@@ -1526,10 +1717,17 @@ class DataManager:
 
     @time_it
     def getSchema(self, user_info):
-        self.requireSchemaPermission(user_info, require_db=False)
-        if USE_DB_PROCESSORS:
+        self.requireSchemaPermission(user_info, require_db=False, read_only=True)
+        if USE_DB_SCHEMAS:
             processors = [
-                self._serializeSchema(schema) for schema in self.db.processors.find({})
+                {
+                    **self._serializeSchema(schema),
+                    "record_groups": [
+                        schema_import.group_label(group)
+                        for group in self._groupsUsingSchema(schema)
+                    ],
+                }
+                for schema in self.db.processors.find({})
             ]
         else:
             collaborator = self.getCollaboratorForUser(user_info)
@@ -1566,8 +1764,8 @@ class DataManager:
             )
         return {
             "processors": processors,
-            "source": "database" if USE_DB_PROCESSORS else "repo",
-            "read_only": not USE_DB_PROCESSORS,
+            "source": "database" if USE_DB_SCHEMAS else "repo",
+            "read_only": not USE_DB_SCHEMAS,
         }
 
     @schema_import.catalog_write
@@ -1612,11 +1810,6 @@ class DataManager:
     def deleteProcessorSchema(self, processorName, user_info, schema_id=None):
         self.requireSchemaPermission(user_info, destructive=True)
         processor = self._schemaDocument(schema_id, processorName)
-        if self._groupsUsingSchema(processor):
-            raise schema_rules.SchemaError(
-                "This schema is in use. Detach its record groups before deleting it.",
-                409,
-            )
         archived = {
             **processor,
             "deleted_by": user_info.get("email"),
@@ -1718,6 +1911,7 @@ class DataManager:
             new_field = schema_rules.normalize_fields([new_field])[0]
             schema_rules.validate_field(new_field, util.CLEANING_FUNCTIONS)
             attributes.append(new_field)
+            parent_check_names = {new_field["name"]}
         else:
             schema_rules.field_name(field_name)
             if target is None:
@@ -1730,6 +1924,7 @@ class DataManager:
                     if field["name"] != field_name
                     and not field["name"].startswith(field_name + "::")
                 ]
+                parent_check_names = set()
             else:
                 if not updates:
                     raise schema_rules.SchemaError("Provide at least one field update.")
@@ -1744,7 +1939,20 @@ class DataManager:
                     updated, util.CLEANING_FUNCTIONS, require_types=type_changes
                 )
                 attributes[attributes.index(target)] = updated
-        schema_rules.validate_structure(attributes)
+                parent_check_names = (
+                    {
+                        field["name"]
+                        for field in attributes
+                        if "::" in field["name"]
+                        and field["name"].rsplit("::", 1)[0] == field_name
+                    }
+                    if target.get("data_type") == "Parent"
+                    and updated.get("data_type") != "Parent"
+                    else set()
+                )
+        schema_rules.validate_structure(
+            attributes, parent_check_names=parent_check_names
+        )
         self._saveProcessorChanges(
             processor, {"attributes": attributes}, user_info, "updateProcessorAttribute"
         )
@@ -2452,10 +2660,10 @@ class DataManager:
     def _schemaState(self, processor):
         schema = (
             processor
-            if processor and (USE_DB_PROCESSORS or "attributes" in processor)
+            if processor and (USE_DB_SCHEMAS or "attributes" in processor)
             else None
         )
-        keep_unknown = USE_DB_PROCESSORS or schema is None
+        keep_unknown = USE_DB_SCHEMAS or schema is None
         if schema is not None:
             schema = {
                 "attributes": schema_rules.normalize_fields(
@@ -2542,8 +2750,17 @@ class DataManager:
             records = self.db.records.find(query).batch_size(100)
             if limit is not None:
                 records = records.limit(limit)
+            reconciled_count = 0
             for record in records:
                 self._reconcileRecord(record, target_state, user)
+                reconciled_count += 1
+            if reconciled_count:
+                _log.info(
+                    "Reconciled %d records for record group %s (%s)",
+                    reconciled_count,
+                    group["_id"],
+                    group.get("name", ""),
+                )
             current_group = self.db.record_groups.find_one({"_id": group["_id"]})
             if (
                 current_group is None
@@ -2590,6 +2807,7 @@ class DataManager:
     def fetchProcessors(self, user):
         processor_list = self.createProcessorsList(user)
         return {
+            "USE_DB_SCHEMAS": USE_DB_SCHEMAS,
             "USE_DB_PROCESSORS": USE_DB_PROCESSORS,
             "collaborator": self.getCollaboratorForUser(user),
             "processor_list": processor_list,
@@ -3570,7 +3788,7 @@ class DataManager:
             return False
 
         group_id = ObjectId()
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             if "schema_id" in rg_info:
                 if rg_info.get("attributes") or rg_info.get("processorId"):
                     raise schema_rules.SchemaError(
@@ -4546,7 +4764,7 @@ class DataManager:
         binding_change = bool(set(new_data) & {"schema_id", "processorId"})
         if binding_change or "documentType" in new_data:
             self.requireSchemaPermission(user_info, destructive=True, require_db=False)
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             if "schema_id" in new_data and "processorId" in new_data:
                 raise schema_rules.SchemaError(
                     "Use schema_id to select a database schema."
@@ -4616,7 +4834,7 @@ class DataManager:
         self, rg_id, processor_id, user_info, schema_id=None
     ):
         self.requireSchemaPermission(user_info, destructive=True, require_db=False)
-        if USE_DB_PROCESSORS:
+        if USE_DB_SCHEMAS:
             if schema_id is not None:
                 schema = self._schemaDocument(schema_id)
             else:

@@ -7,6 +7,10 @@ on:
         description: Plan again even when the recorded inputs and state are current
         type: boolean
         default: false
+    secrets:
+      PROD_TERRAFORM_TFVARS:
+        description: Production terraform.tfvars content to hydrate into the workspace
+        required: false
 
 permissions:
   contents: read
@@ -37,6 +41,15 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
+          fi
       - name: Verify the approval environment is protected
         env:
           GH_TOKEN: ${{ github.token }}
@@ -105,6 +118,15 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
+          fi
       - name: Authenticate for no-change verification
         uses: google-github-actions/auth@v3
         with:
@@ -147,6 +169,15 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
+          fi
       - name: Recheck approval protection before authenticating
         env:
           GH_TOKEN: ${{ github.token }}
