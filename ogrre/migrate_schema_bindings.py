@@ -241,7 +241,7 @@ def main(argv=None):
         load_dotenv()
 
     use_db_schemas = (
-        os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "true")
+        os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "false")
     ).lower() in ("1", "true", "yes")
     if not use_db_schemas:
         parser.error("Enable USE_DB_SCHEMAS before migrating Mongo schema bindings.")

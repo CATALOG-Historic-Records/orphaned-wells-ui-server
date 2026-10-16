@@ -109,6 +109,8 @@ and document processing still require the appropriate valid schema or processor.
 Run the binding migration to enable legacy Mongo schemas, not to restore access
 to the records themselves.
 
+- `view_schema` permits viewing schemas, cleaning functions, and version
+  information in read-only mode.
 - `manage_schema` permits viewing schemas, editing cleaning functions, aliases,
   data types, database data types, order and display metadata, adding fields,
   and uploading new schemas. Type combinations and parent/child structure are
@@ -446,9 +448,9 @@ Any other answer, end of input, or Ctrl+C cancels without writing. If the previe
 changes while awaiting confirmation, the migration stops and requires a new
 preview. When no changes are needed, it exits without prompting.
 
-The migration grants `manage_schema` to `team_lead` and all system roles, grants
-`manage_schema_destructive` only to `sys_admin`, and removes that permission
-from other roles. Other permissions are preserved. It is idempotent, records
+The migration grants `manage_schema` and `view_schema` to all system roles, removes
+`manage_schema` and `view_schema` from `team_lead`, grants `manage_schema_destructive`
+only to `sys_admin`, and removes that permission from other roles. Other permissions are preserved. It is idempotent, records
 applied changes in history, and rejects concurrent role changes; preview and
 retry after resolving a conflict. Have users refresh their permission state
 after rollout. Neither API startup nor changing schema mode runs the migration.
