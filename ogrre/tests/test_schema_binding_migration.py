@@ -33,6 +33,7 @@ def cli_db(monkeypatch):
         "mongodb://private-user:private-password@selected-host:27017/uri-database?token=private-token",
     )
     monkeypatch.setenv("COLLABORATOR", "test-collaborator")
+    monkeypatch.setenv("USE_DB_SCHEMAS", "true")
     monkeypatch.setenv("USE_DB_PROCESSORS", "true")
     return db
 
@@ -159,7 +160,7 @@ def test_explicit_env_loads_before_connection_settings(tmp_path, apply):
     env_file = tmp_path / ".env.isgs"
     env_file.write_text(
         "DB_CONNECTION=mongodb://selected-user:selected-password@selected-host:27017\n"
-        "DB_NAME=selected_database\nCOLLABORATOR=selected_collaborator\nUSE_DB_PROCESSORS=true\n"
+        "DB_NAME=selected_database\nCOLLABORATOR=selected_collaborator\nUSE_DB_SCHEMAS=true\n"
     )
     script = """
 import sys
@@ -182,6 +183,7 @@ with patch('pymongo.mongo_client.MongoClient', return_value=client) as connect, 
         "DB_CONNECTION": "mongodb://wrong-host:27017",
         "DB_NAME": "wrong_database",
         "COLLABORATOR": "wrong_collaborator",
+        "USE_DB_SCHEMAS": "false",
         "USE_DB_PROCESSORS": "false",
         "PYTHONPATH": os.pathsep.join(
             [str(Path(__file__).resolve().parents[2]), *sys.path]
@@ -239,6 +241,7 @@ def test_repo_mode_stops_before_connecting(cli_db, monkeypatch):
 
     connect = Mock(side_effect=AssertionError("Repo mode must not connect"))
     monkeypatch.setattr(mongodb_connection, "connectToDatabase", connect)
+    monkeypatch.setenv("USE_DB_SCHEMAS", "false")
     monkeypatch.setenv("USE_DB_PROCESSORS", "false")
     with pytest.raises(SystemExit) as error:
         migration.main(["--apply"])

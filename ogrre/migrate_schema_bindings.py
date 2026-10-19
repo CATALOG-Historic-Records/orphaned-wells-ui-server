@@ -240,8 +240,11 @@ def main(argv=None):
     else:
         load_dotenv()
 
-    if os.getenv("USE_DB_PROCESSORS", "false").lower() not in ("1", "true", "yes"):
-        parser.error("Enable USE_DB_PROCESSORS before migrating Mongo schema bindings.")
+    use_db_schemas = (
+        os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "false")
+    ).lower() in ("1", "true", "yes")
+    if not use_db_schemas:
+        parser.error("Enable USE_DB_SCHEMAS before migrating Mongo schema bindings.")
     resolutions = None
     if args.resolutions:
         try:
