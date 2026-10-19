@@ -9,21 +9,28 @@ permissions:
   pull-requests: write
 
 jobs:
+  setup:
+    if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Generate matrix from collaborators.json
+        id: set-matrix
+        run: |
+          echo "matrix=$(jq -c . collaborators.json)" >> "$GITHUB_OUTPUT"
+
   sync_collaborator_branches:
+    needs: setup
     if: github.repository == 'CATALOG-Historic-Records/orphaned-wells-ui-server'
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        base:
-          - newts
-          - isgs
-          - osage
-          - rrc
-        #   - ca
-
+        base: ${{ fromJson(needs.setup.outputs.matrix) }}
     env:
         BASE_BRANCH: ${{ matrix.base }}
-
     steps:
       - name: Create PR if it doesn't exist
         uses: actions/github-script@v7
@@ -33,9 +40,8 @@ jobs:
             const repo = context.repo.repo;
             const base = process.env.BASE_BRANCH;
 
-            const head = `${owner}:main`; // head ref (same repo)
-            
-            // Check existing open PRs
+            const head = `${owner}:main`;
+
             const existing = await github.rest.pulls.list({
               owner,
               repo,

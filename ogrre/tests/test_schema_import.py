@@ -347,10 +347,20 @@ def test_ambiguous_legacy_groups_block_affected_import(admin, package):
     admin.db.record_groups.update_one(
         {}, {"$unset": {"schema_id": ""}, "$set": {"processorId": "extractor"}}
     )
-    plan = preview(admin, mode="replace")
-    assert not plan["can_apply"] and any(
-        "ambiguous" in message for message in plan["errors"]
+    package["Package well"]["Processor ID"] = "extractor"
+    plan_add = preview(
+        admin,
+        mode="add",
+        decisions={
+            "Package well": {"action": "replace", "schema_id": str(original["_id"])}
+        },
     )
+    assert not plan_add["can_apply"] and any(
+        "ambiguous" in message for message in plan_add["errors"]
+    )
+    plan_replace = preview(admin, mode="replace")
+    assert plan_replace["can_apply"] and not plan_replace["errors"]
+    assert plan_replace["counts"]["detached"] == 1
 
 
 def test_repo_mode_rejects_import_and_requests_are_validated(
@@ -369,6 +379,7 @@ def test_repo_mode_rejects_import_and_requests_are_validated(
         ).status_code
         == 400
     )
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     assert client.get("/get_repo_schema_import").status_code == 409
     assert (
@@ -462,3 +473,64 @@ def test_standalone_mongo_import_guard_and_resumption(
     assert manager.db.record_groups.find_one()["schema_id"] is None
     assert manager.db.processors.count_documents({}) == 1
     assert manager.db.deleted_processors.count_documents({}) == 1
+
+
+def test_refresh_mode_preserves_unused_schemas_and_allows_safe_managers(admin, package):
+    unrelated_id = ObjectId()
+    admin.db.processors.insert_one(
+        {
+            "_id": unrelated_id,
+            "name": "IL_WellCompletion_F",
+            "displayName": "IL Well Completion F",
+            "documentType": "Well",
+            "attributes": [copy.deepcopy(FIELD)],
+        }
+    )
+    admin.hasPermission.side_effect = (
+        lambda email, permission: permission != "manage_schema_destructive"
+    )
+    plan = preview(admin, mode="refresh", selected=["Package well"])
+    assert plan["can_apply"]
+    assert not plan["destructive"]
+    assert plan["removed"] == []
+    assert plan["counts"]["removed"] == 0
+    assert apply(admin, plan)["status"] == "complete"
+    assert admin.db.processors.find_one({"_id": unrelated_id}) is not None
+
+
+def test_repo_schema_import_surfaces_field_warnings_without_blocking(admin, package):
+    package["Package well"]["attributes"] = [
+        {
+            "name": "sample::test_parameter::limits",
+            "google_data_type": "Plain text",
+            "database_data_type": "str",
+        },
+        {
+            "name": "analysis::parameter_test",
+            "google_data_type": "Parent",
+            "database_data_type": "bool",
+        },
+        {
+            "name": "sample::parameter_test::mda",
+            "google_data_type": "Plain text",
+            "database_data_type": "Table",
+        },
+    ]
+    source_info = admin.getRepoSchemaImport(USER)
+    package_well = next(
+        s for s in source_info["schemas"] if s["source_id"] == "Package well"
+    )
+    assert "error" not in package_well
+    assert package_well["field_count"] == 3
+    assert package_well["warnings"] == [
+        "Field 'sample::test_parameter::limits' requires a Parent field at its parent path.",
+        "Unsupported data type combination for 'analysis::parameter_test'.",
+        "Field 'analysis::parameter_test' requires a Parent field at its parent path.",
+        "Unsupported data type combination for 'sample::parameter_test::mda'.",
+        "Field 'sample::parameter_test::mda' requires a Parent field at its parent path.",
+    ]
+    plan = preview(admin, mode="add", selected=["Package well"])
+    assert plan["can_apply"]
+    assert apply(admin, plan)["status"] == "complete"
+    imported = admin.db.processors.find_one({"name": "Package well"})
+    assert len(imported["attributes"]) == 3

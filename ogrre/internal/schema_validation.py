@@ -138,15 +138,19 @@ def validate_field(field, cleaning_functions, require_types=True):
         raise SchemaError(f"Unknown cleaning function: {cleaning}.")
 
 
-def validate_structure(fields):
+def validate_structure(fields, check_parents=True, parent_check_names=None):
     by_name = {}
     for field in fields:
         name = field_name(field.get("name"))
         if name in by_name:
             raise SchemaError(f"Duplicate schema field: {name}.", 409)
         by_name[name] = field
+    if not check_parents:
+        return
     for name in by_name:
         if "::" not in name:
+            continue
+        if parent_check_names is not None and name not in parent_check_names:
             continue
         parent = by_name.get(name.rsplit("::", 1)[0])
         if not parent or parent.get("data_type") != "Parent":
@@ -155,7 +159,33 @@ def validate_structure(fields):
             )
 
 
-def validate_fields(fields, cleaning_functions, require_types=True):
+def collect_field_warnings(fields):
+    warnings = []
+    by_name = {
+        field["name"]: field
+        for field in fields
+        if isinstance(field, dict) and field.get("name") and not field.get("deleted")
+    }
+    for name, field in by_name.items():
+        data_type = field.get("data_type")
+        database_type = field.get("database_data_type")
+        if (
+            data_type not in TYPE_OPTIONS
+            or database_type not in TYPE_OPTIONS[data_type]
+        ):
+            warnings.append(f"Unsupported data type combination for '{name}'.")
+        if "::" in name:
+            parent = by_name.get(name.rsplit("::", 1)[0])
+            if not parent or parent.get("data_type") != "Parent":
+                warnings.append(
+                    f"Field '{name}' requires a Parent field at its parent path."
+                )
+    return warnings
+
+
+def validate_fields(
+    fields, cleaning_functions, require_types=True, allow_warnings=False
+):
     fields = normalize_fields(fields)
     for field in fields:
         if field.get("deleted"):
@@ -166,18 +196,21 @@ def validate_fields(fields, cleaning_functions, require_types=True):
         validate_field(
             field,
             cleaning_functions,
-            require_types=require_types
-            or (data_type is not None and database_type is not None),
+            require_types=not allow_warnings
+            and (
+                require_types or (data_type is not None and database_type is not None)
+            ),
         )
-        if data_type is not None and data_type not in TYPE_OPTIONS:
-            raise SchemaError(f"Unsupported data type for '{field.get('name')}'.")
-        if database_type is not None and database_type not in set().union(
-            *TYPE_OPTIONS.values()
-        ):
-            raise SchemaError(
-                f"Unsupported database data type for '{field.get('name')}'."
-            )
-    validate_structure(fields)
+        if not allow_warnings:
+            if data_type is not None and data_type not in TYPE_OPTIONS:
+                raise SchemaError(f"Unsupported data type for '{field.get('name')}'.")
+            if database_type is not None and database_type not in set().union(
+                *TYPE_OPTIONS.values()
+            ):
+                raise SchemaError(
+                    f"Unsupported database data type for '{field.get('name')}'."
+                )
+    validate_structure(fields, check_parents=not allow_warnings)
     return fields
 
 

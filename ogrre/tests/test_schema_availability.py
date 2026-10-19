@@ -29,6 +29,7 @@ def test_complete_read_path_works_in_both_schema_modes(
     manager = query_manager
     manager.hasPermission.side_effect = None
     manager.hasPermission.return_value = True
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", database_mode)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", database_mode)
     monkeypatch.setattr(data_manager, "get_document_image", lambda *args: "test-image")
 
@@ -168,6 +169,7 @@ def unavailable_group(request, schema_manager, monkeypatch):
     monkeypatch.setattr(manager, "tryLockingRecord", lambda *args: True)
     monkeypatch.setattr(manager, "getDefaultTeamForUser", lambda *args: "team")
     monkeypatch.setattr(manager, "userCanAccessProject", lambda *args: True)
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", request.param != "repo")
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", request.param != "repo")
     monkeypatch.setattr(data_manager, "get_document_image", lambda *args: "test-image")
     monkeypatch.setattr(
@@ -312,6 +314,7 @@ def test_collaborator_switch_restores_schema_without_changing_binding(
     from ogrre.internal import data_manager
 
     manager = schema_manager
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     monkeypatch.setattr(
         data_manager.processor_api,
@@ -344,6 +347,7 @@ def test_new_invalid_bindings_remain_rejected(
     manager = schema_manager
     manager.hasPermission.side_effect = None
     manager.hasPermission.return_value = True
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", database_mode)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", database_mode)
     monkeypatch.setattr(
         data_manager.processor_api, "get_processor_by_id", lambda *args: None
@@ -386,6 +390,7 @@ def test_project_route_does_not_resolve_schemas(client, schema_manager, monkeypa
 
     manager = schema_manager
     manager.collaborator = "osage"
+    monkeypatch.setattr(data_manager, "USE_DB_SCHEMAS", False)
     monkeypatch.setattr(data_manager, "USE_DB_PROCESSORS", False)
     monkeypatch.setattr(
         manager,
