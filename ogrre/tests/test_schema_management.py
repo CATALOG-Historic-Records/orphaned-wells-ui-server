@@ -278,13 +278,8 @@ def test_metadata_binding_and_schema_delete_need_specific_permission(
     assert client.post("/delete_processor/well").status_code == 403
     schema_manager.hasPermission.side_effect = None
     schema_manager.hasPermission.return_value = True
-    assert client.post("/delete_processor/well").status_code == 409
-    assert (
-        client.post(
-            f"/update_record_group/{GROUP}", json={"schema_id": None}
-        ).status_code
-        == 200
-    )
+    body = client.get("/get_schema").json()
+    assert [group["id"] for group in body["processors"][0]["record_groups"]] == [GROUP]
     assert client.post("/delete_processor/well").status_code == 200
     assert schema_manager.db.deleted_processors.find_one()["attributes"] == [FIELD]
 
@@ -414,7 +409,7 @@ def test_role_migration_is_explicit_idempotent_and_admin_only(schema_manager):
     migrate_schema_permissions(schema_manager.db, apply=True)
     assert not migrate_schema_permissions(schema_manager.db, apply=True)
     assert (
-        schema_manager.db.roles.count_documents({"permissions": "manage_schema"}) == 3
+        schema_manager.db.roles.count_documents({"permissions": "manage_schema"}) == 2
     )
     assert (
         schema_manager.db.roles.count_documents(
@@ -566,3 +561,51 @@ def test_safe_edit_can_clear_optional_order(client, schema_manager):
         "page_order_sort"
         not in schema_manager.db.processors.find_one()["attributes"][0]
     )
+
+
+def test_preexisting_field_warnings_do_not_block_adding_or_editing_fields(
+    client, schema_manager
+):
+    broken_orphan = {
+        "name": "sample::test_parameter::limits",
+        "data_type": "Plain text",
+        "database_data_type": "str",
+    }
+    broken_combo = {
+        "name": "analysis::parameter_test",
+        "data_type": "Parent",
+        "database_data_type": "bool",
+    }
+    schema_manager.db.processors.update_one(
+        {"name": "well"},
+        {"$set": {"attributes": [FIELD, broken_orphan, broken_combo]}},
+    )
+    add_res = edit(
+        client,
+        operation="add",
+        field="new_field",
+        updates={
+            "name": "new_field",
+            "data_type": "Plain text",
+            "database_data_type": "str",
+        },
+    )
+    assert add_res.status_code == 200
+    update_res = edit(
+        client,
+        operation="update",
+        field="analysis::parameter_test",
+        updates={"alias": "Parameter Test"},
+    )
+    assert update_res.status_code == 200
+    add_missing_parent = edit(
+        client,
+        operation="add",
+        field="missing_parent::child",
+        updates={
+            "name": "missing_parent::child",
+            "data_type": "Plain text",
+            "database_data_type": "str",
+        },
+    )
+    assert add_missing_parent.status_code == 400

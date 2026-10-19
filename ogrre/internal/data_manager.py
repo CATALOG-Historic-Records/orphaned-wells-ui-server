@@ -55,7 +55,7 @@ DEFAULT_PROCESSORS = [
 ]
 
 USE_DB_SCHEMAS = (
-    os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "true")
+    os.getenv("USE_DB_SCHEMAS") or os.getenv("USE_DB_PROCESSORS", "false")
 ).lower() in (
     "1",
     "true",
@@ -618,13 +618,22 @@ class DataManager:
             _log.error(f"error trying to lock record: {e}")
             return False
 
-    def requireSchemaPermission(self, user_info, destructive=False, require_db=True):
+    def requireSchemaPermission(
+        self, user_info, destructive=False, require_db=True, read_only=False
+    ):
         if require_db and not USE_DB_SCHEMAS:
             raise schema_rules.SchemaError(
                 "Repo schemas are read-only. Enable DB schema mode to manage schemas.",
                 409,
             )
         email = (user_info or {}).get("email")
+        if read_only:
+            if not (
+                self.hasPermission(email, "view_schema")
+                or self.hasPermission(email, "manage_schema")
+            ):
+                raise PermissionError("You are not authorized to view schemas.")
+            return
         if not self.hasPermission(email, "manage_schema"):
             raise PermissionError("You are not authorized to manage schemas.")
         if destructive and (
@@ -713,8 +722,11 @@ class DataManager:
                     )
                 canonical = self._canonicalRepoProcessor(definition)
                 fields = schema_rules.validate_fields(
-                    canonical["attributes"], util.CLEANING_FUNCTIONS
+                    canonical["attributes"],
+                    util.CLEANING_FUNCTIONS,
+                    allow_warnings=True,
                 )
+                warnings = schema_rules.collect_field_warnings(fields)
                 normalized = {
                     key: canonical.get(key) for key in ("name", *schema_import.METADATA)
                 }
@@ -723,6 +735,8 @@ class DataManager:
                     definition={**normalized, "attributes": fields},
                     field_count=len(fields),
                 )
+                if warnings:
+                    result["warnings"] = warnings
             except schema_rules.SchemaError as error:
                 result["error"] = str(error)
             schemas.append(result)
@@ -836,8 +850,11 @@ class DataManager:
                 definition = {**item, "attributes": attrs}
                 canonical = self._canonicalRepoProcessor(definition)
                 fields = schema_rules.validate_fields(
-                    canonical["attributes"], util.CLEANING_FUNCTIONS
+                    canonical["attributes"],
+                    util.CLEANING_FUNCTIONS,
+                    allow_warnings=True,
                 )
+                warnings = schema_rules.collect_field_warnings(fields)
                 normalized = {
                     key: canonical.get(key) for key in ("name", *schema_import.METADATA)
                 }
@@ -846,6 +863,8 @@ class DataManager:
                     definition={**normalized, "attributes": fields},
                     field_count=len(fields),
                 )
+                if warnings:
+                    result["warnings"] = warnings
             except schema_rules.SchemaError as error:
                 result["error"] = str(error)
             schemas.append(result)
@@ -936,10 +955,11 @@ class DataManager:
             "selected",
             "decisions",
             "source",
+            "reconcile_records",
         }:
             raise schema_rules.SchemaError("Invalid schema import request.")
         self.requireSchemaPermission(
-            user_info, destructive=request.get("mode") in ("replace", "refresh")
+            user_info, destructive=request.get("mode") == "replace"
         )
         package = self._loadSchemaPackage(request.get("source"), user_info)
         with self._schemaCatalogWrite():
@@ -1490,7 +1510,8 @@ class DataManager:
                         )
                         if not field.get("deleted")
                     ]
-                    + fields
+                    + fields,
+                    parent_check_names={field["name"] for field in fields},
                 )
                 after = {
                     **current_schema,
@@ -1696,10 +1717,17 @@ class DataManager:
 
     @time_it
     def getSchema(self, user_info):
-        self.requireSchemaPermission(user_info, require_db=False)
+        self.requireSchemaPermission(user_info, require_db=False, read_only=True)
         if USE_DB_SCHEMAS:
             processors = [
-                self._serializeSchema(schema) for schema in self.db.processors.find({})
+                {
+                    **self._serializeSchema(schema),
+                    "record_groups": [
+                        schema_import.group_label(group)
+                        for group in self._groupsUsingSchema(schema)
+                    ],
+                }
+                for schema in self.db.processors.find({})
             ]
         else:
             collaborator = self.getCollaboratorForUser(user_info)
@@ -1782,11 +1810,6 @@ class DataManager:
     def deleteProcessorSchema(self, processorName, user_info, schema_id=None):
         self.requireSchemaPermission(user_info, destructive=True)
         processor = self._schemaDocument(schema_id, processorName)
-        if self._groupsUsingSchema(processor):
-            raise schema_rules.SchemaError(
-                "This schema is in use. Detach its record groups before deleting it.",
-                409,
-            )
         archived = {
             **processor,
             "deleted_by": user_info.get("email"),
@@ -1888,6 +1911,7 @@ class DataManager:
             new_field = schema_rules.normalize_fields([new_field])[0]
             schema_rules.validate_field(new_field, util.CLEANING_FUNCTIONS)
             attributes.append(new_field)
+            parent_check_names = {new_field["name"]}
         else:
             schema_rules.field_name(field_name)
             if target is None:
@@ -1900,6 +1924,7 @@ class DataManager:
                     if field["name"] != field_name
                     and not field["name"].startswith(field_name + "::")
                 ]
+                parent_check_names = set()
             else:
                 if not updates:
                     raise schema_rules.SchemaError("Provide at least one field update.")
@@ -1914,7 +1939,20 @@ class DataManager:
                     updated, util.CLEANING_FUNCTIONS, require_types=type_changes
                 )
                 attributes[attributes.index(target)] = updated
-        schema_rules.validate_structure(attributes)
+                parent_check_names = (
+                    {
+                        field["name"]
+                        for field in attributes
+                        if "::" in field["name"]
+                        and field["name"].rsplit("::", 1)[0] == field_name
+                    }
+                    if target.get("data_type") == "Parent"
+                    and updated.get("data_type") != "Parent"
+                    else set()
+                )
+        schema_rules.validate_structure(
+            attributes, parent_check_names=parent_check_names
+        )
         self._saveProcessorChanges(
             processor, {"attributes": attributes}, user_info, "updateProcessorAttribute"
         )
