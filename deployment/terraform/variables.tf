@@ -1,6 +1,5 @@
 variable "project_id" {
   type        = string
-  default     = "tidy-outlet-412020"
   description = "Google Cloud project that owns the OGRRE infrastructure."
 }
 
@@ -12,96 +11,12 @@ variable "region" {
 
 variable "dns_managed_zone" {
   type        = string
-  default     = "uow-carbon-org"
   description = "Cloud DNS managed zone used for OGRRE public DNS records."
 }
 
 variable "backend_dns_domain" {
   type        = string
-  default     = "uow-carbon.org"
   description = "Base DNS domain for backend hostnames, without a trailing dot."
-}
-
-variable "legacy_backend_vms" {
-  type = map(object({
-    enable_startup_script  = bool
-    zone                   = string
-    machine_type           = string
-    boot_image             = string
-    boot_disk_size         = number
-    boot_resource_policies = list(string)
-    boot_disk_device_name  = string
-  }))
-
-  default = {
-    isgs = {
-      enable_startup_script  = false
-      zone                   = "us-central1-a"
-      machine_type           = "e2-standard-2"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20240515"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "isgs-uow-server"
-    }
-
-    osage = {
-      enable_startup_script  = false
-      zone                   = "us-central1-f"
-      machine_type           = "e2-standard-2"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20250910"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "osage-uow-server"
-    }
-
-    ca = {
-      enable_startup_script  = false
-      zone                   = "us-central1-f"
-      machine_type           = "e2-medium"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20241009"
-      boot_disk_size         = 10
-      boot_resource_policies = []
-      boot_disk_device_name  = "ca-uow-server"
-    }
-
-    newts = {
-      enable_startup_script  = false
-      zone                   = "us-central1-b"
-      machine_type           = "e2-standard-2"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "newts-ogrre-server"
-    }
-
-    staging = {
-      enable_startup_script  = false
-      zone                   = "us-central1-a"
-      machine_type           = "e2-custom-medium-6400"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-11-bullseye-v20240110"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "oprhaned-wells-ui-server-v0"
-    }
-
-    rrc = {
-      enable_startup_script  = false
-      zone                   = "us-central1-b"
-      machine_type           = "e2-standard-2"
-      boot_image             = "https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-12-bookworm-v20260513"
-      boot_disk_size         = 20
-      boot_resource_policies = []
-      boot_disk_device_name  = "rrc-ogrre-server"
-    }
-  }
-
-  description = "Legacy Compute Engine VM backends. Add entries here only when intentionally managing a VM."
-}
-
-variable "enabled_legacy_backend_vms" {
-  type        = set(string)
-  default     = []
-  description = "Names from legacy_backend_vms to actively manage as Compute Engine VM backends. Empty disables all legacy VMs while keeping their definitions available for future re-enable."
 }
 
 variable "enable_gke" {
@@ -201,31 +116,7 @@ variable "gke_backends" {
     dns_ttl                                   = optional(number)
   }))
 
-  default = {
-    # Staging keeps a single API replica and smaller worker defaults.
-    staging = {
-      upload_bucket_name            = "uploaded_documents_v0"
-      replicas                      = 1
-      cpu_request                   = "500m"
-      memory_request                = "1Gi"
-      cpu_limit                     = "1"
-      memory_limit                  = "2Gi"
-      api_uvicorn_workers           = 2
-      processing_job_cpu_request    = "1"
-      processing_job_memory_request = "6Gi"
-      processing_job_cpu_limit      = "1"
-      processing_job_memory_limit   = "6Gi"
-    }
-    osage = {}
-    isgs  = {}
-    newts = {}
-    # CA cloud resources remain managed, but no Kubernetes namespace, runtime
-    # identity, or deploy target is created until CA is ready to be deployed.
-    ca = {
-      enable_kubernetes_workloads = false
-    }
-    rrc = {}
-  }
+  default = {}
 
   description = "Default GKE backend definitions. Keys are collaborator names; omitted attributes use OGRRE naming defaults. Set enable_kubernetes_workloads=false to retain cloud configuration without making the backend deployable to Kubernetes."
 }

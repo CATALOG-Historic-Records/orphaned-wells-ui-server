@@ -41,6 +41,14 @@ def revision(ref="HEAD"):
             inputs.append(entry)
     if not inputs:
         raise ValueError("No tracked Terraform inputs found")
+
+    tfvars_path = TF_ROOT / "terraform.tfvars"
+    if tfvars_path.is_file():
+        content = tfvars_path.read_text(encoding="utf-8").strip()
+        if content:
+            tfvars_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            inputs.append(f"terraform.tfvars:{tfvars_hash}")
+
     return hashlib.sha256("\0".join(inputs).encode()).hexdigest()
 
 
@@ -118,16 +126,45 @@ def output(**values):
 def status(require_ready=False):
     workspace, bucket, state = configuration()
     expected = revision()
+    marker = read_marker(f"{bucket}/status/{workspace}.json")
+    generation = state_generation(state)
     ready = is_ready(
-        read_marker(f"{bucket}/status/{workspace}.json"),
+        marker,
         expected,
         state,
-        state_generation(state),
+        generation,
     )
     output(ready=str(ready).lower(), revision=expected)
     if require_ready and not ready:
+        if not marker:
+            reason = "no readiness marker found in GCS"
+        elif marker.get("revision") != expected:
+            reason = (
+                f"marker revision ({marker.get('revision')}) does not match "
+                f"expected revision ({expected})"
+            )
+        elif marker.get("state") != state:
+            reason = (
+                f"marker state ({marker.get('state')}) does not match "
+                f"expected state ({state})"
+            )
+        elif marker.get("generation") != generation:
+            reason = (
+                f"marker generation ({marker.get('generation')}) does not match "
+                f"current state generation ({generation})"
+            )
+        elif marker.get("status") not in ("applied", "verified"):
+            reason = f"marker status is '{marker.get('status')}' (expected 'applied' or 'verified')"
+        elif (
+            marker.get("status") == "verified"
+            and marker.get("has_changes") is not False
+        ):
+            reason = "marker status is 'verified' but has_changes is not False"
+        else:
+            reason = "readiness condition not met"
+
         raise ValueError(
-            "Terraform for current main is not successfully reconciled. "
+            f"Terraform for current main is not successfully reconciled ({reason}). "
             "Complete the staging infrastructure workflow, then retry this deployment."
         )
 

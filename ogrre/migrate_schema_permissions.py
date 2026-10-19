@@ -20,10 +20,12 @@ def migrate_schema_permissions(db, apply=False, expected_changes=None):
     for role in db.roles.find({}):
         before = role.get("permissions") or []
         permissions = set(before)
-        if role.get("category") == "system" or (
-            role.get("category") == "team" and role.get("id") == "team_lead"
-        ):
+        if role.get("category") == "system":
             permissions.add("manage_schema")
+            permissions.add("view_schema")
+        elif role.get("category") == "team" and role.get("id") == "team_lead":
+            permissions.discard("manage_schema")
+            permissions.discard("view_schema")
         if role.get("category") == "system" and role.get("id") == "sys_admin":
             permissions.add(DESTRUCTIVE_PERMISSION)
         else:

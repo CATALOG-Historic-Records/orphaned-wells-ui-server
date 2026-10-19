@@ -71,6 +71,17 @@ def _resolve_service_account_path(service_key=None):
     service_path = Path(service_key).expanduser()
     if service_path.is_absolute():
         return str(service_path)
+
+    candidates = [
+        PACKAGE_DIR / service_path,
+        Path.cwd() / service_path,
+        Path.cwd() / "ogrre" / service_path,
+        Path.cwd() / "orphaned-wells-ui-server" / "ogrre" / service_path,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
     return str(PACKAGE_DIR / service_path)
 
 
@@ -339,9 +350,9 @@ def get_file_url(key, bucket_name=BUCKET_NAME):
     if _is_local():
         return f"{LOCAL_STORAGE_URL_BASE}/{quote(key, safe='/')}"
 
-    _, bucket = _get_bucket(bucket_name=bucket_name)
-    blob = bucket.blob(f"{key}")
     try:
+        _, bucket = _get_bucket(bucket_name=bucket_name)
+        blob = bucket.blob(f"{key}")
         url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(minutes=15),
