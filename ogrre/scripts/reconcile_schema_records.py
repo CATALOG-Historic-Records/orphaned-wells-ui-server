@@ -6,7 +6,7 @@ import os
 
 from bson import ObjectId
 
-from ogrre.migrate_schema_permissions import connection_label
+from ogrre.scripts.migrate_schema_permissions import connection_label
 
 
 def reconcile_batch(
