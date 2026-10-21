@@ -11,7 +11,7 @@ from pathlib import Path
 from bson import ObjectId
 
 from ogrre.internal import schema_validation as rules
-from ogrre.migrate_schema_permissions import connection_label
+from ogrre.scripts.migrate_schema_permissions import connection_label
 
 
 def _fields(attributes):
