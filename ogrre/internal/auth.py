@@ -6,15 +6,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+DEFAULT_GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+DEFAULT_CILOGON_TOKEN_URI = "https://cilogon.org/oauth2/token"
+
+
 def get_google_credentials():
-    token_uri = os.getenv("token_uri")
+    token_uri = os.getenv("token_uri") or DEFAULT_GOOGLE_TOKEN_URI
     client_id = os.getenv("client_id")
     client_secret = os.getenv("client_secret")
     return token_uri, client_id, client_secret
 
 
 def get_cilogon_credentials():
-    token_uri = os.getenv("cilogon_token_uri")
+    token_uri = os.getenv("cilogon_token_uri") or DEFAULT_CILOGON_TOKEN_URI
     client_id = os.getenv("cilogon_client_id")
     client_secret = os.getenv("cilogon_client_secret")
     return token_uri, client_id, client_secret
