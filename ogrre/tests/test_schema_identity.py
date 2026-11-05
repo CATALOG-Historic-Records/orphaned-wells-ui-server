@@ -11,7 +11,7 @@ from starlette.datastructures import UploadFile
 
 from ogrre.internal import util
 from ogrre.internal.schema_validation import SchemaError
-from ogrre.migrate_schema_bindings import migrate_schema_bindings
+from ogrre.scripts.migrate_schema_bindings import migrate_schema_bindings
 from ogrre.tests.test_schema_management import (
     FIELD,
     GROUP,

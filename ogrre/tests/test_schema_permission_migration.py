@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import mongomock
 import pytest
 
-from ogrre import migrate_schema_permissions as migration
+from ogrre.scripts import migrate_schema_permissions as migration
 
 
 @pytest.fixture
@@ -174,7 +174,7 @@ def test_explicit_env_loads_before_connection_settings(tmp_path, apply):
 import sys
 from unittest.mock import patch
 import mongomock
-from ogrre.migrate_schema_permissions import main
+from ogrre.scripts.migrate_schema_permissions import main
 
 client = mongomock.MongoClient()
 db = client.selected_database

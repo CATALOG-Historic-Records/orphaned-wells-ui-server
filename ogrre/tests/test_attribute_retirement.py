@@ -408,7 +408,7 @@ def test_nested_retirement_hides_every_instance_without_modifying_children(
 
 
 def test_migrated_embedded_schema_retirement_preserves_last_field(retirement_manager):
-    from ogrre.migrate_schema_bindings import migrate_schema_bindings
+    from ogrre.scripts.migrate_schema_bindings import migrate_schema_bindings
 
     manager = retirement_manager
     manager.db.record_groups.update_one(
