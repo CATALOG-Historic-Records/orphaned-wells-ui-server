@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
 from ogrre.internal import schema_validation as rules
-from ogrre.migrate_schema_permissions import migrate_schema_permissions
+from ogrre.scripts.migrate_schema_permissions import migrate_schema_permissions
 
 
 USER = {"email": "lead@example.com"}
