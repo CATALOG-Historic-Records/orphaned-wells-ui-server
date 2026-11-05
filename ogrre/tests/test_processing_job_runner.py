@@ -73,9 +73,7 @@ class ProcessingJobManifestTests(unittest.TestCase):
             api_container["envFrom"],
         )
 
-        api_secret_volumes = [
-            vol for vol in api_pod_spec["volumes"] if "secret" in vol
-        ]
+        api_secret_volumes = [vol for vol in api_pod_spec["volumes"] if "secret" in vol]
         worker_secret_volumes = [
             vol for vol in worker_pod_spec["volumes"] if "secret" in vol
         ]
