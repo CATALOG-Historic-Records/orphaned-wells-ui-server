@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from ogrre.internal import util
-from ogrre.reconcile_schema_records import reconcile_batch
+from ogrre.scripts.reconcile_schema_records import reconcile_batch
 from ogrre.tests.test_attribute_retirement import (
     FIELD,
     GROUP,

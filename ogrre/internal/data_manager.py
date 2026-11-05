@@ -1969,6 +1969,18 @@ class DataManager:
             return user
         return None
 
+    def getUserBySub(self, sub):
+        if not sub:
+            return None
+        cursor = self.db.users.find({"cilogon_sub": sub})
+        for document in cursor:
+            user = document
+            user["_id"] = str(user["_id"])
+            user["permissions"] = self.getUserPermissions(user)
+            user["collaborator"] = self.getCollaboratorForUser(user)
+            return user
+        return None
+
     def updateUserObject(self, user_info):
         cursor = self.db.users.find({"email": user_info["email"]})
         user = None
@@ -1978,10 +1990,16 @@ class DataManager:
             return None
 
         ## update name, picture, hd
-        for each in ["name", "picture", "hd"]:
+        for each in ["name", "picture", "hd", "idp_name"]:
             new_val = user_info.get(each, False)
             if new_val and new_val != "":
                 user[each] = new_val
+
+        if (
+            user_info.get("provider") == "cilogon"
+            or user_info.get("iss") == "https://cilogon.org"
+        ) and user_info.get("sub"):
+            user["cilogon_sub"] = user_info["sub"]
 
         email = user_info.get("email", "")
         myquery = {"email": email}
