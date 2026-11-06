@@ -18,7 +18,7 @@ on:
         description: Frontend repository (owner/name); override to test a fork.
         type: string
         required: false
-        default: CATALOG-Historic-Records/orphaned-wells-ui
+        default: MichaelPesce/orphaned-wells-ui
 
 defaults:
   run:
@@ -89,7 +89,7 @@ jobs:
     permissions:
       contents: read
     with:
-      checkout_repository: ${{ inputs.frontend_repository || 'CATALOG-Historic-Records/orphaned-wells-ui' }}
+      checkout_repository: ${{ inputs.frontend_repository || 'MichaelPesce/orphaned-wells-ui' }}
       checkout_ref: ${{ inputs.frontend_ref || 'export-k8s-job' }}
       backend_mode: source
       backend_repository: ${{ github.repository }}
