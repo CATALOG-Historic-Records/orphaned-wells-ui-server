@@ -273,12 +273,12 @@ def test_export_job_history_mine_vs_team_and_filters(manager, export_projects):
     )
     assert active_job["status"] == "queued"
 
-    # Default view_scope is "mine" and returns both active and finished exports
+    # Default view_scope is "mine": active_jobs returns in-progress jobs, jobs returns finished history
     mine_res = asyncio.run(
         router.get_export_job_history(FakeRequest({}), user_info=USER)
     )
-    assert [j["job_id"] for j in mine_res["jobs"]] == ["job-active", "job-mine"]
-    assert mine_res["jobs"][1]["column_count"] == 2
+    assert [j["job_id"] for j in mine_res["jobs"]] == ["job-mine"]
+    assert mine_res["jobs"][0]["column_count"] == 2
     assert [j["job_id"] for j in mine_res["active_jobs"]] == ["job-active"]
 
     # Team view_scope includes teammate exports in accessible projects
@@ -287,11 +287,30 @@ def test_export_job_history_mine_vs_team_and_filters(manager, export_projects):
             FakeRequest({"view_scope": "team"}), user_info=USER
         )
     )
-    assert {j["job_id"] for j in team_res["jobs"]} == {
-        "job-active",
-        "job-mine",
+    assert {j["job_id"] for j in team_res["jobs"]} == {"job-mine", "job-team"}
+
+    # Search filter matches output_name / requester email
+    search_res = asyncio.run(
+        router.get_export_job_history(
+            FakeRequest({"view_scope": "team", "search": "team_export"}),
+            user_info=USER,
+        )
+    )
+    assert [j["job_id"] for j in search_res["jobs"]] == ["job-team"]
+
+    # Cancel active job and rerun failed job
+    canceled = router.cancel_export_job("job-active", user_info=USER)
+    assert canceled["status"] == "error"
+    assert canceled["error"] == "Canceled by user"
+
+    rerun = router.rerun_export_job(
         "job-team",
-    }
+        request=FakeRequest(),
+        background_tasks=BackgroundTasks(),
+        user_info=USER,
+    )
+    assert rerun["job_id"] != "job-team"
+    assert rerun["output_name"] == "team_export"
 
     # Filter by status and requester
     failed_res = asyncio.run(

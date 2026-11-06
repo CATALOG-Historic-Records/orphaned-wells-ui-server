@@ -70,7 +70,22 @@ def export_history_query(body):
             query[key] = value
         else:
             raise ValueError(f"Unsupported export history filter: {key}")
-    query.setdefault("status", {"$in": ALL_STATUSES})
+    query.setdefault("status", {"$in": TERMINAL_STATUSES})
+    raw_search = body.get("search")
+    if raw_search is not None:
+        if not isinstance(raw_search, str) or len(raw_search) > 320:
+            raise ValueError("Invalid search query")
+        cleaned_search = raw_search.strip()
+        if cleaned_search:
+            pattern = {"$regex": re.escape(cleaned_search), "$options": "i"}
+            query["$or"] = [
+                {"output_name": pattern},
+                {"artifact.filename": pattern},
+                {"project_name": pattern},
+                {"record_group_name": pattern},
+                {"request_user.email": pattern},
+                {"request_user.name": pattern},
+            ]
     return pagination, query, view_scope
 
 

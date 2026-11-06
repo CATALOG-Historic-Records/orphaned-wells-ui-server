@@ -4296,7 +4296,7 @@ class DataManager:
             .limit(10)
         ]
 
-    def getProcessingHistoryProjects(self, user_info):
+    def getJobScopeProjects(self, user_info):
         """Return only projects/groups visible through the user's current team."""
         projects = self.fetchProjects(user_info)
         group_ids = {
@@ -4348,7 +4348,7 @@ class DataManager:
                 not isinstance(body[key], str) or not ObjectId.is_valid(body[key])
             ):
                 raise ValueError(f"Invalid {key}")
-        projects = self.getProcessingHistoryProjects(user_info)
+        projects = self.getJobScopeProjects(user_info)
         project_id = body.get("project_id")
         if project_id is not None:
             projects = [project for project in projects if project["id"] == project_id]
@@ -4792,7 +4792,7 @@ class DataManager:
         )
 
     def validateExportScope(self, location, target_id, user_info):
-        projects = self.getProcessingHistoryProjects(user_info)
+        projects = self.getJobScopeProjects(user_info)
         team_name = self._getUserTeamName(user_info)
         target_str = str(target_id or "")
 
@@ -5364,7 +5364,7 @@ class DataManager:
             ):
                 raise ValueError(f"Invalid {key}")
 
-        projects = self.getProcessingHistoryProjects(user_info)
+        projects = self.getJobScopeProjects(user_info)
         team_name = self._getUserTeamName(user_info)
         project_map = {project["id"]: project["name"] for project in projects}
         group_map = {
@@ -5437,9 +5437,10 @@ class DataManager:
             return {"$and": clauses}
 
         scoped_history_filter = combine_filters(history_filter)
-        scoped_active_filter = combine_filters(
-            {"status": {"$in": export_job_history.ACTIVE_STATUSES}}
-        )
+        active_base_filter = {"status": {"$in": export_job_history.ACTIVE_STATUSES}}
+        if "$or" in history_filter:
+            active_base_filter["$or"] = history_filter["$or"]
+        scoped_active_filter = combine_filters(active_base_filter)
 
         def page(query, number):
             return [

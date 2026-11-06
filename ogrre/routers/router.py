@@ -1626,7 +1626,7 @@ def get_processing_history_scopes(
     request: Request, user_info: dict = Depends(authenticate)
 ):
     user_info = _require_processing_history_permission(request, user_info)
-    return data_manager.getProcessingHistoryProjects(user_info)
+    return data_manager.getJobScopeProjects(user_info)
 
 
 @router.post("/processing_jobs/history")
@@ -2179,7 +2179,7 @@ def _get_request_origin(request: Request) -> str:
 @router.get("/export_jobs/scopes")
 def get_export_job_scopes(user_info: dict = Depends(authenticate)):
     """Return projects and record groups available for export history filtering."""
-    return data_manager.getProcessingHistoryProjects(user_info)
+    return data_manager.getJobScopeProjects(user_info)
 
 
 @router.post("/export_jobs/history")
@@ -2348,6 +2348,67 @@ def download_local_export_job_file(
         local_path,
         media_type="application/zip",
         filename=filename,
+    )
+
+
+@router.post("/export_jobs/{job_id}/rerun")
+def rerun_export_job(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    """Create and dispatch a new export job using the configuration of a previous export job."""
+    existing = data_manager.getExportJob(job_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if not data_manager.canUserAccessExportJob(existing, user_info):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to rerun this export",
+        )
+    try:
+        job = data_manager.createExportJob(
+            location=existing.get("location") or "record_group",
+            target_id=existing.get("target_id") or "",
+            user_info=user_info,
+            options=existing.get("options") or {},
+            output_name=existing.get("output_name"),
+            request_origin=_get_request_origin(request),
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        job = dispatch_export_job(
+            job["job_id"], data_manager, background_tasks=background_tasks
+        )
+    except Exception:
+        _log.exception("Failed to dispatch rerun export job %s immediately", job["job_id"])
+    return job
+
+
+@router.post("/export_jobs/{job_id}/cancel")
+def cancel_export_job(
+    job_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Cancel an active export job."""
+    existing = data_manager.getExportJob(job_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if not data_manager.canUserAccessExportJob(existing, user_info):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to cancel this export",
+        )
+    if existing.get("status") not in ("queued", "dispatched", "running"):
+        return existing
+    return data_manager.completeExportJob(
+        job_id,
+        "error",
+        error="Canceled by user",
     )
 
 
