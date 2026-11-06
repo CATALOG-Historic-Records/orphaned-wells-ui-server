@@ -25,6 +25,8 @@ import io
 import logging
 import os
 import re
+import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
@@ -57,6 +59,7 @@ LOCAL_STORAGE_URL_BASE = os.getenv(
 
 UPLOADS_PREFIX = "uploads"
 DELETED_PREFIX = "deleted"
+EXPORTS_PREFIX = "exports"
 
 
 def _storage_path(key):
@@ -367,6 +370,102 @@ def get_file_url(key, bucket_name=BUCKET_NAME):
 def get_document_image(rg_id, record_id, filename, bucket_name=BUCKET_NAME):
     path = f"{get_record_image_directory(rg_id, record_id)}/{filename}"
     return get_file_url(path, bucket_name=bucket_name)
+
+
+def get_export_storage_key(job_id, filename):
+    safe_name = os.path.basename(str(filename or "records.zip")).replace('"', "")
+    if not safe_name:
+        safe_name = "records.zip"
+    if not safe_name.lower().endswith(".zip"):
+        safe_name = f"{safe_name}.zip"
+    return f"{EXPORTS_PREFIX}/{job_id}/{safe_name}"
+
+
+def upload_export_artifact(local_path, storage_key, bucket_name=BUCKET_NAME):
+    if _is_local():
+        destination = _storage_path(storage_key)
+        _ensure_local_dir(destination)
+        shutil.copy2(local_path, destination)
+        return storage_key
+
+    _, bucket = _get_bucket(bucket_name=bucket_name)
+    blob = bucket.blob(storage_key)
+    blob.upload_from_filename(
+        local_path, content_type="application/zip", timeout=600
+    )
+    return storage_key
+
+
+def get_export_download_url(
+    storage_key,
+    filename,
+    expires_at=None,
+    job_id=None,
+    backend_url=None,
+    bucket_name=BUCKET_NAME,
+):
+    safe_name = os.path.basename(str(filename or "records.zip")).replace('"', "")
+    if not safe_name:
+        safe_name = "records.zip"
+    if _is_local():
+        if job_id and backend_url:
+            return f"{backend_url.rstrip('/')}/export_jobs/{quote(str(job_id))}/download/file"
+        return f"{LOCAL_STORAGE_URL_BASE}/{quote(storage_key, safe='/')}"
+
+    ttl_seconds = 900
+    if expires_at is not None:
+        remaining = int(expires_at - time.time())
+        if remaining <= 0:
+            return None
+        ttl_seconds = max(60, min(900, remaining))
+    try:
+        _, bucket = _get_bucket(bucket_name=bucket_name)
+        blob = bucket.blob(storage_key)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(seconds=ttl_seconds),
+            method="GET",
+            response_disposition=f'attachment; filename="{safe_name}"',
+            response_type="application/zip",
+        )
+    except Exception as e:
+        _log.error(f"unable to generate export signed URL for {storage_key}: {e}")
+        return None
+
+
+def delete_export_artifact(storage_key, bucket_name=BUCKET_NAME):
+    if not storage_key:
+        return False
+    if _is_local():
+        target = _storage_path(storage_key)
+        if os.path.isfile(target):
+            try:
+                os.remove(target)
+                parent = os.path.dirname(target)
+                if os.path.isdir(parent) and not os.listdir(parent):
+                    os.rmdir(parent)
+                return True
+            except OSError as e:
+                _log.info(f"unable to delete local export artifact {target}: {e}")
+        return False
+
+    try:
+        _, bucket = _get_bucket(bucket_name=bucket_name)
+        blob = bucket.blob(storage_key)
+        blob.delete(timeout=30)
+        return True
+    except NotFound:
+        return False
+    except Exception as e:
+        _log.info(f"unable to delete export artifact {storage_key}: {e}")
+        return False
+
+
+def get_local_export_file_path(storage_key):
+    if not _is_local() or not storage_key:
+        return None
+    target = _storage_path(storage_key)
+    return target if os.path.isfile(target) else None
 
 
 def file_exists(key, bucket_name=BUCKET_NAME):

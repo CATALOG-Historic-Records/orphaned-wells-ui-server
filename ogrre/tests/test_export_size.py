@@ -48,24 +48,24 @@ def test_compute_total_size_logs_missing_blob_summary(caplog):
 
 @pytest.mark.parametrize("extension", ["json", "csv"])
 @pytest.mark.parametrize("include_pdf", [False, True])
-def test_zip_files_stream_without_images(tmp_path, extension, include_pdf):
+def test_build_export_zip_without_images(tmp_path, extension, include_pdf):
     export_file = tmp_path / f"records.{extension}"
     contents = b'[{"file": "well.pdf"}]' if extension == "json" else b"file\nwell.pdf\n"
     export_file.write_bytes(contents)
     embedded_pdfs = [("documents/well.pdf", b"pdf-bytes")] if include_pdf else []
+    output_zip = tmp_path / "export.zip"
 
     with patch.object(storage_api, "_get_bucket") as get_bucket:
-        archive_bytes = b"".join(
-            util.zip_files_stream(
-                [str(export_file)],
-                [],
-                log_to_file=str(tmp_path / "zip_log.txt"),
-                embedded_pdfs=embedded_pdfs,
-            )
+        util.build_export_zip(
+            str(output_zip),
+            [str(export_file)],
+            documents=[],
+            embedded_pdfs=embedded_pdfs,
+            include_log=False,
         )
 
     get_bucket.assert_not_called()
-    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+    with zipfile.ZipFile(output_zip) as archive:
         assert archive.read(export_file.name) == contents
         assert archive.namelist() == [export_file.name] + [
             name for name, _ in embedded_pdfs
@@ -74,7 +74,7 @@ def test_zip_files_stream_without_images(tmp_path, extension, include_pdf):
             assert archive.read(name) == content
 
 
-def test_zip_files_stream_uses_bulk_size_lookup_before_streaming_images():
+def test_build_export_zip_uses_bulk_size_lookup_before_writing_images(tmp_path):
     existing_path = "uploads/group/record/image.png"
     missing_path = "uploads/group/record/missing.png"
     documents = {
@@ -85,17 +85,26 @@ def test_zip_files_stream_uses_bulk_size_lookup_before_streaming_images():
             "record_name": "record",
         }
     }
+    output_zip = tmp_path / "export_images.zip"
+    progress_updates = []
 
     with patch.object(
-        storage_api, "get_file_sizes", return_value=({existing_path: 10}, 1)
+        storage_api, "get_file_sizes", return_value=({existing_path: 11}, 1)
     ) as get_sizes, patch.object(
         storage_api, "file_exists", return_value=True
     ) as file_exists, patch.object(
         storage_api, "iter_file_bytes", return_value=[b"image-bytes"]
     ) as iter_file_bytes:
-        chunks = list(util.zip_files_stream([], documents, log_to_file=None))
+        util.build_export_zip(
+            str(output_zip),
+            [],
+            documents=documents,
+            include_log=True,
+            on_progress=lambda current, total: progress_updates.append(
+                (current, total)
+            ),
+        )
 
-    assert chunks
     get_sizes.assert_called_once()
     requested_paths = list(get_sizes.call_args.args[0])
     assert requested_paths == [existing_path, missing_path]
@@ -103,3 +112,8 @@ def test_zip_files_stream_uses_bulk_size_lookup_before_streaming_images():
     iter_file_bytes.assert_called_once_with(
         existing_path, bucket_name=util.BUCKET_NAME, chunk_size=65536
     )
+    assert progress_updates == [(1, 1)]
+    with zipfile.ZipFile(output_zip) as archive:
+        assert archive.read("documents/record/image.png") == b"image-bytes"
+        log_text = archive.read("zip_log.txt").decode("utf-8")
+        assert "1 image(s) not found, skipping" in log_text
