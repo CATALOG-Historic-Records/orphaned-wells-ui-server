@@ -60,9 +60,7 @@ def _export_job_resources():
             ),
             "ephemeral-storage": os.getenv(
                 "EXPORT_JOB_EPHEMERAL_STORAGE_LIMIT",
-                os.getenv(
-                    "PROCESSING_JOB_EPHEMERAL_STORAGE_LIMIT", ephemeral_storage
-                ),
+                os.getenv("PROCESSING_JOB_EPHEMERAL_STORAGE_LIMIT", ephemeral_storage),
             ),
         },
     }
@@ -183,9 +181,9 @@ def _run_background_export_job(job_id, attempt, data_manager):
             "local export worker failed job_id=%s attempt=%s", job_id, attempt
         )
         with _background_lock:
-            _background_failures[(job_id, attempt)] = (
-                f"Export generation failed ({type(error).__name__}): {error}"
-            )
+            _background_failures[
+                (job_id, attempt)
+            ] = f"Export generation failed ({type(error).__name__}): {error}"
     finally:
         with _background_lock:
             _background_active.discard((job_id, attempt))
@@ -265,9 +263,7 @@ def run_export_job(job_id, attempt=0, data_manager=None):
                         )
                         or "records"
                     )
-                    csv_base = os.path.join(
-                        temp_dir, f"{safe_set_id}_{output_file_id}"
-                    )
+                    csv_base = os.path.join(temp_dir, f"{safe_set_id}_{output_file_id}")
                     csv_file = data_manager.downloadRecords(
                         set_records,
                         "csv",

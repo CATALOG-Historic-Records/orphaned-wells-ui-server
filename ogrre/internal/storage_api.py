@@ -390,9 +390,7 @@ def upload_export_artifact(local_path, storage_key, bucket_name=BUCKET_NAME):
 
     _, bucket = _get_bucket(bucket_name=bucket_name)
     blob = bucket.blob(storage_key)
-    blob.upload_from_filename(
-        local_path, content_type="application/zip", timeout=600
-    )
+    blob.upload_from_filename(local_path, content_type="application/zip", timeout=600)
     return storage_key
 
 

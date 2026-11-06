@@ -2376,11 +2376,23 @@ async def create_export_job(
     export_types = options.get("export_types")
     if not isinstance(export_types, dict):
         export_types = {}
-    if export_csv is not None and "export_csv" not in options and "csv" not in export_types:
+    if (
+        export_csv is not None
+        and "export_csv" not in options
+        and "csv" not in export_types
+    ):
         options["export_csv"] = export_csv
-    if export_json is not None and "export_json" not in options and "json" not in export_types:
+    if (
+        export_json is not None
+        and "export_json" not in options
+        and "json" not in export_types
+    ):
         options["export_json"] = export_json
-    if export_images is not None and "export_images" not in options and "images" not in export_types:
+    if (
+        export_images is not None
+        and "export_images" not in options
+        and "images" not in export_types
+    ):
         options["export_images"] = export_images
     if (
         export_embedded_pdfs is not None

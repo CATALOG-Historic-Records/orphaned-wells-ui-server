@@ -45,9 +45,7 @@ def main():
     args = parser.parse_args()
     # Load local CLI configuration before importing runtime integrations.
     load_dotenv()
-    _log.info(
-        "starting worker job_type=%s job_id=%s", args.job_type, args.job_id
-    )
+    _log.info("starting worker job_type=%s job_id=%s", args.job_type, args.job_id)
     run_processing_job(args.job_id, args.attempt, job_type=args.job_type)
 
 

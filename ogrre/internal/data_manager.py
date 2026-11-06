@@ -4833,9 +4833,7 @@ class DataManager:
 
         if location == "team":
             if not team_name and not projects:
-                raise PermissionError(
-                    "You are not authorized to export team records"
-                )
+                raise PermissionError("You are not authorized to export team records")
             return {
                 "location": "team",
                 "target_id": target_str or team_name or "team",
@@ -5395,9 +5393,11 @@ class DataManager:
                     "This record group is not available in the selected projects"
                 )
 
-        pagination, history_filter, view_scope = export_job_history.export_history_query(
-            body
-        )
+        (
+            pagination,
+            history_filter,
+            view_scope,
+        ) = export_job_history.export_history_query(body)
 
         scope_clauses = []
         if group_id is not None:

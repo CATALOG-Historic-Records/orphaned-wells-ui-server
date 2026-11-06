@@ -126,13 +126,21 @@ def export_projects(manager, monkeypatch, tmp_path):
                 "email": USER["email"],
                 "name": USER.get("name", "Exporter"),
                 "default_team": "TeamA",
-                "roles": {"team": {"TeamA": ["team_member"]}, "projects": {}, "system": []},
+                "roles": {
+                    "team": {"TeamA": ["team_member"]},
+                    "projects": {},
+                    "system": [],
+                },
             },
             {
                 "email": "teammate@example.com",
                 "name": "Teammate",
                 "default_team": "TeamA",
-                "roles": {"team": {"TeamA": ["team_member"]}, "projects": {}, "system": []},
+                "roles": {
+                    "team": {"TeamA": ["team_member"]},
+                    "projects": {},
+                    "system": [],
+                },
             },
         ]
     )
@@ -441,9 +449,7 @@ def test_kubernetes_export_manifest_matches_backend_deployment():
         },
         clear=False,
     ):
-        manifest = _kubernetes_export_job_manifest(
-            job_id, "registry.example/ogrre:sha"
-        )
+        manifest = _kubernetes_export_job_manifest(job_id, "registry.example/ogrre:sha")
 
     container = manifest["spec"]["template"]["spec"]["containers"][0]
     assert manifest["metadata"]["name"] == _export_job_name(job_id)
