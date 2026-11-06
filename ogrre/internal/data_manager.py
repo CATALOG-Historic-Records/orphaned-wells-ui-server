@@ -6373,9 +6373,7 @@ class DataManager:
         user = user_info.get("email", None)
         rg_attribute_map = self.create_record_group_processor_attribute_map(user_info)
         today = time.time()
-        output_dir = (
-            getattr(self.app_settings, "export_dir", None) or tempfile.gettempdir()
-        )
+        output_dir = tempfile.gettempdir()
         if output_filename is None:
             output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
         else:
