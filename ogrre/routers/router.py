@@ -2385,7 +2385,9 @@ def rerun_export_job(
             job["job_id"], data_manager, background_tasks=background_tasks
         )
     except Exception:
-        _log.exception("Failed to dispatch rerun export job %s immediately", job["job_id"])
+        _log.exception(
+            "Failed to dispatch rerun export job %s immediately", job["job_id"]
+        )
     return job
 
 
