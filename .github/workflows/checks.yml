@@ -13,7 +13,7 @@ on:
         description: Frontend branch, tag, or commit to test against.
         type: string
         required: false
-        default: main
+        default: export-k8s-job
       frontend_repository:
         description: Frontend repository (owner/name); override to test a fork.
         type: string
@@ -90,7 +90,7 @@ jobs:
       contents: read
     with:
       checkout_repository: ${{ inputs.frontend_repository || 'CATALOG-Historic-Records/orphaned-wells-ui' }}
-      checkout_ref: ${{ inputs.frontend_ref || 'main' }}
+      checkout_ref: ${{ inputs.frontend_ref || 'export-k8s-job' }}
       backend_mode: source
       backend_repository: ${{ github.repository }}
       backend_ref: ${{ github.sha }}
