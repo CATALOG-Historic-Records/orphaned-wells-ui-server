@@ -11,7 +11,7 @@ import pytest
 @pytest.fixture
 def manager(tmp_path):
     db = mongomock.MongoClient().upload_tests
-    settings = SimpleNamespace(img_dir=tmp_path, log_dir=tmp_path, export_dir=tmp_path)
+    settings = SimpleNamespace(img_dir=tmp_path, log_dir=tmp_path)
     with patch(
         "ogrre.internal.mongodb_connection.connectToDatabase", return_value=db
     ), patch("ogrre.internal.settings.AppSettings", return_value=settings), patch(
