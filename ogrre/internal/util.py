@@ -456,39 +456,6 @@ def compileDocumentImageList(records):
     return images
 
 
-@time_it
-def compute_total_size(local_file_paths, gcs_paths):
-    """
-    Compute total bytes of local files + google cloud images.
-    local_file_paths: list of paths
-    gcs_paths: dict or list of google cloud storage image paths
-    """
-    total_size = 0
-
-    # Local file sizes
-    for file_path in local_file_paths or []:
-        if os.path.isfile(file_path):
-            try:
-                total_size += os.path.getsize(file_path)
-            except OSError as e:
-                _log.warning(f"Failed to get size of local file {file_path}: {e}")
-        else:
-            _log.warning(f"Local file not found: {file_path}")
-
-    # GCS blob sizes
-    gcs_sizes, missing_count = storage_api.get_file_sizes(
-        gcs_paths, bucket_name=BUCKET_NAME
-    )
-    total_size += sum(gcs_sizes.values())
-    if missing_count:
-        _log.warning(
-            "Skipped %s missing or unreadable blob(s) while computing download size",
-            missing_count,
-        )
-
-    return total_size
-
-
 def compile_embedded_pdfs(records, on_progress=None):
     """
     Generates embedded searchable PDF bytes for each record in-memory using ogrre_embed.

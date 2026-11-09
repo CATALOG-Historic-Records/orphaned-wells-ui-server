@@ -143,36 +143,6 @@ def verify_directory_upload(bucket_name, item, required=True):
     return {**item, "generation": generation, "crc32c": blob.crc32c}
 
 
-async def upload_file(file_path, file_name, folder="uploads", on_bytes_read=None):
-    key = f"{folder}/{file_name}" if folder else file_name
-    if _is_local():
-        destination = _storage_path(key)
-        _ensure_local_dir(destination)
-        file_bytes = b""
-        async with aiofiles.open(file_path, "rb") as src:
-            async with aiofiles.open(destination, "wb") as dst:
-                while True:
-                    chunk = await src.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    await dst.write(chunk)
-                    file_bytes += chunk
-        if on_bytes_read:
-            on_bytes_read(file_bytes)
-        del file_bytes
-        _log.info(f"uploaded document to local storage: {destination}")
-        return destination
-
-    async with aiofiles.open(file_path, "rb") as afp:
-        file_bytes = await afp.read()
-    if on_bytes_read:
-        on_bytes_read(file_bytes)
-    url = await _async_upload_to_bucket(file_name, file_bytes, folder=folder)
-    del file_bytes
-    _log.info(f"uploaded document to cloud storage: {url}")
-    return url
-
-
 async def upload_files(
     file_paths, file_names, folder="uploads", on_all_bytes_read=None
 ):
@@ -224,29 +194,6 @@ async def _async_upload_to_bucket(
             bucket_name, f"{folder}/{blob_name}", file_obj
         )
         return status["selfLink"]
-
-
-def delete_directory(prefix, bucket_name=BUCKET_NAME):
-    if _is_local():
-        target = _storage_path(prefix)
-        if os.path.isdir(target):
-            for root, _, files in os.walk(target):
-                for name in files:
-                    file_path = os.path.join(root, name)
-                    try:
-                        os.remove(file_path)
-                    except OSError as e:
-                        _log.info(f"unable to delete local file {file_path}: {e}")
-            return True
-        return False
-
-    _log.info(f"deleting storage prefix {prefix} from google storage")
-    _, bucket = _get_bucket(bucket_name=bucket_name)
-    blobs = bucket.list_blobs(prefix=prefix)
-    for blob in blobs:
-        _log.info(f"deleting {blob}")
-        blob.delete()
-    return True
 
 
 def move_directory(prefix, destination_prefix, bucket_name=BUCKET_NAME):
@@ -349,20 +296,31 @@ def move_record_images_to_deleted(record_group_id, record_id, bucket_name=BUCKET
     )
 
 
-def get_file_url(key, bucket_name=BUCKET_NAME):
+def get_file_url(
+    key,
+    bucket_name=BUCKET_NAME,
+    expiration=datetime.timedelta(minutes=15),
+    response_disposition=None,
+    response_type=None,
+):
     if _is_local():
         return f"{LOCAL_STORAGE_URL_BASE}/{quote(key, safe='/')}"
 
     try:
         _, bucket = _get_bucket(bucket_name=bucket_name)
         blob = bucket.blob(f"{key}")
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.timedelta(minutes=15),
-            method="GET",
-        )
+        signed_kwargs = {
+            "version": "v4",
+            "expiration": expiration,
+            "method": "GET",
+        }
+        if response_disposition:
+            signed_kwargs["response_disposition"] = response_disposition
+        if response_type:
+            signed_kwargs["response_type"] = response_type
+        url = blob.generate_signed_url(**signed_kwargs)
     except Exception:
-        _log.info(f"unable to get GCS image for path: {key}")
+        _log.info(f"unable to get GCS URL for path: {key}")
         url = None
     return url
 
@@ -372,13 +330,17 @@ def get_document_image(rg_id, record_id, filename, bucket_name=BUCKET_NAME):
     return get_file_url(path, bucket_name=bucket_name)
 
 
-def get_export_storage_key(job_id, filename):
+def _sanitize_export_filename(filename):
     safe_name = os.path.basename(str(filename or "records.zip")).replace('"', "")
     if not safe_name:
         safe_name = "records.zip"
     if not safe_name.lower().endswith(".zip"):
         safe_name = f"{safe_name}.zip"
-    return f"{EXPORTS_PREFIX}/{job_id}/{safe_name}"
+    return safe_name
+
+
+def get_export_storage_key(job_id, filename):
+    return f"{EXPORTS_PREFIX}/{job_id}/{_sanitize_export_filename(filename)}"
 
 
 def upload_export_artifact(local_path, storage_key, bucket_name=BUCKET_NAME):
@@ -402,13 +364,11 @@ def get_export_download_url(
     backend_url=None,
     bucket_name=BUCKET_NAME,
 ):
-    safe_name = os.path.basename(str(filename or "records.zip")).replace('"', "")
-    if not safe_name:
-        safe_name = "records.zip"
-    if _is_local():
-        if job_id and backend_url:
-            return f"{backend_url.rstrip('/')}/export_jobs/{quote(str(job_id))}/download/file"
-        return f"{LOCAL_STORAGE_URL_BASE}/{quote(storage_key, safe='/')}"
+    safe_name = _sanitize_export_filename(filename)
+    if _is_local() and job_id and backend_url:
+        return (
+            f"{backend_url.rstrip('/')}/export_jobs/{quote(str(job_id))}/download/file"
+        )
 
     ttl_seconds = 900
     if expires_at is not None:
@@ -416,19 +376,13 @@ def get_export_download_url(
         if remaining <= 0:
             return None
         ttl_seconds = max(60, min(900, remaining))
-    try:
-        _, bucket = _get_bucket(bucket_name=bucket_name)
-        blob = bucket.blob(storage_key)
-        return blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.timedelta(seconds=ttl_seconds),
-            method="GET",
-            response_disposition=f'attachment; filename="{safe_name}"',
-            response_type="application/zip",
-        )
-    except Exception as e:
-        _log.error(f"unable to generate export signed URL for {storage_key}: {e}")
-        return None
+    return get_file_url(
+        storage_key,
+        bucket_name=bucket_name,
+        expiration=datetime.timedelta(seconds=ttl_seconds),
+        response_disposition=f'attachment; filename="{safe_name}"',
+        response_type="application/zip",
+    )
 
 
 def delete_export_artifact(storage_key, bucket_name=BUCKET_NAME):
@@ -466,18 +420,6 @@ def get_local_export_file_path(storage_key):
     return target if os.path.isfile(target) else None
 
 
-def file_exists(key, bucket_name=BUCKET_NAME):
-    if _is_local():
-        return os.path.isfile(_storage_path(key))
-    try:
-        _, bucket = _get_bucket(bucket_name=bucket_name)
-        blob = bucket.blob(key)
-        return blob.exists()
-    except Exception as e:
-        _log.info(f"Error checking existence for {key}: {e}")
-        return False
-
-
 def iter_file_bytes(key, bucket_name=BUCKET_NAME, chunk_size=65536):
     if _is_local():
         try:
@@ -508,26 +450,6 @@ def iter_file_bytes(key, bucket_name=BUCKET_NAME, chunk_size=65536):
     except Exception as e:
         _log.info(f"Error downloading {key}: {e}")
         return
-
-
-def get_file_size(key, bucket_name=BUCKET_NAME):
-    if _is_local():
-        try:
-            return os.path.getsize(_storage_path(key))
-        except OSError as e:
-            _log.warning(f"Failed to get size of local file {key}: {e}")
-            return None
-    try:
-        _, bucket = _get_bucket(bucket_name=bucket_name)
-        blob = bucket.blob(key)
-        blob.reload()
-        return blob.size
-    except NotFound:
-        _log.warning(f"blob not found: {key}")
-        return None
-    except Exception as e:
-        _log.error(f"Error retrieving blob size for {key}: {e}")
-        return None
 
 
 def get_file_sizes(keys, bucket_name=BUCKET_NAME, max_workers=16):
@@ -579,23 +501,32 @@ def get_file_sizes(keys, bucket_name=BUCKET_NAME, max_workers=16):
     return sizes, missing_count
 
 
-def upload_sample_image(file_bytes: bytes, original_filename: str, processor_name: str):
+def _upload_bytes(
+    key: str,
+    file_bytes: bytes,
+    content_type: str,
+    bucket_name=BUCKET_NAME,
+    storage_service_key=None,
+):
     if _is_local():
-        extension = original_filename.split(".")[-1]
-        key = f"sample_images/{processor_name}"
         destination = _storage_path(key)
         _ensure_local_dir(destination)
         with open(destination, "wb") as f:
             f.write(file_bytes)
-        return get_file_url(key)
+        return key
 
-    _, bucket = _get_bucket(bucket_name=BUCKET_NAME)
+    _, bucket = _get_bucket(
+        bucket_name=bucket_name, storage_service_key=storage_service_key
+    )
+    blob = bucket.blob(key)
+    blob.upload_from_string(file_bytes, content_type=content_type)
+    return key
+
+
+def upload_sample_image(file_bytes: bytes, original_filename: str, processor_name: str):
     extension = original_filename.split(".")[-1]
     key = f"sample_images/{processor_name}"
-
-    blob = bucket.blob(key)
-    blob.upload_from_string(file_bytes, content_type=f"image/{extension}")
-
+    _upload_bytes(key, file_bytes, content_type=f"image/{extension}")
     return get_file_url(key)
 
 
@@ -725,19 +656,7 @@ def _guess_format_and_content_type(key: str):
         "tiff": "TIFF",
     }
     pil_format = pil_format_map.get(ext, "JPEG")
-
-    content_type_map = {
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-        "gif": "image/gif",
-        "webp": "image/webp",
-        "bmp": "image/bmp",
-        "tif": "image/tiff",
-        "tiff": "image/tiff",
-    }
-    content_type = content_type_map.get(ext, "image/jpeg")
-    return pil_format, content_type
+    return pil_format, f"image/{pil_format.lower()}"
 
 
 def _load_pil_image_from_bytes(image_bytes: bytes):
@@ -796,18 +715,11 @@ def rotate_images_in_storage(
             else _build_destination_path(src_key, destination_suffix)
         )
 
-        # Download bytes using existing storage API read helper
-        if _is_local():
-            src_bytes = download_file_bytes(src_key)
-        else:
-            src_bytes = download_file_bytes(
-                src_key, bucket_name=src_bucket, storage_service_key=storage_service_key
-            )
-
+        src_bytes = download_file_bytes(
+            src_key, bucket_name=src_bucket, storage_service_key=storage_service_key
+        )
         image = _load_pil_image_from_bytes(src_bytes)
-
         rotated = rotate_image(image, degrees, expand=expand)
-
         pil_format, content_type = _guess_format_and_content_type(dest_key)
 
         # JPEG cannot represent alpha
@@ -815,19 +727,13 @@ def rotate_images_in_storage(
             rotated = rotated.convert("RGB")
 
         rotated_bytes = _save_pil_image_to_bytes(rotated, pil_format=pil_format)
-
-        # Upload back to the appropriate storage backend
-        if _is_local():
-            destination = _storage_path(dest_key)
-            _ensure_local_dir(destination)
-            with open(destination, "wb") as f:
-                f.write(rotated_bytes)
-        else:
-            _, dest_bucket = _get_bucket(
-                bucket_name=src_bucket, storage_service_key=storage_service_key
-            )
-            blob = dest_bucket.blob(dest_key)
-            blob.upload_from_string(rotated_bytes, content_type=content_type)
+        _upload_bytes(
+            dest_key,
+            rotated_bytes,
+            content_type=content_type,
+            bucket_name=src_bucket,
+            storage_service_key=storage_service_key,
+        )
 
         dest_url = get_file_url(dest_key, bucket_name=src_bucket)
         results[original] = dest_url
