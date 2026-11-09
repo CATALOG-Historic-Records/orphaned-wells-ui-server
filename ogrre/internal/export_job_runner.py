@@ -216,27 +216,17 @@ def run_export_job(job_id, attempt=0, data_manager=None):
         records, sets_of_records = data_manager.fetchExportRecordsForJob(job)
         record_count = len(records)
 
-        scope = job.get("scope") or {}
-        location = job.get("location") or scope.get("location", "record_group")
-        target_id = job.get("target_id") or scope.get("target_id", "")
-        raw_output_name = (
-            job.get("output_name") or scope.get("output_name") or "records"
-        )
+        location = job.get("location") or "record_group"
+        target_id = job.get("target_id") or ""
+        raw_output_name = job.get("output_name") or "records"
         output_name = util.sanitize_filename_component(raw_output_name) or "records"
         request_origin = job.get("request_origin", "")
         user_info = job.get("request_user", {})
         options = job.get("options", {})
-        export_types = options.get("export_types") or {}
-        export_csv = bool(options.get("export_csv", export_types.get("csv", False)))
-        export_json = bool(options.get("export_json", export_types.get("json", False)))
-        export_images = bool(
-            options.get("export_images", export_types.get("images", False))
-        )
-        export_embedded_pdfs = bool(
-            options.get(
-                "export_embedded_pdfs", export_types.get("embedded_pdfs", False)
-            )
-        )
+        export_csv = bool(options.get("export_csv", False))
+        export_json = bool(options.get("export_json", False))
+        export_images = bool(options.get("export_images", False))
+        export_embedded_pdfs = bool(options.get("export_embedded_pdfs", False))
         selected_columns = options.get("columns") or []
         keep_all_columns = len(selected_columns) == 0
         export_raw_values = bool(options.get("export_raw_values", False))

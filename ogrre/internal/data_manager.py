@@ -2436,6 +2436,20 @@ class DataManager:
         team_name = self.getDefaultTeamForUser(email, anonymous_team)
         return team_name or anonymous_team
 
+    def _constrainRecordGroupFilter(self, filter_by, allowed_rg_ids):
+        filter_by = dict(filter_by or {})
+        allowed = set(allowed_rg_ids)
+        current = filter_by.get("record_group_id")
+        if current is None:
+            filter_by["record_group_id"] = {"$in": list(allowed_rg_ids)}
+        elif isinstance(current, dict) and "$in" in current:
+            filter_by["record_group_id"] = {
+                "$in": [rg_id for rg_id in current["$in"] if rg_id in allowed]
+            }
+        elif current not in allowed:
+            filter_by["record_group_id"] = {"$in": []}
+        return filter_by
+
     def fetchRecordsByTeam(
         self,
         user,
@@ -2447,25 +2461,9 @@ class DataManager:
         exclude_attribute_fields=None,
         forDownload=False,
     ):
-        filter_by = dict(filter_by or {})
         team_name = self._getUserTeamName(user)
         rg_list = self.getTeamRecordGroupsList(team_name) if team_name else []
-        if "record_group_id" not in filter_by:
-            filter_by["record_group_id"] = {"$in": rg_list}
-        elif (
-            isinstance(filter_by["record_group_id"], dict)
-            and "$in" in filter_by["record_group_id"]
-        ):
-            allowed = set(rg_list)
-            filter_by["record_group_id"] = {
-                "$in": [
-                    rg_id
-                    for rg_id in filter_by["record_group_id"]["$in"]
-                    if rg_id in allowed
-                ]
-            }
-        elif filter_by["record_group_id"] not in rg_list:
-            filter_by["record_group_id"] = {"$in": []}
+        filter_by = self._constrainRecordGroupFilter(filter_by, rg_list)
         return self.fetchRecords(
             sort_by,
             filter_by,
@@ -2513,25 +2511,8 @@ class DataManager:
         exclude_attribute_fields=None,
         forDownload=False,
     ):
-        filter_by = dict(filter_by or {})
         record_group_ids = self.getProjectRecordGroupsList(project_id)
-        ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
-        if "record_group_id" not in filter_by:
-            filter_by["record_group_id"] = {"$in": record_group_ids}
-        elif (
-            isinstance(filter_by["record_group_id"], dict)
-            and "$in" in filter_by["record_group_id"]
-        ):
-            allowed = set(record_group_ids)
-            filter_by["record_group_id"] = {
-                "$in": [
-                    rg_id
-                    for rg_id in filter_by["record_group_id"]["$in"]
-                    if rg_id in allowed
-                ]
-            }
-        elif filter_by["record_group_id"] not in record_group_ids:
-            filter_by["record_group_id"] = {"$in": []}
+        filter_by = self._constrainRecordGroupFilter(filter_by, record_group_ids)
         return self.fetchRecords(
             sort_by,
             filter_by,
@@ -4340,7 +4321,7 @@ class DataManager:
             key=lambda project: (project["name"].casefold(), project["id"]),
         )
 
-    def fetchAllProcessingJobHistory(self, user_info, body):
+    def _resolveJobHistoryScope(self, user_info, body, resource_label="uploads"):
         if not isinstance(body, dict):
             raise ValueError("Expected a history query object")
         for key in ("project_id", "record_group_id"):
@@ -4348,30 +4329,67 @@ class DataManager:
                 not isinstance(body[key], str) or not ObjectId.is_valid(body[key])
             ):
                 raise ValueError(f"Invalid {key}")
+
         projects = self.getJobScopeProjects(user_info)
-        project_id = body.get("project_id")
-        if project_id is not None:
-            projects = [project for project in projects if project["id"] == project_id]
-            if not projects:
-                raise PermissionError(
-                    "You are not authorized to view this project's uploads"
-                )
-        groups = {
+        project_map = {project["id"]: project["name"] for project in projects}
+        group_map = {
             group["id"]: {
                 "project_id": project["id"],
                 "project_name": project["name"],
                 "record_group_name": group["name"],
             }
             for project in projects
-            for group in project["record_groups"]
+            for group in project.get("record_groups", [])
         }
+
+        project_id = body.get("project_id")
+        if project_id is not None and project_id not in project_map:
+            raise PermissionError(
+                f"You are not authorized to view this project's {resource_label}"
+            )
+
         group_id = body.get("record_group_id")
         if group_id is not None:
-            if group_id not in groups:
+            if group_id not in group_map or (
+                project_id is not None
+                and group_map[group_id]["project_id"] != project_id
+            ):
                 raise PermissionError(
                     "This record group is not available in the selected projects"
                 )
-            groups = {group_id: groups[group_id]}
+
+        return project_map, group_map, project_id, group_id
+
+    def _paginateJobCollection(
+        self, collection, query, page_number, page_size, projection
+    ):
+        return [
+            self._serializeJob(job)
+            for job in collection.aggregate(
+                [
+                    {"$match": query},
+                    {"$sort": {"created_at": -1, "_id": -1}},
+                    {"$skip": page_number * page_size},
+                    {"$limit": page_size},
+                    {"$project": projection},
+                ]
+            )
+        ]
+
+    def fetchAllProcessingJobHistory(self, user_info, body):
+        _, group_map, project_id, group_id = self._resolveJobHistoryScope(
+            user_info, body, resource_label="uploads"
+        )
+        if group_id is not None:
+            groups = {group_id: group_map[group_id]}
+        elif project_id is not None:
+            groups = {
+                gid: info
+                for gid, info in group_map.items()
+                if info["project_id"] == project_id
+            }
+        else:
+            groups = group_map
         # Apply the authorized group set after parsing client filters, even when empty.
         result = self._fetchProcessingJobHistory({"$in": list(groups)}, body)
         for job in result["active_jobs"] + result["jobs"]:
@@ -4389,25 +4407,24 @@ class DataManager:
             "record_group_id": group_scope,
             "status": {"$in": processing_job_history.ACTIVE_STATUSES},
         }
-
-        def page(query, number):
-            return [
-                self._serializeProcessingJob(job)
-                for job in self.db.processing_jobs.aggregate(
-                    [
-                        {"$match": query},
-                        {"$sort": {"created_at": -1, "_id": -1}},
-                        {"$skip": number * pagination["page_size"]},
-                        {"$limit": pagination["page_size"]},
-                        {"$project": processing_job_history.summary_projection()},
-                    ]
-                )
-            ]
+        projection = processing_job_history.summary_projection()
 
         return {
-            "active_jobs": page(active_filter, pagination["active_page"]),
+            "active_jobs": self._paginateJobCollection(
+                self.db.processing_jobs,
+                active_filter,
+                pagination["active_page"],
+                pagination["page_size"],
+                projection,
+            ),
             "active_count": self.db.processing_jobs.count_documents(active_filter),
-            "jobs": page(history_filter, pagination["page"]),
+            "jobs": self._paginateJobCollection(
+                self.db.processing_jobs,
+                history_filter,
+                pagination["page"],
+                pagination["page_size"],
+                projection,
+            ),
             "count": self.db.processing_jobs.count_documents(history_filter),
         }
 
@@ -4518,25 +4535,25 @@ class DataManager:
             return "The upload has expired. Contact an administrator to recover failed records."
         return None
 
-    def getActiveProcessingJobs(self):
+    def _getActiveJobs(self, collection, projection=None):
         return [
-            self._serializeProcessingJob(job)
+            self._serializeJob(job)
             for statuses in (["dispatched", "running"], ["queued"])
-            for job in self.db.processing_jobs.find(
+            for job in collection.find(
                 {"status": {"$in": statuses}},
-                {"input.documents": 0},
+                projection,
             )
             .sort("created_at", ASCENDING)
             .limit(100)
         ]
 
-    def reserveProcessingCapacity(self, job_id, maximum):
+    def _reserveJobCapacity(self, pool_id, job_id, maximum):
         if maximum <= 0:
             return True
         try:
             self.db.processing_capacity.update_one(
                 {
-                    "_id": "batch_document",
+                    "_id": pool_id,
                     "$or": [
                         {"jobs": job_id},
                         {f"jobs.{maximum - 1}": {"$exists": False}},
@@ -4549,10 +4566,21 @@ class DataManager:
         except DuplicateKeyError:
             return False
 
-    def releaseProcessingCapacity(self, job_id):
+    def _releaseJobCapacity(self, pool_id, job_id):
         self.db.processing_capacity.update_one(
-            {"_id": "batch_document"}, {"$pull": {"jobs": job_id}}
+            {"_id": pool_id}, {"$pull": {"jobs": job_id}}
         )
+
+    def getActiveProcessingJobs(self):
+        return self._getActiveJobs(
+            self.db.processing_jobs, projection={"input.documents": 0}
+        )
+
+    def reserveProcessingCapacity(self, job_id, maximum):
+        return self._reserveJobCapacity("batch_document", job_id, maximum)
+
+    def releaseProcessingCapacity(self, job_id):
+        self._releaseJobCapacity("batch_document", job_id)
 
     def retryProcessingJob(self, job_id):
         job = self.db.processing_jobs.find_one_and_update(
@@ -4627,13 +4655,16 @@ class DataManager:
             is not None
         )
 
-    def _serializeProcessingJob(self, job):
+    def _serializeJob(self, job):
         if job is None:
             return None
         job = dict(job)
         job["job_id"] = str(job.get("job_id") or job.get("_id"))
         job.pop("_id", None)
         return job
+
+    _serializeProcessingJob = _serializeJob
+    _serializeExportJob = _serializeJob
 
     def getProcessingJob(self, job_id):
         return self._serializeProcessingJob(
@@ -4777,14 +4808,6 @@ class DataManager:
         return job or self.getProcessingJob(job_id)
 
     ## export job functions
-    def _serializeExportJob(self, job):
-        if job is None:
-            return None
-        job = dict(job)
-        job["job_id"] = str(job.get("job_id") or job.get("_id"))
-        job.pop("_id", None)
-        return job
-
     def getExportJob(self, job_id):
         self.expireExportJobs()
         return self._serializeExportJob(
@@ -4862,20 +4885,10 @@ class DataManager:
             raise ValueError("Expected an export options object")
 
         scope = self.validateExportScope(location, target_id, user_info)
-        export_types = options.get("export_types")
-        if not isinstance(export_types, dict):
-            export_types = {}
-
-        export_csv = bool(options.get("export_csv", export_types.get("csv", False)))
-        export_json = bool(options.get("export_json", export_types.get("json", False)))
-        export_images = bool(
-            options.get("export_images", export_types.get("images", False))
-        )
-        export_embedded_pdfs = bool(
-            options.get(
-                "export_embedded_pdfs", export_types.get("embedded_pdfs", False)
-            )
-        )
+        export_csv = bool(options.get("export_csv", False))
+        export_json = bool(options.get("export_json", False))
+        export_images = bool(options.get("export_images", False))
+        export_embedded_pdfs = bool(options.get("export_embedded_pdfs", False))
         if not any((export_csv, export_json, export_images, export_embedded_pdfs)):
             raise ValueError("Select at least one export type")
 
@@ -4954,15 +4967,6 @@ class DataManager:
             "record_group_id": scope["record_group_id"],
             "record_group_name": scope["record_group_name"],
             "output_name": clean_output_name,
-            "scope": {
-                "location": scope["location"],
-                "target_id": scope["target_id"],
-                "project_id": scope["project_id"],
-                "project_name": scope["project_name"],
-                "record_group_id": scope["record_group_id"],
-                "record_group_name": scope["record_group_name"],
-                "output_name": clean_output_name,
-            },
             "request_origin": str(request_origin or ""),
             "request_user": {
                 "email": user_info.get("email"),
@@ -4976,12 +4980,6 @@ class DataManager:
                 "export_json": export_json,
                 "export_images": export_images,
                 "export_embedded_pdfs": export_embedded_pdfs,
-                "export_types": {
-                    "csv": export_csv,
-                    "json": export_json,
-                    "images": export_images,
-                    "embedded_pdfs": export_embedded_pdfs,
-                },
                 "columns": columns,
                 "filter": filter_by,
                 "sort": sort_by,
@@ -5146,39 +5144,13 @@ class DataManager:
         return records, sets_of_records
 
     def reserveExportCapacity(self, job_id, maximum):
-        if maximum <= 0:
-            return True
-        try:
-            self.db.processing_capacity.update_one(
-                {
-                    "_id": "export",
-                    "$or": [
-                        {"jobs": job_id},
-                        {f"jobs.{maximum - 1}": {"$exists": False}},
-                    ],
-                },
-                {"$addToSet": {"jobs": job_id}},
-                upsert=True,
-            )
-            return True
-        except DuplicateKeyError:
-            return False
+        return self._reserveJobCapacity("export", job_id, maximum)
 
     def releaseExportCapacity(self, job_id):
-        self.db.processing_capacity.update_one(
-            {"_id": "export"}, {"$pull": {"jobs": job_id}}
-        )
+        self._releaseJobCapacity("export", job_id)
 
     def getActiveExportJobs(self):
-        return [
-            self._serializeExportJob(job)
-            for statuses in (["dispatched", "running"], ["queued"])
-            for job in self.db.export_jobs.find(
-                {"status": {"$in": statuses}},
-            )
-            .sort("created_at", ASCENDING)
-            .limit(100)
-        ]
+        return self._getActiveJobs(self.db.export_jobs)
 
     def beginExportJobDispatch(self, job_id, fields, attempt=0):
         now = time.time()
@@ -5322,7 +5294,7 @@ class DataManager:
         )
         for job in expired_jobs:
             artifact = job.get("artifact") or {}
-            storage_key = artifact.get("storage_key") or artifact.get("object_key")
+            storage_key = artifact.get("storage_key")
             if storage_key:
                 try:
                     storage_api.delete_export_artifact(storage_key)
@@ -5356,42 +5328,10 @@ class DataManager:
 
     def fetchExportJobHistory(self, user_info, body):
         self.expireExportJobs()
-        if not isinstance(body, dict):
-            raise ValueError("Expected a history query object")
-        for key in ("project_id", "record_group_id"):
-            if key in body and (
-                not isinstance(body[key], str) or not ObjectId.is_valid(body[key])
-            ):
-                raise ValueError(f"Invalid {key}")
-
-        projects = self.getJobScopeProjects(user_info)
+        project_map, group_map, project_id, group_id = self._resolveJobHistoryScope(
+            user_info, body, resource_label="exports"
+        )
         team_name = self._getUserTeamName(user_info)
-        project_map = {project["id"]: project["name"] for project in projects}
-        group_map = {
-            group["id"]: {
-                "project_id": project["id"],
-                "project_name": project["name"],
-                "record_group_name": group["name"],
-            }
-            for project in projects
-            for group in project.get("record_groups", [])
-        }
-
-        project_id = body.get("project_id")
-        if project_id is not None and project_id not in project_map:
-            raise PermissionError(
-                "You are not authorized to view this project's exports"
-            )
-
-        group_id = body.get("record_group_id")
-        if group_id is not None:
-            if group_id not in group_map or (
-                project_id is not None
-                and group_map[group_id]["project_id"] != project_id
-            ):
-                raise PermissionError(
-                    "This record group is not available in the selected projects"
-                )
 
         (
             pagination,
@@ -5441,25 +5381,24 @@ class DataManager:
         if "$or" in history_filter:
             active_base_filter["$or"] = history_filter["$or"]
         scoped_active_filter = combine_filters(active_base_filter)
-
-        def page(query, number):
-            return [
-                self._serializeExportJob(job)
-                for job in self.db.export_jobs.aggregate(
-                    [
-                        {"$match": query},
-                        {"$sort": {"created_at": -1, "_id": -1}},
-                        {"$skip": number * pagination["page_size"]},
-                        {"$limit": pagination["page_size"]},
-                        {"$project": export_job_history.summary_projection()},
-                    ]
-                )
-            ]
+        projection = export_job_history.summary_projection()
 
         result = {
-            "active_jobs": page(scoped_active_filter, pagination["active_page"]),
+            "active_jobs": self._paginateJobCollection(
+                self.db.export_jobs,
+                scoped_active_filter,
+                pagination["active_page"],
+                pagination["page_size"],
+                projection,
+            ),
             "active_count": self.db.export_jobs.count_documents(scoped_active_filter),
-            "jobs": page(scoped_history_filter, pagination["page"]),
+            "jobs": self._paginateJobCollection(
+                self.db.export_jobs,
+                scoped_history_filter,
+                pagination["page"],
+                pagination["page_size"],
+                projection,
+            ),
             "count": self.db.export_jobs.count_documents(scoped_history_filter),
         }
         for job in result["active_jobs"] + result["jobs"]:
@@ -5467,12 +5406,8 @@ class DataManager:
             proj_id = job.get("project_id")
             if rg_id and rg_id in group_map:
                 job.update(group_map[rg_id])
-                if isinstance(job.get("scope"), dict):
-                    job["scope"].update(group_map[rg_id])
             elif proj_id and proj_id in project_map:
                 job["project_name"] = project_map[proj_id]
-                if isinstance(job.get("scope"), dict):
-                    job["scope"]["project_name"] = project_map[proj_id]
         return result
 
     def getUserExportNotifications(self, user_info, limit=8):

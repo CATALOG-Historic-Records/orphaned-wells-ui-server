@@ -16,7 +16,7 @@ from fastapi import (
     Depends,
     Query,
 )
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
 from typing import Optional
@@ -33,7 +33,6 @@ from ogrre.internal.image_handling import (
     undeployProcessor,
     check_if_processor_is_deployed,
 )
-from ogrre.internal.storage_api import rotate_images_in_storage
 from ogrre.internal import (
     batch_document_processing,
     storage_api,
@@ -2176,6 +2175,57 @@ def _get_request_origin(request: Request) -> str:
     return ""
 
 
+def _require_export_job(
+    job_id: str,
+    user_info: dict,
+    forbidden_detail: str = "You are not authorized to view this export job",
+    reconcile: bool = True,
+):
+    job = (
+        reconcile_export_job(job_id, data_manager)
+        if reconcile
+        else data_manager.getExportJob(job_id)
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if not data_manager.canUserAccessExportJob(job, user_info):
+        raise HTTPException(status_code=403, detail=forbidden_detail)
+    return job
+
+
+def _require_completed_export_artifact(job_id: str, user_info: dict):
+    job = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to download this export",
+        reconcile=True,
+    )
+    if job.get("status") == "expired":
+        raise HTTPException(
+            status_code=410,
+            detail="This export file has expired (exports are retained for 1 hour).",
+        )
+    if job.get("status") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="This export is not ready for download yet.",
+        )
+
+    artifact = job.get("artifact") or {}
+    storage_key = artifact.get("storage_key")
+    filename = artifact.get("filename") or f"{job.get('output_name') or 'records'}.zip"
+    expires_at = job.get("expires_at")
+    if expires_at is not None and expires_at <= time.time():
+        data_manager.expireExportJobs()
+        raise HTTPException(
+            status_code=410,
+            detail="This export file has expired (exports are retained for 1 hour).",
+        )
+    if not storage_key:
+        raise HTTPException(status_code=404, detail="Export artifact not found")
+    return job, storage_key, filename, expires_at
+
+
 @router.get("/export_jobs/scopes")
 def get_export_job_scopes(user_info: dict = Depends(authenticate)):
     """Return projects and record groups available for export history filtering."""
@@ -2231,15 +2281,7 @@ def get_export_job(
     user_info: dict = Depends(authenticate),
 ):
     """Fetch status and metadata for a single export job."""
-    job = reconcile_export_job(job_id, data_manager)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    if not data_manager.canUserAccessExportJob(job, user_info):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to view this export job",
-        )
-    return job
+    return _require_export_job(job_id, user_info)
 
 
 @router.get("/export_jobs/{job_id}/download")
@@ -2249,38 +2291,9 @@ def get_export_job_download(
     user_info: dict = Depends(authenticate),
 ):
     """Return a signed download URL (or local storage download URL) for a completed export job."""
-    job = reconcile_export_job(job_id, data_manager)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    if not data_manager.canUserAccessExportJob(job, user_info):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to download this export",
-        )
-    if job.get("status") == "expired":
-        raise HTTPException(
-            status_code=410,
-            detail="This export file has expired (exports are retained for 1 hour).",
-        )
-    if job.get("status") != "completed":
-        raise HTTPException(
-            status_code=409,
-            detail="This export is not ready for download yet.",
-        )
-
-    artifact = job.get("artifact") or {}
-    storage_key = artifact.get("storage_key") or artifact.get("object_key")
-    filename = artifact.get("filename") or f"{job.get('output_name') or 'records'}.zip"
-    expires_at = job.get("expires_at")
-    if expires_at is not None and expires_at <= time.time():
-        data_manager.expireExportJobs()
-        raise HTTPException(
-            status_code=410,
-            detail="This export file has expired (exports are retained for 1 hour).",
-        )
-    if not storage_key:
-        raise HTTPException(status_code=404, detail="Export artifact not found")
-
+    job, storage_key, filename, expires_at = _require_completed_export_artifact(
+        job_id, user_info
+    )
     backend_url = str(request.base_url).rstrip("/")
     download_url = storage_api.get_export_download_url(
         storage_key,
@@ -2319,28 +2332,7 @@ def download_local_export_job_file(
     user_info: dict = Depends(authenticate),
 ):
     """Serve the local export ZIP archive directly when running with STORAGE_BACKEND=local."""
-    job = reconcile_export_job(job_id, data_manager)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    if not data_manager.canUserAccessExportJob(job, user_info):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to download this export",
-        )
-    if job.get("status") == "expired":
-        raise HTTPException(
-            status_code=410,
-            detail="This export file has expired (exports are retained for 1 hour).",
-        )
-    if job.get("status") != "completed":
-        raise HTTPException(
-            status_code=409,
-            detail="This export is not ready for download yet.",
-        )
-
-    artifact = job.get("artifact") or {}
-    storage_key = artifact.get("storage_key") or artifact.get("object_key")
-    filename = artifact.get("filename") or f"{job.get('output_name') or 'records'}.zip"
+    _, storage_key, filename, _ = _require_completed_export_artifact(job_id, user_info)
     local_path = storage_api.get_local_export_file_path(storage_key)
     if not local_path or not os.path.isfile(local_path):
         raise HTTPException(status_code=404, detail="Export file not found on disk")
@@ -2359,14 +2351,12 @@ def rerun_export_job(
     user_info: dict = Depends(authenticate),
 ):
     """Create and dispatch a new export job using the configuration of a previous export job."""
-    existing = data_manager.getExportJob(job_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    if not data_manager.canUserAccessExportJob(existing, user_info):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to rerun this export",
-        )
+    existing = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to rerun this export",
+        reconcile=False,
+    )
     try:
         job = data_manager.createExportJob(
             location=existing.get("location") or "record_group",
@@ -2397,14 +2387,12 @@ def cancel_export_job(
     user_info: dict = Depends(authenticate),
 ):
     """Cancel an active export job."""
-    existing = data_manager.getExportJob(job_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Export job not found")
-    if not data_manager.canUserAccessExportJob(existing, user_info):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to cancel this export",
-        )
+    existing = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to cancel this export",
+        reconcile=False,
+    )
     if existing.get("status") not in ("queued", "dispatched", "running"):
         return existing
     return data_manager.completeExportJob(
@@ -2436,33 +2424,14 @@ async def create_export_job(
         raise HTTPException(status_code=400, detail="Expected a JSON object")
 
     options = dict(req)
-    export_types = options.get("export_types")
-    if not isinstance(export_types, dict):
-        export_types = {}
-    if (
-        export_csv is not None
-        and "export_csv" not in options
-        and "csv" not in export_types
+    for key, value in (
+        ("export_csv", export_csv),
+        ("export_json", export_json),
+        ("export_images", export_images),
+        ("export_embedded_pdfs", export_embedded_pdfs),
     ):
-        options["export_csv"] = export_csv
-    if (
-        export_json is not None
-        and "export_json" not in options
-        and "json" not in export_types
-    ):
-        options["export_json"] = export_json
-    if (
-        export_images is not None
-        and "export_images" not in options
-        and "images" not in export_types
-    ):
-        options["export_images"] = export_images
-    if (
-        export_embedded_pdfs is not None
-        and "export_embedded_pdfs" not in options
-        and "embedded_pdfs" not in export_types
-    ):
-        options["export_embedded_pdfs"] = export_embedded_pdfs
+        if value is not None and key not in options:
+            options[key] = value
 
     request_origin = _get_request_origin(request)
     try:
@@ -3101,7 +3070,7 @@ async def rotate_record_images(
         selected_image_urls = [image_urls[idx][1] for idx in selected_image_indices]
 
         # Rotate the images in storage
-        rotated_urls = rotate_images_in_storage(
+        rotated_urls = storage_api.rotate_images_in_storage(
             selected_image_urls, rotation_degrees, overwrite=True
         )
 
