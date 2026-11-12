@@ -3,7 +3,7 @@ import os
 import logging
 import datetime
 import functools
-import zipstream
+import zipfile
 import csv
 import io
 import json
@@ -185,12 +185,6 @@ def normalize_subattribute_index_path(data, fallback_sub_index=None):
             continue
         normalized_path.append(int(each))
     return normalized_path
-
-
-def last4_before_decimal(ts=None):
-    if ts is None:
-        ts = time.time()
-    return int(ts) % 10000
 
 
 def sanitize_filename_component(name, default=""):
@@ -462,40 +456,7 @@ def compileDocumentImageList(records):
     return images
 
 
-@time_it
-def compute_total_size(local_file_paths, gcs_paths):
-    """
-    Compute total bytes of local files + google cloud images.
-    local_file_paths: list of paths
-    gcs_paths: dict or list of google cloud storage image paths
-    """
-    total_size = 0
-
-    # Local file sizes
-    for file_path in local_file_paths or []:
-        if os.path.isfile(file_path):
-            try:
-                total_size += os.path.getsize(file_path)
-            except OSError as e:
-                _log.warning(f"Failed to get size of local file {file_path}: {e}")
-        else:
-            _log.warning(f"Local file not found: {file_path}")
-
-    # GCS blob sizes
-    gcs_sizes, missing_count = storage_api.get_file_sizes(
-        gcs_paths, bucket_name=BUCKET_NAME
-    )
-    total_size += sum(gcs_sizes.values())
-    if missing_count:
-        _log.warning(
-            "Skipped %s missing or unreadable blob(s) while computing download size",
-            missing_count,
-        )
-
-    return total_size
-
-
-def compile_embedded_pdfs(records):
+def compile_embedded_pdfs(records, on_progress=None):
     """
     Generates embedded searchable PDF bytes for each record in-memory using ogrre_embed.
     Returns a list of tuples: [(arcname, pdf_bytes), ...]
@@ -509,10 +470,14 @@ def compile_embedded_pdfs(records):
         return []
 
     embedded_pdfs = []
-    for record in records or []:
+    record_list = list(records or [])
+    total_records = len(record_list)
+    for index, record in enumerate(record_list, start=1):
         rg_id = record.get("record_group_id")
         record_id = str(record.get("_id", ""))
         if not rg_id or not record_id:
+            if on_progress:
+                on_progress(index, total_records)
             continue
         record_name = record.get("name") or record.get("filename") or record_id
         if record_name.lower().endswith(".pdf"):
@@ -520,6 +485,8 @@ def compile_embedded_pdfs(records):
 
         image_files = record.get("image_files") or []
         if not image_files:
+            if on_progress:
+                on_progress(index, total_records)
             continue
 
         doc = fitz.open()
@@ -546,6 +513,8 @@ def compile_embedded_pdfs(records):
 
         if pages_added == 0:
             doc.close()
+            if on_progress:
+                on_progress(index, total_records)
             continue
 
         try:
@@ -555,124 +524,125 @@ def compile_embedded_pdfs(records):
         except Exception as e:
             _log.error(f"Failed to generate searchable PDF for record {record_id}: {e}")
             doc.close()
+        if on_progress:
+            on_progress(index, total_records)
 
     return embedded_pdfs
 
 
 @time_it
-def zip_files_stream(
-    local_file_paths, documents=[], log_to_file="zip_log.txt", embedded_pdfs=[]
+def build_export_zip(
+    output_zip_path,
+    local_file_paths,
+    documents=None,
+    embedded_pdfs=None,
+    include_log=False,
+    on_progress=None,
 ):
     """
-    Streams a ZIP file directly without writing to temp files.
-    Includes optional local files (JSON and/or csv), skips missing ones gracefully.
+    Build an export ZIP archive on disk.
+    Includes local CSV/JSON files, optional embedded PDFs, and optional GCS/local images.
     """
     start_total = time.time()
-    log_file = None
-    if log_to_file:
-        log_file = open(log_to_file, "w")
+    log_lines = []
 
-        def logg(msg, level="debug"):
-            log_file.write(msg + "\n")
-            if level == "debug":
-                _log.debug(msg)
-            elif level == "info":
-                _log.info(msg)
-
-    else:
-        logg = _log.info
+    def logg(msg, level="debug"):
+        log_lines.append(msg)
+        if level == "debug":
+            _log.debug(msg)
+        elif level == "info":
+            _log.info(msg)
 
     if documents is None:
         documents = []
     if embedded_pdfs is None:
         embedded_pdfs = []
+
     logg(
-        f"Downloading and zipping {len(documents)} images, {len(embedded_pdfs)} embedded PDFs along with {local_file_paths}",
+        f"Packaging {len(documents)} record document sets, {len(embedded_pdfs)} embedded PDFs, and {local_file_paths}",
         level="info",
     )
 
-    zs = zipstream.ZipFile(mode="w", compression=zipstream.ZIP_STORED, allowZip64=True)
+    gcs_paths = generate_gcs_paths(documents) if documents else {}
+    if gcs_paths:
+        gcs_sizes, missing_count = storage_api.get_file_sizes(
+            gcs_paths.keys(), bucket_name=BUCKET_NAME
+        )
+        available_gcs_paths = [path for path in gcs_paths if path in gcs_sizes]
+        if missing_count:
+            logg(f"{missing_count} image(s) not found, skipping", level="info")
+    else:
+        available_gcs_paths = []
+        missing_count = 0
 
-    # Add csv and/or json first
-    if local_file_paths:
-        for file_path in local_file_paths:
-            if os.path.isfile(file_path):
-                zs.write(
-                    file_path,
-                    os.path.basename(file_path),
-                    compress_type=zipstream.ZIP_DEFLATED,
-                )
-            else:
-                logg(f"Local file not found, skipping: {file_path}", level="info")
+    existing_local_files = [
+        file_path for file_path in (local_file_paths or []) if os.path.isfile(file_path)
+    ]
+    for file_path in local_file_paths or []:
+        if not os.path.isfile(file_path):
+            logg(f"Local file not found, skipping: {file_path}", level="info")
 
-    if embedded_pdfs:
+    total_items = (
+        len(existing_local_files) + len(embedded_pdfs) + len(available_gcs_paths)
+    )
+    completed_items = 0
+
+    with zipfile.ZipFile(
+        output_zip_path,
+        mode="w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=True,
+    ) as archive:
+        for file_path in existing_local_files:
+            archive.write(
+                file_path,
+                os.path.basename(file_path),
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
+            completed_items += 1
+            if on_progress:
+                on_progress(completed_items, total_items)
+
         for arcname, pdf_bytes in embedded_pdfs:
-            zs.write_iter(arcname, [pdf_bytes])
+            archive.writestr(arcname, pdf_bytes, compress_type=zipfile.ZIP_STORED)
+            completed_items += 1
+            if on_progress:
+                on_progress(completed_items, total_items)
 
-    gcs_paths = generate_gcs_paths(documents)
-    gcs_sizes, missing_count = storage_api.get_file_sizes(
-        gcs_paths.keys(), bucket_name=BUCKET_NAME
-    )
-    available_gcs_paths = set(gcs_sizes)
-    not_found_amt = missing_count
-    if missing_count:
-        logg(f"{missing_count} image(s) not found, skipping", level="info")
-
-    last_existing_index = max(
-        (
-            index
-            for index, gcs_path in enumerate(gcs_paths, start=1)
-            if gcs_path in available_gcs_paths
-        ),
-        default=0,
-    )
-    for i, gcs_path in enumerate(gcs_paths, start=1):
-        if gcs_path not in available_gcs_paths:
-            continue
-        arcname = gcs_paths[gcs_path]
-
-        def gcs_yield_chunks(arcname, gcs_path, i):
+        for i, gcs_path in enumerate(available_gcs_paths, start=1):
+            arcname = gcs_paths[gcs_path]
             logg(f"Starting download #{i}: {gcs_path} -> {arcname}")
             start_file = time.time()
             bytes_read = 0
-            for chunk in storage_api.iter_file_bytes(
-                gcs_path, bucket_name=BUCKET_NAME, chunk_size=65536
-            ):
-                bytes_read += len(chunk)
-                yield chunk
-
+            with archive.open(arcname, mode="w", force_zip64=True) as member:
+                for chunk in storage_api.iter_file_bytes(
+                    gcs_path, bucket_name=BUCKET_NAME, chunk_size=65536
+                ):
+                    bytes_read += len(chunk)
+                    member.write(chunk)
             elapsed_file = time.time() - start_file
             mb_size = bytes_read / (1024 * 1024)
             speed = (mb_size / elapsed_file) if elapsed_file > 0 else 0
             logg(
                 f"Downloaded #{i}: {mb_size:.2f} MB in {elapsed_file:.2f} s ({speed:.2f} MB/s)"
             )
+            completed_items += 1
+            if on_progress:
+                on_progress(completed_items, total_items)
 
-            # Add log file to download on last iteration
-            if i == last_existing_index:
-                if log_to_file and os.path.isfile(log_to_file):
-                    elapsed_total = time.time() - start_total
-                    logg(
-                        f"FINISHED: {i - not_found_amt} files streamed in {elapsed_total:.2f} seconds",
-                        level="none",
-                    )
-                    log_file.flush()
-                    zs.write(log_to_file, os.path.basename(log_to_file))
-                elif log_to_file:
-                    _log.info(f"Log text file is not found: {log_to_file}")
+        if include_log and available_gcs_paths:
+            elapsed_total = time.time() - start_total
+            logg(
+                f"FINISHED: {len(available_gcs_paths)} files packaged in {elapsed_total:.2f} seconds",
+                level="none",
+            )
+            archive.writestr(
+                "zip_log.txt",
+                "\n".join(log_lines) + "\n",
+                compress_type=zipfile.ZIP_DEFLATED,
+            )
 
-        zs.write_iter(arcname, gcs_yield_chunks(arcname, gcs_path, i))
-
-    def streaming_generator():
-        for chunk in zs:
-            yield chunk
-        elapsed_total = time.time() - start_total
-        logg(
-            f"{len(documents)} files streamed in {elapsed_total:.2f} seconds",
-            level="info",
-        )
-
-    return streaming_generator()
+    return output_zip_path
 
 
 def searchRecordForErrorsAndTargetKeys(document, target_keys=None):
@@ -863,9 +833,9 @@ def cleanRecords(processor_attributes, documents):
                 attribute_after_cleaning
             )
         # current_attributes_list_before_and_after["attributesList_after"] = copy.deepcopy(attributes_list)
-        attributes_list_before_and_after[
-            str(doc.get("_id"))
-        ] = current_attributes_list_before_and_after
+        attributes_list_before_and_after[str(doc.get("_id"))] = (
+            current_attributes_list_before_and_after
+        )
 
     return attributes_list_before_and_after
 
@@ -975,9 +945,9 @@ def generate_mongo_records_pipeline(
                 ):
                     subattributesList_include = {}
                     for subtattributesField in subtattributesFields:
-                        subattributesList_include[
-                            subtattributesField
-                        ] = f"$$subattr.{subtattributesField}"
+                        subattributesList_include[subtattributesField] = (
+                            f"$$subattr.{subtattributesField}"
+                        )
                     subattributesProject = {
                         "$map": {
                             "input": mongo_attribute_array("$$attr.subattributes"),
@@ -987,9 +957,9 @@ def generate_mongo_records_pipeline(
                     }
                     attributesList_include[attributesListField] = subattributesProject
                 else:
-                    attributesList_include[
-                        attributesListField
-                    ] = f"$$attr.{attributesListField}"
+                    attributesList_include[attributesListField] = (
+                        f"$$attr.{attributesListField}"
+                    )
             project["$project"]["attributesList"] = {
                 "$map": {
                     "input": mongo_attribute_array("$attributesList"),

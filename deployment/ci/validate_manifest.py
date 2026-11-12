@@ -5,7 +5,6 @@ from string import Template
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 VALUES = {
     "NAMESPACE": "uow-test",

@@ -12,7 +12,6 @@ from starlette.datastructures import UploadFile
 from ogrre.internal import schema_validation as rules
 from ogrre.scripts.migrate_schema_permissions import migrate_schema_permissions
 
-
 USER = {"email": "lead@example.com"}
 GROUP = "a" * 24
 FIELD = {
