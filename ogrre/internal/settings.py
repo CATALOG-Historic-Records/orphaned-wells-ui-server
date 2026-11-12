@@ -1,6 +1,7 @@
 """
 Configuration for the backend
 """
+
 from pathlib import Path
 import logging
 import logging.handlers

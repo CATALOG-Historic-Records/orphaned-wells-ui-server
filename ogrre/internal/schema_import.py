@@ -7,7 +7,6 @@ from bson import ObjectId
 
 from ogrre.internal import schema_validation as rules
 
-
 METADATA = ("displayName", "documentType", "processorId", "modelId", "parser_type")
 GROUP_FIELDS = ("schema_id", "processorId", "attributes", "name", "team", "project_id")
 
