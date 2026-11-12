@@ -22,13 +22,14 @@ resource "google_storage_bucket" "backend_uploads" {
     max_age_seconds = 3600
   }
 
-  # Originals and batch output are temporary. Record display images and caller-
-  # owned GCS batch source files are outside these two prefixes.
+  # Originals, batch output, and temporary exports are cleaned up automatically.
+  # Record display images and caller-owned GCS batch source files are outside
+  # these prefixes.
   lifecycle_rule {
     action { type = "Delete" }
     condition {
       age            = 14
-      matches_prefix = ["directory_uploads/", "directory_upload_outputs/"]
+      matches_prefix = ["directory_uploads/", "directory_upload_outputs/", "exports/"]
     }
   }
 
