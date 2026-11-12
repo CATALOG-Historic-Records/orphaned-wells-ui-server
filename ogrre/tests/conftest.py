@@ -1,11 +1,59 @@
 """Upload tests use an isolated database; never load local runtime secrets."""
 
 import importlib
+import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import mongomock
+import mongomock.collection
 import pytest
+
+
+def _ensure_mongomock_pymongo_bulk_sort_compat():
+    """Allow PyMongo >= 4.11 UpdateOne/ReplaceOne bulk operations with mongomock 4.3.0."""
+    builder = mongomock.collection.BulkOperationBuilder
+    if "sort" not in inspect.signature(builder.add_update).parameters:
+        orig_add_update = builder.add_update
+
+        def add_update(
+            self,
+            selector,
+            doc,
+            multi=False,
+            upsert=False,
+            collation=None,
+            array_filters=None,
+            hint=None,
+            sort=None,
+        ):
+            return orig_add_update(
+                self,
+                selector,
+                doc,
+                multi=multi,
+                upsert=upsert,
+                collation=collation,
+                array_filters=array_filters,
+                hint=hint,
+            )
+
+        builder.add_update = add_update
+
+    if "sort" not in inspect.signature(builder.add_replace).parameters:
+        orig_add_replace = builder.add_replace
+
+        def add_replace(
+            self, selector, doc, upsert, collation=None, hint=None, sort=None
+        ):
+            return orig_add_replace(
+                self, selector, doc, upsert, collation=collation, hint=hint
+            )
+
+        builder.add_replace = add_replace
+
+
+_ensure_mongomock_pymongo_bulk_sort_compat()
 
 
 @pytest.fixture
