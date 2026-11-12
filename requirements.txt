@@ -1,6 +1,6 @@
 aiofiles==23.2.1
 aiohttp>=3.14.3
-certifi==2023.11.17
+certifi==2026.10.18
 fastapi==0.136.3
 gcloud-aio-storage==9.0.0
 google-api-core==2.15.0
@@ -13,12 +13,12 @@ numpy
 pillow==10.2.0
 pydantic==2.13.4
 pydantic-settings==2.1.0
-PyJWT[crypto]==2.8.0
+PyJWT[crypto]==2.15.1
 pymongo[srv]==4.6.1
 PyMuPDF==1.24.2
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 python-multipart>=0.0.31
-requests==2.31.0
+requests==2.33.0
 uvicorn==0.27.0
 ogrre_data_cleaning @ git+https://github.com/CATALOG-Historic-Records/OGRRE_data_cleaning@d4f2a27d5904e973c316025841e97936796c397b
 ogrre_embed @ git+https://github.com/CATALOG-Historic-Records/ogrre-embed.git@c6602f7b838bd0eadc2d4644c3947f2d15cfbac7
