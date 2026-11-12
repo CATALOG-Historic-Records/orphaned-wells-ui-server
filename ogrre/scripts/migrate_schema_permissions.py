@@ -52,9 +52,9 @@ def migrate_schema_permissions(db, apply=False, expected_changes=None):
                 "_id": role["_id"],
                 "id": role.get("id"),
                 "category": role.get("category"),
-                "permissions": role["permissions"]
-                if "permissions" in role
-                else {"$exists": False},
+                "permissions": (
+                    role["permissions"] if "permissions" in role else {"$exists": False}
+                ),
             }
             if not db.roles.update_one(
                 query, {"$set": {"permissions": after}}

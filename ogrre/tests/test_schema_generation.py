@@ -126,6 +126,7 @@ def generation(schema_manager, monkeypatch):
         {"record_group_id": GROUP, "attributesList": [attr("depth", 12)]}
     )
     monkeypatch.setattr(manager, "getDefaultTeamForUser", lambda *args: "source-team")
+
     # Mongomock lacks $bsonSize; emulate just the server projection here. The
     # native Mongo test below exercises the full pipeline and index hint.
     def aggregate(pipeline, **kwargs):
@@ -138,9 +139,11 @@ def generation(schema_manager, monkeypatch):
             {
                 "_id": record["_id"],
                 "size": len(BSON.encode(record)),
-                "attributesList": record.get("attributesList", [])
-                if len(BSON.encode(record)) <= inference.MAX_RECORD_BYTES
-                else [],
+                "attributesList": (
+                    record.get("attributesList", [])
+                    if len(BSON.encode(record)) <= inference.MAX_RECORD_BYTES
+                    else []
+                ),
             }
             for record in records
         )

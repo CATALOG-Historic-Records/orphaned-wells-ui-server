@@ -7,6 +7,7 @@ Uploads files to configured storage system.
 Creates initial record in database.
 Calls document_ai API to parse text and store result in record.
 """
+
 import os
 import logging
 import time
