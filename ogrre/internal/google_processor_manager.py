@@ -4,7 +4,6 @@ from google.api_core.exceptions import FailedPrecondition, InvalidArgument
 
 from ogrre.internal.document_ai_client import get_docai_client
 
-
 _log = logging.getLogger(__name__)
 
 

@@ -460,9 +460,9 @@ class DataManager:
                 ),
                 schema_name=(schema or {}).get("displayName")
                 or (schema or {}).get("name"),
-                active_schema_id=str(schema["_id"])
-                if schema and "_id" in schema
-                else None,
+                active_schema_id=(
+                    str(schema["_id"]) if schema and "_id" in schema else None
+                ),
                 schema_error=None,
             )
         except schema_rules.SchemaLookupError as error:
@@ -1150,9 +1150,11 @@ class DataManager:
                                 "user": user_info.get("email"),
                                 "timestamp": time.time(),
                                 "schema_import_id": import_id,
-                                "record_group_id": str(operation["before"]["_id"])
-                                if operation["kind"] == "binding"
-                                else operation.get("group_id"),
+                                "record_group_id": (
+                                    str(operation["before"]["_id"])
+                                    if operation["kind"] == "binding"
+                                    else operation.get("group_id")
+                                ),
                                 "source": job["source"],
                                 "step": index,
                                 "previous_state": operation.get("before"),
@@ -1606,9 +1608,11 @@ class DataManager:
                 {"_id": f"schema-generation:{preview['preview_id']}"},
                 {
                     "$setOnInsert": {
-                        "action": "generateSchema"
-                        if preview["mode"] == "generate"
-                        else "extendSchema",
+                        "action": (
+                            "generateSchema"
+                            if preview["mode"] == "generate"
+                            else "extendSchema"
+                        ),
                         "user": user_info.get("email"),
                         "timestamp": time.time(),
                         "record_group_id": rg_id,
@@ -3215,9 +3219,11 @@ class DataManager:
         if not isinstance(fields, list):
             raise schema_rules.SchemaError("Import schema fields must be an array.")
         fields = [
-            dict(field, name=field.get("name") or field.get("key"))
-            if isinstance(field, dict)
-            else field
+            (
+                dict(field, name=field.get("name") or field.get("key"))
+                if isinstance(field, dict)
+                else field
+            )
             for field in fields
         ]
         return schema_rules.validate_fields(
@@ -3476,12 +3482,14 @@ class DataManager:
             "existing_duplicate_count": len(existing_duplicates),
             "internal_duplicates": internal_duplicates,
             "internal_duplicate_count": len(internal_duplicates),
-            "skipped_duplicates": [
-                duplicate["filename"]
-                for duplicate in existing_duplicates + internal_duplicates
-            ]
-            if prevent_duplicates
-            else [],
+            "skipped_duplicates": (
+                [
+                    duplicate["filename"]
+                    for duplicate in existing_duplicates + internal_duplicates
+                ]
+                if prevent_duplicates
+                else []
+            ),
             "skipped_duplicate_count": skipped_duplicate_count,
             "duplicate_filename_bases_in_file": duplicate_filename_bases,
             "duplicate_filename_base_count_in_file": len(duplicate_filename_bases),
@@ -3984,9 +3992,11 @@ class DataManager:
                 },
             )
             self.recordHistory(
-                "prepareProcessingRecord"
-                if existing.get("status") == "queued"
-                else "retryProcessingRecord",
+                (
+                    "prepareProcessingRecord"
+                    if existing.get("status") == "queued"
+                    else "retryProcessingRecord"
+                ),
                 user_info.get("email"),
                 record_id=record_id,
                 notes={"job_id": record["processing_job_id"]},
@@ -4495,9 +4505,11 @@ class DataManager:
                 files.append(
                     {
                         "source_uri": uri,
-                        "name": item.get("relative_path", item["name"])
-                        if isinstance(item, dict)
-                        else uri.rsplit("/", 1)[-1],
+                        "name": (
+                            item.get("relative_path", item["name"])
+                            if isinstance(item, dict)
+                            else uri.rsplit("/", 1)[-1]
+                        ),
                         "record_id": directory_upload.processing_record_id(job_id, uri),
                     }
                 )
@@ -4862,9 +4874,9 @@ class DataManager:
                 "target_id": target_str or team_name or "team",
                 "team": team_name,
                 "project_id": None,
-                "project_name": f"All Records ({team_name})"
-                if team_name
-                else "All Records",
+                "project_name": (
+                    f"All Records ({team_name})" if team_name else "All Records"
+                ),
                 "record_group_id": None,
                 "record_group_name": None,
             }
@@ -5101,9 +5113,11 @@ class DataManager:
                 project_name = util.sanitize_filename_component(output_name)
                 sets_of_records = [
                     (
-                        f"{project_name}_{set_identifier}"
-                        if project_name
-                        else set_identifier,
+                        (
+                            f"{project_name}_{set_identifier}"
+                            if project_name
+                            else set_identifier
+                        ),
                         set_records,
                     )
                     for set_identifier, set_records in organized.items()
@@ -6016,9 +6030,9 @@ class DataManager:
                 processor_attributes = self.getRecordGroupSchemaAttributes(
                     rg_document=rg, user=user
                 )
-                rg_processor_attribute_map[
-                    rg_id
-                ] = util.convert_processor_attributes_to_dict(processor_attributes)
+                rg_processor_attribute_map[rg_id] = (
+                    util.convert_processor_attributes_to_dict(processor_attributes)
+                )
             # _log.info(f"rg_processor_attribute_map: {rg_processor_attribute_map}")
             return rg_processor_attribute_map
         except Exception as e:
@@ -6438,9 +6452,9 @@ class DataManager:
                                 current_attributes.add(attribute_name)
                                 if attribute_name not in attributes:
                                     attributes.append(attribute_name)
-                                record_attribute[
-                                    attribute_name
-                                ] = get_attr_export_value(document_attribute)
+                                record_attribute[attribute_name] = (
+                                    get_attr_export_value(document_attribute)
+                                )
 
                     record_attribute["file"] = document.get("filename", "")
                     if "record_notes" in selectedColumns or keep_all_columns:

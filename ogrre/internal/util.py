@@ -833,9 +833,9 @@ def cleanRecords(processor_attributes, documents):
                 attribute_after_cleaning
             )
         # current_attributes_list_before_and_after["attributesList_after"] = copy.deepcopy(attributes_list)
-        attributes_list_before_and_after[
-            str(doc.get("_id"))
-        ] = current_attributes_list_before_and_after
+        attributes_list_before_and_after[str(doc.get("_id"))] = (
+            current_attributes_list_before_and_after
+        )
 
     return attributes_list_before_and_after
 
@@ -945,9 +945,9 @@ def generate_mongo_records_pipeline(
                 ):
                     subattributesList_include = {}
                     for subtattributesField in subtattributesFields:
-                        subattributesList_include[
-                            subtattributesField
-                        ] = f"$$subattr.{subtattributesField}"
+                        subattributesList_include[subtattributesField] = (
+                            f"$$subattr.{subtattributesField}"
+                        )
                     subattributesProject = {
                         "$map": {
                             "input": mongo_attribute_array("$$attr.subattributes"),
@@ -957,9 +957,9 @@ def generate_mongo_records_pipeline(
                     }
                     attributesList_include[attributesListField] = subattributesProject
                 else:
-                    attributesList_include[
-                        attributesListField
-                    ] = f"$$attr.{attributesListField}"
+                    attributesList_include[attributesListField] = (
+                        f"$$attr.{attributesListField}"
+                    )
             project["$project"]["attributesList"] = {
                 "$map": {
                     "input": mongo_attribute_array("$attributesList"),

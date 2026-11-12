@@ -12,7 +12,6 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-
 ROOT = Path(__file__).resolve().parents[2]
 TF_ROOT = ROOT / "deployment/terraform"
 
