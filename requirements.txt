@@ -6,11 +6,10 @@ gcloud-aio-storage==9.0.0
 google-api-core==2.15.0
 google-auth==2.27.0
 google-cloud-documentai==2.21.1
-google-cloud-documentai-toolbox==0.13.2a0
 google-cloud-storage==2.14.0
 kubernetes==29.0.0
 numpy
-pillow==10.2.0
+pillow==13.0.0
 pydantic==2.13.4
 pydantic-settings==2.1.0
 PyJWT[crypto]==2.15.1
