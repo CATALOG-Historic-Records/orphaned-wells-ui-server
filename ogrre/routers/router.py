@@ -16,7 +16,7 @@ from fastapi import (
     Depends,
     Query,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
 from typing import Optional
@@ -33,7 +33,6 @@ from ogrre.internal.image_handling import (
     undeployProcessor,
     check_if_processor_is_deployed,
 )
-from ogrre.internal.storage_api import rotate_images_in_storage
 from ogrre.internal import (
     batch_document_processing,
     storage_api,
@@ -45,6 +44,10 @@ from ogrre.internal.processing_job_runner import (
     dispatch_batch_processing_job,
     reconcile_processing_job,
     processing_worker_has_stopped,
+)
+from ogrre.internal.export_job_runner import (
+    dispatch_export_job,
+    reconcile_export_job,
 )
 import ogrre.internal.util as util
 from ogrre.internal.identity_provider import (
@@ -1622,7 +1625,7 @@ def get_processing_history_scopes(
     request: Request, user_info: dict = Depends(authenticate)
 ):
     user_info = _require_processing_history_permission(request, user_info)
-    return data_manager.getProcessingHistoryProjects(user_info)
+    return data_manager.getJobScopeProjects(user_info)
 
 
 @router.post("/processing_jobs/history")
@@ -2157,96 +2160,6 @@ async def check_if_records_exist(
     return data_manager.checkIfRecordsExist(file_list, rg_id)
 
 
-@router.post("/get_download_size/{location}/{_id}")
-async def get_download_size(
-    location: str,
-    _id: str,
-    request: Request,
-    user_info: dict = Depends(authenticate),
-):
-    """Download records for given project ID.
-
-    Args:
-        location: one of: team, project, record_group
-        _id: id of team, project or record group
-        request body:
-            exportType: type of export (csv or json)
-            columns: list attributes to export
-
-    Returns:
-        Some combination of
-            JSON file containing all or subset of record data for provided location
-            CSV file containing all or subset of record data for provided location
-            All document images for provided location
-    """
-    req = await request.json()
-
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
-    document_types = req.get("document_types", [])
-
-    json_fields_to_include = {
-        "topLevelFields": [
-            "name",
-            "filename",
-            "image_files",
-            "record_group_id",
-            "record_notes",
-        ],
-        "attributesList": ["key", "value", "normalized_vertices", "subattributes"],
-    }
-
-    if location == "project":
-        records, _ = data_manager.fetchRecordsByProject(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "record_group":
-        records, _ = data_manager.fetchRecordsByRecordGroup(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "team":
-        records, _ = data_manager.fetchRecordsByTeam(
-            user_info,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    elif location == "documentType":
-        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-            user_info,
-            _id,
-            document_types,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-    else:
-        raise HTTPException(
-            status_code=400, detail=f"Location must be project, record_group, or team"
-        )
-
-    try:
-        documents = util.compileDocumentImageList(records)
-        gcs_paths = util.generate_gcs_paths(documents)
-        totalBytes = util.compute_total_size([], gcs_paths.keys())
-        return totalBytes
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {e}")
-
-
 def _get_request_origin(request: Request) -> str:
     origin = request.headers.get("origin")
     if origin:
@@ -2262,333 +2175,284 @@ def _get_request_origin(request: Request) -> str:
     return ""
 
 
-@router.post("/download_records/{location}/{_id}", response_class=StreamingResponse)
-async def download_records(
+def _require_export_job(
+    job_id: str,
+    user_info: dict,
+    forbidden_detail: str = "You are not authorized to view this export job",
+    reconcile: bool = True,
+):
+    job = (
+        reconcile_export_job(job_id, data_manager)
+        if reconcile
+        else data_manager.getExportJob(job_id)
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if not data_manager.canUserAccessExportJob(job, user_info):
+        raise HTTPException(status_code=403, detail=forbidden_detail)
+    return job
+
+
+def _require_completed_export_artifact(job_id: str, user_info: dict):
+    job = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to download this export",
+        reconcile=True,
+    )
+    if job.get("status") == "expired":
+        raise HTTPException(
+            status_code=410,
+            detail="This export file has expired (exports are retained for 1 hour).",
+        )
+    if job.get("status") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="This export is not ready for download yet.",
+        )
+
+    artifact = job.get("artifact") or {}
+    storage_key = artifact.get("storage_key")
+    filename = artifact.get("filename") or f"{job.get('output_name') or 'records'}.zip"
+    expires_at = job.get("expires_at")
+    if expires_at is not None and expires_at <= time.time():
+        data_manager.expireExportJobs()
+        raise HTTPException(
+            status_code=410,
+            detail="This export file has expired (exports are retained for 1 hour).",
+        )
+    if not storage_key:
+        raise HTTPException(status_code=404, detail="Export artifact not found")
+    return job, storage_key, filename, expires_at
+
+
+@router.get("/export_jobs/scopes")
+def get_export_job_scopes(user_info: dict = Depends(authenticate)):
+    """Return projects and record groups available for export history filtering."""
+    return data_manager.getJobScopeProjects(user_info)
+
+
+@router.post("/export_jobs/history")
+async def get_export_job_history(
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Fetch paginated active and historical export jobs for the current user or team."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        return data_manager.fetchExportJobHistory(user_info, body)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/export_jobs/notifications")
+def get_export_job_notifications(user_info: dict = Depends(authenticate)):
+    """Fetch unread and recent export notifications for the current user."""
+    return data_manager.getUserExportNotifications(user_info)
+
+
+@router.post("/export_jobs/notifications/read")
+async def mark_export_job_notifications_read(
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Mark one or all export job notifications as read for the current user."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    job_id = body.get("job_id")
+    mark_all = bool(body.get("mark_all", job_id is None))
+    return data_manager.markExportNotificationsRead(
+        user_info, job_id=job_id, mark_all=mark_all
+    )
+
+
+@router.get("/export_jobs/{job_id}")
+def get_export_job(
+    job_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Fetch status and metadata for a single export job."""
+    return _require_export_job(job_id, user_info)
+
+
+@router.get("/export_jobs/{job_id}/download")
+def get_export_job_download(
+    job_id: str,
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Return a signed download URL (or local storage download URL) for a completed export job."""
+    job, storage_key, filename, expires_at = _require_completed_export_artifact(
+        job_id, user_info
+    )
+    backend_url = str(request.base_url).rstrip("/")
+    download_url = storage_api.get_export_download_url(
+        storage_key,
+        filename=filename,
+        expires_at=expires_at,
+        job_id=job_id,
+        backend_url=backend_url,
+    )
+    if not download_url:
+        raise HTTPException(
+            status_code=500, detail="Unable to generate export download URL"
+        )
+
+    if job.get("request_user", {}).get("email") == user_info.get("email"):
+        data_manager.markExportNotificationsRead(
+            user_info, job_id=job_id, mark_all=False
+        )
+    data_manager.recordHistory(
+        "downloadRecords",
+        user_info.get("email"),
+        project_id=job.get("project_id"),
+        rg_id=job.get("record_group_id"),
+        notes={"job_id": job_id, "filename": filename},
+    )
+    return {
+        "job_id": job_id,
+        "download_url": download_url,
+        "filename": filename,
+        "expires_at": expires_at,
+    }
+
+
+@router.get("/export_jobs/{job_id}/download/file")
+def download_local_export_job_file(
+    job_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Serve the local export ZIP archive directly when running with STORAGE_BACKEND=local."""
+    _, storage_key, filename, _ = _require_completed_export_artifact(job_id, user_info)
+    local_path = storage_api.get_local_export_file_path(storage_key)
+    if not local_path or not os.path.isfile(local_path):
+        raise HTTPException(status_code=404, detail="Export file not found on disk")
+    return FileResponse(
+        local_path,
+        media_type="application/zip",
+        filename=filename,
+    )
+
+
+@router.post("/export_jobs/{job_id}/rerun")
+def rerun_export_job(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user_info: dict = Depends(authenticate),
+):
+    """Create and dispatch a new export job using the configuration of a previous export job."""
+    existing = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to rerun this export",
+        reconcile=False,
+    )
+    try:
+        job = data_manager.createExportJob(
+            location=existing.get("location") or "record_group",
+            target_id=existing.get("target_id") or "",
+            user_info=user_info,
+            options=existing.get("options") or {},
+            output_name=existing.get("output_name"),
+            request_origin=_get_request_origin(request),
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        job = dispatch_export_job(
+            job["job_id"], data_manager, background_tasks=background_tasks
+        )
+    except Exception:
+        _log.exception(
+            "Failed to dispatch rerun export job %s immediately", job["job_id"]
+        )
+    return job
+
+
+@router.post("/export_jobs/{job_id}/cancel")
+def cancel_export_job(
+    job_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Cancel an active export job."""
+    existing = _require_export_job(
+        job_id,
+        user_info,
+        forbidden_detail="You are not authorized to cancel this export",
+        reconcile=False,
+    )
+    if existing.get("status") not in ("queued", "dispatched", "running"):
+        return existing
+    return data_manager.completeExportJob(
+        job_id,
+        "error",
+        error="Canceled by user",
+    )
+
+
+@router.post("/export_jobs/{location}/{_id}")
+async def create_export_job(
     location: str,
     _id: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    export_csv: bool = True,
-    export_json: bool = False,
-    export_images: bool = False,
-    export_embedded_pdfs: bool = False,
-    output_name: str = None,
+    export_csv: Optional[bool] = None,
+    export_json: Optional[bool] = None,
+    export_images: Optional[bool] = None,
+    export_embedded_pdfs: Optional[bool] = None,
+    output_name: Optional[str] = None,
     user_info: dict = Depends(authenticate),
 ):
-    """Download records for given project ID.
+    """Create and dispatch an asynchronous export job."""
+    try:
+        req = await request.json()
+    except Exception:
+        req = {}
+    if not isinstance(req, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
 
-    Args:
-        location: one of: team, project, record_group
-        _id: id of team, project or record group
-        request body:
-            exportType: type of export (csv or json)
-            columns: list attributes to export
-
-    Returns:
-        Some combination of
-            JSON file containing all or subset of record data for provided location
-            CSV file containing all or subset of record data for provided location
-            All document images for provided location
-    """
-    req = await request.json()
+    options = dict(req)
+    for key, value in (
+        ("export_csv", export_csv),
+        ("export_json", export_json),
+        ("export_images", export_images),
+        ("export_embedded_pdfs", export_embedded_pdfs),
+    ):
+        if value is not None and key not in options:
+            options[key] = value
 
     request_origin = _get_request_origin(request)
-    # _log.info(req)
-    selectedColumns = req.get("columns", [])
-
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
-    document_types = req.get("document_types", [])
-    reconstruct_original_doc = req.get("reconstruct_original_doc", False)
-    if reconstruct_original_doc:
-        user_collaborator = (
-            data_manager.getCollaboratorForUser(user_info) or ""
-        ).lower()
-        if user_collaborator != "rrc":
-            reconstruct_original_doc = False
-    export_raw_values = req.get("export_raw_values", False)
-
-    json_fields_to_include = {
-        "topLevelFields": [
-            "name",
-            "filename",
-            "image_files",
-            "record_group_id",
-            "record_notes",
-        ],
-        "attributesList": [
-            "key",
-            "value",
-            "normalized_vertices",
-            "subattributes",
-            "page",
-            "parentAttribute",
-            "topLevelAttribute",
-            "user_provided_coordinates",
-        ],
-        "subattributes": [
-            "key",
-            "value",
-            "normalized_vertices",
-            "page",
-            "subattributes",
-            "parentAttribute",
-            "topLevelAttribute",
-            "user_provided_coordinates",
-        ],
-    }
-
-    if export_raw_values:
-        json_fields_to_include["attributesList"].append("raw_text")
-        json_fields_to_include["subattributes"].append("raw_text")
-
-    output_file_id = util.last4_before_decimal()
-
-    keep_all_columns = False
-    if len(selectedColumns) == 0:
-        keep_all_columns = True
-    setsOfRecords = {}
-    if location == "project":
-        records, _ = data_manager.fetchRecordsByProject(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-        if reconstruct_original_doc:
-            records = data_manager.reconstructRecordsByOriginalFilename(records)
-            setsOfRecords[output_name] = records
-        else:
-            setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
-    elif location == "record_group":
-        records, _ = data_manager.fetchRecordsByRecordGroup(
-            user_info,
-            _id,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-        if reconstruct_original_doc:
-            records = data_manager.reconstructRecordsByOriginalFilename(records)
-        setsOfRecords[output_name] = records
-    elif location == "team":
-        records, _ = data_manager.fetchRecordsByTeam(
-            user_info,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-        if reconstruct_original_doc:
-            records = data_manager.reconstructRecordsByOriginalFilename(records)
-            setsOfRecords[output_name] = records
-        else:
-            setsOfRecords = data_manager.organizeRecordsByDocumentType(records)
-    elif location == "documentType":
-        records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-            user_info,
-            _id,
-            document_types,
-            filter_by=filter_by,
-            sort_by=sort_by,
-            include_attribute_fields=json_fields_to_include,
-            forDownload=True,
-        )
-        if reconstruct_original_doc:
-            records = data_manager.reconstructRecordsByOriginalFilename(records)
-        setsOfRecords[output_name] = records
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Location must be project, record_group, documentType, or team",
-        )
     try:
-        filepaths = []
-        if export_csv:
-            for set_identifier in setsOfRecords:
-                if location == "project" and not reconstruct_original_doc:
-                    project_name = util.sanitize_filename_component(output_name)
-                    filename_prefix = (
-                        f"{project_name}_{set_identifier}"
-                        if project_name
-                        else set_identifier
-                    )
-                else:
-                    filename_prefix = set_identifier
-                csv_file = data_manager.downloadRecords(
-                    setsOfRecords[set_identifier],
-                    "csv",
-                    user_info,
-                    _id,
-                    location,
-                    selectedColumns=selectedColumns,
-                    keep_all_columns=keep_all_columns,
-                    output_filename=f"{filename_prefix}_{output_file_id}",
-                    request_origin=request_origin,
-                    export_raw_values=export_raw_values,
-                )
-                filepaths.append(csv_file)
-        if export_json:
-            json_file = data_manager.downloadRecords(
-                records,
-                "json",
-                user_info,
-                _id,
-                location,
-                selectedColumns=selectedColumns,
-                keep_all_columns=keep_all_columns,
-                output_filename=f"{output_name}_{output_file_id}",
-                export_raw_values=export_raw_values,
-            )
-            filepaths.append(json_file)
-        if export_images:
-            documents = util.compileDocumentImageList(records)
-        else:
-            documents = []
-
-        if export_embedded_pdfs:
-            embedded_pdfs = util.compile_embedded_pdfs(records)
-        else:
-            embedded_pdfs = []
-
-        ## TODO: make this file name more unique, so multiple downloads dont have the same name
-        download_log_file = f"zip_log_{output_file_id}.txt"
-        z = util.zip_files_stream(
-            filepaths,
-            documents,
-            log_to_file=download_log_file,
-            embedded_pdfs=embedded_pdfs,
+        job = data_manager.createExportJob(
+            location,
+            _id,
+            user_info,
+            options,
+            output_name=output_name,
+            request_origin=request_origin,
         )
-
-        ## remove file after 60 seconds to allow for the user download to finish
-        filepaths.append(download_log_file)
-        background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
-        headers = {"Content-Disposition": "attachment; filename=records.zip"}
-        # _log.info(f"returning streaming response")
-        return StreamingResponse(z, media_type="application/zip", headers=headers)
-    except Exception as e:
-        _log.exception("Failed to export records for %s %s", location, _id)
-        raise HTTPException(status_code=500, detail=f"Server error: {e}")
-
-
-@router.post(
-    "/download_project_records_by_document_types/{project_id}",
-    response_class=StreamingResponse,
-)
-async def download_project_records_by_document_types(
-    project_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    export_csv: bool = True,
-    export_json: bool = False,
-    export_images: bool = False,
-    export_embedded_pdfs: bool = False,
-    output_name: str = None,
-    user_info: dict = Depends(authenticate),
-):
-    req = await request.json()
-
-    request_origin = _get_request_origin(request)
-    selectedColumns = req.get("columns", [])
-    document_types = req.get("document_types", [])
-    export_raw_values = req.get("export_raw_values", False)
-
-    filter_by = req.get("filter", {})
-    sort_by = req.get("sort", ["dateCreated", 1])
-
-    json_fields_to_include = {
-        "topLevelFields": [
-            "name",
-            "filename",
-            "image_files",
-            "record_group_id",
-            "record_notes",
-        ],
-        "attributesList": [
-            "key",
-            "value",
-            "normalized_vertices",
-            "subattributes",
-            "page",
-        ],
-        "subattributes": ["key", "value", "normalized_vertices", "page"],
-    }
-
-    if export_raw_values:
-        json_fields_to_include["attributesList"].append("raw_text")
-        json_fields_to_include["subattributes"].append("raw_text")
-
-    output_file_id = util.last4_before_decimal()
-
-    keep_all_columns = len(selectedColumns) == 0
-
-    # Fetch records filtered by project and document types
-    records, _ = data_manager.fetchRecordsByProjectAndDocumentTypes(
-        user_info,
-        project_id,
-        document_types,
-        filter_by=filter_by,
-        sort_by=sort_by,
-        include_attribute_fields=json_fields_to_include,
-        forDownload=True,
-    )
-
-    try:
-        filepaths = []
-        if export_csv:
-            csv_file = data_manager.downloadRecords(
-                records,
-                "csv",
-                user_info,
-                project_id,
-                "project",
-                selectedColumns=selectedColumns,
-                keep_all_columns=keep_all_columns,
-                output_filename=f"{output_name or 'records'}_{output_file_id}",
-                request_origin=request_origin,
-                export_raw_values=export_raw_values,
-            )
-            filepaths.append(csv_file)
-        if export_json:
-            json_file = data_manager.downloadRecords(
-                records,
-                "json",
-                user_info,
-                project_id,
-                "project",
-                selectedColumns=selectedColumns,
-                keep_all_columns=keep_all_columns,
-                output_filename=f"{output_name or 'records'}_{output_file_id}",
-                export_raw_values=export_raw_values,
-            )
-            filepaths.append(json_file)
-        if export_images:
-            documents = util.compileDocumentImageList(records)
-        else:
-            documents = []
-
-        if export_embedded_pdfs:
-            embedded_pdfs = util.compile_embedded_pdfs(records)
-        else:
-            embedded_pdfs = []
-
-        download_log_file = f"zip_log_{output_file_id}.txt"
-        z = util.zip_files_stream(
-            filepaths,
-            documents,
-            log_to_file=download_log_file,
-            embedded_pdfs=embedded_pdfs,
+        dispatched = dispatch_export_job(
+            job["job_id"], data_manager, background_tasks=background_tasks
         )
-
-        filepaths.append(download_log_file)
-        background_tasks.add_task(util.deleteFiles, filepaths=filepaths, sleep_time=60)
-        headers = {"Content-Disposition": "attachment; filename=records.zip"}
-        return StreamingResponse(z, media_type="application/zip", headers=headers)
+        return dispatched or job
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        _log.exception("Failed to export records for project %s", project_id)
+        _log.exception("Failed to create export job for %s %s", location, _id)
         raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 
@@ -3206,7 +3070,7 @@ async def rotate_record_images(
         selected_image_urls = [image_urls[idx][1] for idx in selected_image_indices]
 
         # Rotate the images in storage
-        rotated_urls = rotate_images_in_storage(
+        rotated_urls = storage_api.rotate_images_in_storage(
             selected_image_urls, rotation_degrees, overwrite=True
         )
 
