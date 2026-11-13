@@ -16,7 +16,7 @@ from fastapi import (
     Depends,
     Query,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
 from typing import Optional
@@ -411,6 +411,12 @@ def authenticate(request: Request, token: str = Depends(oauth2_scheme)):
     token_to_verify = get_bearer_or_session_token(request, token)
     if not token_to_verify:
         raise HTTPException(status_code=401, detail="missing authentication token")
+    if token_to_verify.startswith("ogrre_"):
+        try:
+            return data_manager.authenticateApiKey(token_to_verify)
+        except Exception as e:
+            _log.info(f"unable to authenticate api key: {e}")
+            raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
     try:
         user_info = identity_provider.verify_id_token(token_to_verify)
         _resolve_user_email(user_info)
@@ -2400,6 +2406,109 @@ def cancel_export_job(
         "error",
         error="Canceled by user",
     )
+
+
+@router.get("/api_keys")
+def list_api_keys(
+    user_info: dict = Depends(authenticate),
+):
+    """List active API keys for the authenticated user."""
+    require_authenticated_admin_route()
+    try:
+        return {"api_keys": data_manager.listApiKeys(user_info)}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api_keys")
+async def create_api_key(
+    request: Request,
+    user_info: dict = Depends(authenticate),
+):
+    """Create a new API key for the authenticated user."""
+    require_authenticated_admin_route()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    try:
+        return data_manager.createApiKey(
+            user_info,
+            name=body.get("name"),
+            expires_in_days=body.get("expires_in_days", 90),
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api_keys/{key_id}/revoke")
+def revoke_api_key(
+    key_id: str,
+    user_info: dict = Depends(authenticate),
+):
+    """Revoke an active API key owned by the authenticated user."""
+    require_authenticated_admin_route()
+    try:
+        return data_manager.revokeApiKey(user_info, key_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/reviewed_records")
+def get_reviewed_records(
+    request: Request,
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    project_id: Optional[str] = Query(default=None),
+    record_group_id: Optional[str] = Query(default=None),
+    document_type: Optional[str] = Query(default=None),
+    page: int = Query(default=0),
+    page_size: int = Query(default=100),
+    export_format: str = Query(default="json", alias="format"),
+    user_info: dict = Depends(authenticate),
+):
+    """Fetch paginated reviewed records updated since the given or last-recorded timestamp."""
+    try:
+        result = data_manager.fetchReviewedRecordsExport(
+            user_info=user_info,
+            since=since,
+            until=until,
+            project_id=project_id,
+            record_group_id=record_group_id,
+            document_type=document_type,
+            page=page,
+            page_size=page_size,
+            export_format=export_format,
+            request_origin=_get_request_origin(request),
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if "csv" in result:
+        headers = {
+            "X-Export-Since": str(result["since"]),
+            "X-Export-Until": str(result["until"]),
+            "X-Total-Count": str(result["total_count"]),
+            "X-Page": str(result["page"]),
+            "X-Page-Size": str(result["page_size"]),
+            "X-Has-More": str(result["has_more"]).lower(),
+        }
+        return Response(
+            content=result["csv"],
+            media_type="text/csv",
+            headers=headers,
+        )
+    return result
 
 
 @router.post("/export_jobs/{location}/{_id}")

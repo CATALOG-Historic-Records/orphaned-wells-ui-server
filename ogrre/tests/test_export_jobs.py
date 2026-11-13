@@ -24,6 +24,7 @@ class FakeRequest:
     def __init__(self, payload=None, origin="https://frontend.example"):
         self._payload = payload
         self.headers = {"origin": origin}
+        self.cookies = {}
         self.base_url = "http://testserver/"
 
     async def json(self):
@@ -494,3 +495,233 @@ def test_kubernetes_export_manifest_matches_backend_deployment():
     worker_pod_spec = manifest["spec"]["template"]["spec"]
     assert worker_pod_spec["imagePullSecrets"] == api_pod_spec["imagePullSecrets"]
     assert container["envFrom"] == api_container["envFrom"]
+
+
+def test_api_key_lifecycle_and_authentication(manager, export_projects):
+    from ogrre.routers import router
+
+    created = asyncio.run(
+        router.create_api_key(
+            FakeRequest({"name": "RRC Nightly Cron", "expires_in_days": 30}),
+            user_info=USER,
+        )
+    )
+    assert created["name"] == "RRC Nightly Cron"
+    assert created["api_key"].startswith("ogrre_")
+    assert created["key_prefix"] == created["api_key"][:12]
+    raw_key = created["api_key"]
+    key_id = created["key_id"]
+
+    listed = router.list_api_keys(user_info=USER)
+    assert len(listed["api_keys"]) == 1
+    assert "api_key" not in listed["api_keys"][0]
+    assert "key_hash" not in listed["api_keys"][0]
+    assert listed["api_keys"][0]["key_id"] == key_id
+    assert listed["api_keys"][0]["expired"] is False
+
+    auth_user = router.authenticate(FakeRequest(), token=raw_key)
+    assert auth_user["email"] == USER["email"]
+    assert auth_user["api_key_id"] == key_id
+
+    revoked = router.revoke_api_key(key_id, user_info=USER)
+    assert revoked["revoked"] is True
+    assert revoked["revoked_at"] is not None
+
+    with pytest.raises(HTTPException) as exc_info:
+        router.authenticate(FakeRequest(), token=raw_key)
+    assert exc_info.value.status_code == 401
+
+
+def test_reviewed_records_endpoint_watermark_and_updates(manager, export_projects):
+    from ogrre.routers import router
+
+    # Initial watermark fetch returns the 1 reviewed record (Well-001)
+    first_run = router.get_reviewed_records(
+        request=FakeRequest(),
+        since=None,
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="json",
+        user_info=USER,
+    )
+    assert first_run["since"] == 0.0
+    assert first_run["total_count"] == 1
+    assert first_run["has_more"] is False
+    assert [row["file"] for row in first_run["records"]] == ["well-001.pdf"]
+
+    # Immediate second run without changes returns 0 records and uses first_run["until"] as since
+    second_run = router.get_reviewed_records(
+        request=FakeRequest(),
+        since=None,
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="json",
+        user_info=USER,
+    )
+    assert second_run["since"] == pytest.approx(first_run["until"])
+    assert second_run["total_count"] == 0
+    assert second_run["records"] == []
+
+    # Mark Well-002 as reviewed and update an attribute on already-reviewed Well-001
+    well_1 = manager.db.records.find_one({"name": "Well-001"})
+    well_2 = manager.db.records.find_one({"name": "Well-002"})
+    manager.updateRecord(
+        str(well_2["_id"]),
+        {"review_status": "reviewed"},
+        update_type="review_status",
+        user_info=USER,
+        forceUpdate=True,
+    )
+    updated_attrs = list(well_1["attributesList"])
+    updated_attrs[0] = {**updated_attrs[0], "value": "42-001-99999"}
+    manager.updateRecord(
+        str(well_1["_id"]),
+        {"attributesList": updated_attrs},
+        update_type="attributesList",
+        user_info=USER,
+        forceUpdate=True,
+    )
+
+    refreshed_well_1 = manager.db.records.find_one({"_id": well_1["_id"]})
+    refreshed_well_2 = manager.db.records.find_one({"_id": well_2["_id"]})
+    assert refreshed_well_1.get("lastUpdated") is not None
+    assert refreshed_well_2.get("lastUpdated") is not None
+
+    # Next incremental run picks up both updated reviewed records
+    third_run = router.get_reviewed_records(
+        request=FakeRequest(),
+        since=None,
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="json",
+        user_info=USER,
+    )
+    assert third_run["since"] == pytest.approx(second_run["until"])
+    assert third_run["total_count"] == 2
+    returned_by_file = {row["file"]: row for row in third_run["records"]}
+    assert set(returned_by_file.keys()) == {"well-001.pdf", "well-002.pdf"}
+    assert returned_by_file["well-001.pdf"]["API Number"]["value"] == "42-001-99999"
+
+    # Verify export history tracking in db.export_jobs and rerun behavior
+    export_logs = list(
+        manager.db.export_jobs.find({"export_source": "reviewed_records_api"})
+    )
+    assert len(export_logs) == 3
+    assert all(log["is_watermark"] is True for log in export_logs)
+
+    history = asyncio.run(
+        router.get_export_job_history(
+            FakeRequest({"view_scope": "mine"}), user_info=USER
+        )
+    )
+    assert history["count"] == 3
+
+    # Rerunning the first export job should reproduce its exact (since, until] slice (only Well-001)
+    rerun_tasks = BackgroundTasks()
+    rerun_job = router.rerun_export_job(
+        job_id=first_run["job_id"],
+        request=FakeRequest(),
+        background_tasks=rerun_tasks,
+        user_info=USER,
+    )
+    asyncio.run(rerun_tasks())
+    completed_rerun = router.get_export_job(job_id=rerun_job["job_id"], user_info=USER)
+    assert completed_rerun["status"] == "completed"
+    assert completed_rerun["options"]["since"] == pytest.approx(first_run["since"])
+    assert completed_rerun["options"]["until"] == pytest.approx(first_run["until"])
+    assert completed_rerun["artifact"]["record_count"] == 1
+
+
+def test_reviewed_records_endpoint_filters_pagination_and_csv(manager, export_projects):
+    from ogrre.routers import router
+
+    well_2 = manager.db.records.find_one({"name": "Well-002"})
+    manager.updateRecord(
+        str(well_2["_id"]),
+        {"review_status": "reviewed"},
+        update_type="review_status",
+        user_info=USER,
+        forceUpdate=True,
+    )
+
+    # Filter by document_type="Well Log" should only return Well-001
+    filtered = router.get_reviewed_records(
+        request=FakeRequest(),
+        since="1970-01-01T00:00:00Z",
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type="Well Log",
+        page=0,
+        page_size=100,
+        export_format="json",
+        user_info=USER,
+    )
+    assert filtered["total_count"] == 1
+    assert [row["file"] for row in filtered["records"]] == ["well-001.pdf"]
+
+    # Pagination with page_size=1 across the 2 reviewed records
+    page_0 = router.get_reviewed_records(
+        request=FakeRequest(),
+        since="0",
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=1,
+        export_format="json",
+        user_info=USER,
+    )
+    assert page_0["total_count"] == 2
+    assert page_0["has_more"] is True
+    assert len(page_0["records"]) == 1
+
+    page_1 = router.get_reviewed_records(
+        request=FakeRequest(),
+        since="0",
+        until=str(page_0["until"]),
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=1,
+        page_size=1,
+        export_format="json",
+        user_info=USER,
+    )
+    assert page_1["total_count"] == 2
+    assert page_1["has_more"] is False
+    assert len(page_1["records"]) == 1
+    assert page_0["records"][0]["file"] != page_1["records"][0]["file"]
+
+    # CSV response format
+    csv_resp = router.get_reviewed_records(
+        request=FakeRequest(),
+        since="0",
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="csv",
+        user_info=USER,
+    )
+    assert csv_resp.headers["X-Total-Count"] == "2"
+    assert csv_resp.headers["X-Has-More"] == "false"
+    csv_body = csv_resp.body.decode("utf-8")
+    assert "well-001.pdf" in csv_body
+    assert "well-002.pdf" in csv_body
+

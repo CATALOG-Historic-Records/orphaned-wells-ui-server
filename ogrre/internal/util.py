@@ -228,6 +228,7 @@ RECORD_METADATA_FIELDS = {
     "_id",
     "record_group_id",
     "dateCreated",
+    "lastUpdated",
     "name",
     "filename",
     "original_filename",
