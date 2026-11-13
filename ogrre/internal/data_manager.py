@@ -4945,6 +4945,18 @@ class DataManager:
             if user_collaborator != "rrc":
                 reconstruct_original_doc = False
         export_raw_values = bool(options.get("export_raw_values", False))
+        incremental_reviewed = bool(options.get("incremental_reviewed", False))
+        since_val = self._parseTimestampParam(options.get("since"), "since")
+        until_val = self._parseTimestampParam(options.get("until"), "until")
+        raw_record_ids = options.get("record_ids")
+        if raw_record_ids is not None:
+            if not isinstance(raw_record_ids, list) or any(
+                not isinstance(rid, str) for rid in raw_record_ids
+            ):
+                raise ValueError("record_ids must be a list of strings")
+            record_ids = list(raw_record_ids)
+        else:
+            record_ids = None
 
         raw_output_name = (
             output_name if output_name is not None else options.get("output_name")
@@ -5000,6 +5012,10 @@ class DataManager:
                 "document_types": document_types,
                 "reconstruct_original_doc": reconstruct_original_doc,
                 "export_raw_values": export_raw_values,
+                "incremental_reviewed": incremental_reviewed,
+                "since": since_val,
+                "until": until_val,
+                "record_ids": record_ids,
             },
             "progress": {
                 "current": 0,
@@ -5040,6 +5056,27 @@ class DataManager:
         document_types = options.get("document_types")
         reconstruct = bool(options.get("reconstruct_original_doc", False))
         export_raw_values = bool(options.get("export_raw_values", False))
+
+        if options.get("record_ids") is not None:
+            valid_object_ids = [
+                ObjectId(rid)
+                for rid in options["record_ids"]
+                if isinstance(rid, str) and ObjectId.is_valid(rid)
+            ]
+            filter_by["_id"] = {"$in": valid_object_ids}
+        elif options.get("incremental_reviewed"):
+            filter_by["review_status"] = "reviewed"
+            time_window = {}
+            if options.get("since") is not None:
+                time_window["$gt"] = float(options["since"])
+            if options.get("until") is not None:
+                time_window["$lte"] = float(options["until"])
+            if time_window and "$or" not in filter_by:
+                filter_by["$or"] = [
+                    {"lastUpdated": time_window},
+                    {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
+                    {"lastUpdated": None, "dateCreated": time_window},
+                ]
 
         json_fields_to_include = {
             "topLevelFields": [
@@ -5139,6 +5176,27 @@ class DataManager:
                 records = self.reconstructRecordsByOriginalFilename(records)
             sets_of_records = [(output_name, records)]
         elif location == "team":
+            if document_types is not None:
+                team_name = self._getUserTeamName(user_info)
+                team_rg_ids = (
+                    self.getTeamRecordGroupsList(team_name) if team_name else []
+                )
+                team_rg_object_ids = [
+                    ObjectId(gid) for gid in team_rg_ids if ObjectId.is_valid(gid)
+                ]
+                matching_rg_ids = [
+                    str(doc["_id"])
+                    for doc in self.db.record_groups.find(
+                        {
+                            "_id": {"$in": team_rg_object_ids},
+                            "documentType": {"$in": document_types},
+                        },
+                        {"_id": 1},
+                    )
+                ]
+                filter_by = self._constrainRecordGroupFilter(
+                    filter_by, matching_rg_ids
+                )
             records, _ = self.fetchRecordsByTeam(
                 user_info,
                 page=None,
@@ -6719,28 +6777,48 @@ class DataManager:
             scope_body["project_id"] = project_id
         if record_group_id:
             scope_body["record_group_id"] = record_group_id
-        _, group_map, resolved_project_id, resolved_group_id = (
+        project_map, group_map, resolved_project_id, resolved_group_id = (
             self._resolveJobHistoryScope(
                 user_info, scope_body, resource_label="reviewed records"
             )
         )
 
+        team_name = self._getUserTeamName(user_info)
         if resolved_group_id is not None:
             candidate_group_ids = [resolved_group_id]
+            location = "record_group"
+            target_id = resolved_group_id
+            group_info = group_map.get(resolved_group_id, {})
+            scope_project_id = group_info.get("project_id")
+            scope_project_name = group_info.get("project_name")
+            scope_rg_name = group_info.get("record_group_name")
         elif resolved_project_id is not None:
             candidate_group_ids = [
                 gid
                 for gid, info in group_map.items()
                 if info["project_id"] == resolved_project_id
             ]
+            location = "project"
+            target_id = resolved_project_id
+            scope_project_id = resolved_project_id
+            scope_project_name = project_map.get(resolved_project_id)
+            scope_rg_name = None
         else:
             candidate_group_ids = list(group_map.keys())
+            location = "team"
+            target_id = team_name or "team"
+            scope_project_id = None
+            scope_project_name = (
+                f"All Records ({team_name})" if team_name else "All Records"
+            )
+            scope_rg_name = None
 
         cleaned_doc_type = (
             document_type.strip()
             if isinstance(document_type, str) and document_type.strip()
             else None
         )
+        doc_types_list = [cleaned_doc_type] if cleaned_doc_type is not None else None
         if cleaned_doc_type is not None:
             if len(cleaned_doc_type) > 200:
                 raise ValueError("Invalid document_type")
@@ -6768,25 +6846,23 @@ class DataManager:
         parsed_since = self._parseTimestampParam(since, "since")
         parsed_until = self._parseTimestampParam(until, "until")
         now = time.time()
-        team_name = self._getUserTeamName(user_info)
 
-        watermark_scope = {
-            "user_email": email,
+        watermark_query = {
+            "request_user.email": email,
             "team": team_name,
-            "project_id": resolved_project_id,
-            "record_group_id": resolved_group_id,
-            "document_type": cleaned_doc_type,
+            "location": location,
+            "target_id": target_id,
+            "options.incremental_reviewed": True,
+            "options.document_types": doc_types_list,
+            "is_watermark": True,
         }
         if parsed_since is None:
-            last_export = self.db.reviewed_record_exports.find_one(
-                {**watermark_scope, "is_watermark": True},
-                sort=[("exported_at", DESCENDING), ("_id", DESCENDING)],
+            last_export = self.db.export_jobs.find_one(
+                watermark_query,
+                sort=[("created_at", DESCENDING), ("_id", DESCENDING)],
             )
-            effective_since = (
-                float(last_export["until"])
-                if last_export and last_export.get("until") is not None
-                else 0.0
-            )
+            last_until = (last_export or {}).get("options", {}).get("until")
+            effective_since = float(last_until) if last_until is not None else 0.0
         else:
             effective_since = parsed_since
 
@@ -6795,14 +6871,15 @@ class DataManager:
             raise ValueError("until must be greater than or equal to since")
 
         time_window = {"$gt": effective_since, "$lte": effective_until}
+        window_or = [
+            {"lastUpdated": time_window},
+            {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
+            {"lastUpdated": None, "dateCreated": time_window},
+        ]
         query = {
             "record_group_id": {"$in": target_group_ids},
             "review_status": "reviewed",
-            "$or": [
-                {"lastUpdated": time_window},
-                {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
-                {"lastUpdated": None, "dateCreated": time_window},
-            ],
+            "$or": window_or,
         }
 
         total_count = self.db.records.count_documents(query)
@@ -6821,27 +6898,115 @@ class DataManager:
             request_origin=request_origin,
         )
 
-        export_log = {
-            **watermark_scope,
-            "since": effective_since,
-            "until": effective_until,
-            "exported_at": now,
-            "page": page,
-            "page_size": page_size,
-            "total_count": total_count,
-            "returned_count": len(raw_records),
-            "first_record_id": str(raw_records[0]["_id"]) if raw_records else None,
-            "last_record_id": str(raw_records[-1]["_id"]) if raw_records else None,
-            "format": export_format,
-            "is_watermark": bool(page == 0 and parsed_until is None),
-        }
-        self.db.reviewed_record_exports.insert_one(export_log)
+        has_more = (page + 1) * page_size < total_count
+        csv_text = None
+        serialized_records = None
+        if export_format == "csv":
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(record_attributes)
+            csv_text = csv_buffer.getvalue()
+            payload_size_bytes = len(csv_text.encode("utf-8"))
+        else:
+            serialized_text = json.dumps(
+                record_attributes, default=util.defaultJSONDumpHandler
+            )
+            payload_size_bytes = len(serialized_text.encode("utf-8"))
+            serialized_records = json.loads(serialized_text)
+
+        job_id = None
+        if page == 0:
+            job_id = str(uuid.uuid4())
+            matched_record_ids = [
+                str(doc["_id"])
+                for doc in self.db.records.find(query, {"_id": 1}).sort(
+                    [("lastUpdated", ASCENDING), ("dateCreated", ASCENDING), ("_id", ASCENDING)]
+                )
+            ]
+            base_label = (
+                scope_rg_name
+                or scope_project_name
+                or team_name
+                or "records"
+            )
+            clean_output_name = (
+                f"{util.sanitize_filename_component(str(base_label))}_reviewed_records"
+            )
+            export_job_doc = {
+                "_id": job_id,
+                "job_id": job_id,
+                "job_type": "export",
+                "export_source": "reviewed_records_api",
+                "is_watermark": bool(parsed_until is None),
+                "status": "expired",
+                "stage": "completed",
+                "status_text": "Exported via API (direct download)",
+                "attempt": 0,
+                "location": location,
+                "target_id": target_id,
+                "team": team_name,
+                "project_id": scope_project_id,
+                "project_name": scope_project_name,
+                "record_group_id": resolved_group_id,
+                "record_group_name": scope_rg_name,
+                "output_name": clean_output_name,
+                "request_origin": str(request_origin or ""),
+                "request_user": {
+                    "email": email,
+                    "name": user_info.get("name"),
+                    "hd": user_info.get("hd"),
+                    "default_team": team_name,
+                    "anonymous": bool(user_info.get("anonymous", False)),
+                },
+                "options": {
+                    "export_csv": export_format == "csv",
+                    "export_json": export_format == "json",
+                    "export_images": False,
+                    "export_embedded_pdfs": False,
+                    "columns": [],
+                    "filter": {
+                        "review_status": "reviewed",
+                    },
+                    "sort": ["dateCreated", 1],
+                    "document_types": doc_types_list,
+                    "reconstruct_original_doc": False,
+                    "export_raw_values": False,
+                    "incremental_reviewed": True,
+                    "since": effective_since,
+                    "until": effective_until,
+                    "record_ids": matched_record_ids,
+                },
+                "progress": {
+                    "current": total_count,
+                    "total": total_count,
+                    "percent": 100,
+                },
+                "artifact": {
+                    "storage_key": None,
+                    "filename": f"{clean_output_name}.{export_format}",
+                    "size_bytes": payload_size_bytes,
+                    "record_count": total_count,
+                },
+                "worker": {},
+                "created_at": now,
+                "started_at": now,
+                "last_progress_at": now,
+                "completed_at": now,
+                "expires_at": None,
+                "updated_at": now,
+                "notification_read_at": now,
+                "error": None,
+            }
+            self.db.export_jobs.insert_one(export_job_doc)
+
         self.recordHistory(
             "fetchReviewedRecords",
             user=email,
-            project_id=resolved_project_id,
+            project_id=scope_project_id,
             rg_id=resolved_group_id,
             notes={
+                "job_id": job_id,
                 "since": effective_since,
                 "until": effective_until,
                 "page": page,
@@ -6850,26 +7015,20 @@ class DataManager:
             },
         )
 
-        has_more = (page + 1) * page_size < total_count
         if export_format == "csv":
-            csv_buffer = io.StringIO()
-            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(record_attributes)
             return {
+                "job_id": job_id,
                 "since": effective_since,
                 "until": effective_until,
                 "page": page,
                 "page_size": page_size,
                 "total_count": total_count,
                 "has_more": has_more,
-                "csv": csv_buffer.getvalue(),
+                "csv": csv_text,
             }
 
-        serialized_records = json.loads(
-            json.dumps(record_attributes, default=util.defaultJSONDumpHandler)
-        )
         return {
+            "job_id": job_id,
             "since": effective_since,
             "until": effective_until,
             "page": page,

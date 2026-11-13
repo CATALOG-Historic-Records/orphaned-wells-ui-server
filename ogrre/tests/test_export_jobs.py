@@ -614,10 +614,35 @@ def test_reviewed_records_endpoint_watermark_and_updates(manager, export_project
     assert set(returned_by_file.keys()) == {"well-001.pdf", "well-002.pdf"}
     assert returned_by_file["well-001.pdf"]["API Number"]["value"] == "42-001-99999"
 
-    # Verify export history tracking in db.reviewed_record_exports
-    export_logs = list(manager.db.reviewed_record_exports.find({}))
+    # Verify export history tracking in db.export_jobs and rerun behavior
+    export_logs = list(
+        manager.db.export_jobs.find({"export_source": "reviewed_records_api"})
+    )
     assert len(export_logs) == 3
     assert all(log["is_watermark"] is True for log in export_logs)
+
+    history = asyncio.run(
+        router.get_export_job_history(
+            FakeRequest({"view_scope": "mine"}), user_info=USER
+        )
+    )
+    assert history["count"] == 3
+
+    # Rerunning the first export job should reproduce its exact (since, until] slice (only Well-001)
+    rerun_tasks = BackgroundTasks()
+    rerun_job = router.rerun_export_job(
+        job_id=first_run["job_id"],
+        request=FakeRequest(),
+        background_tasks=rerun_tasks,
+        user_info=USER,
+    )
+    asyncio.run(rerun_tasks())
+    completed_rerun = router.get_export_job(job_id=rerun_job["job_id"], user_info=USER)
+    assert completed_rerun["status"] == "completed"
+    assert completed_rerun["options"]["incremental_reviewed"] is True
+    assert completed_rerun["options"]["since"] == pytest.approx(first_run["since"])
+    assert completed_rerun["options"]["until"] == pytest.approx(first_run["until"])
+    assert completed_rerun["artifact"]["record_count"] == 1
 
 
 def test_reviewed_records_endpoint_filters_pagination_and_csv(manager, export_projects):

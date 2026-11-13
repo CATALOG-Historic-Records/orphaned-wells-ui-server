@@ -93,6 +93,7 @@ def summary_projection():
     fields = [
         "job_id",
         "job_type",
+        "export_source",
         "status",
         "stage",
         "status_text",
@@ -114,6 +115,9 @@ def summary_projection():
         "options.reconstruct_original_doc",
         "options.export_raw_values",
         "options.document_types",
+        "options.incremental_reviewed",
+        "options.since",
+        "options.until",
         "artifact.filename",
         "artifact.size_bytes",
         "artifact.record_count",
