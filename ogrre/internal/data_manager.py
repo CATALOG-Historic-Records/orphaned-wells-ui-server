@@ -5064,17 +5064,11 @@ class DataManager:
             filter_by["_id"] = {"$in": valid_object_ids}
         elif options.get("since") is not None or options.get("until") is not None:
             filter_by["review_status"] = "reviewed"
-            time_window = {}
-            if options.get("since") is not None:
-                time_window["$gt"] = float(options["since"])
-            if options.get("until") is not None:
-                time_window["$lte"] = float(options["until"])
-            if time_window and "$or" not in filter_by:
-                filter_by["$or"] = [
-                    {"lastUpdated": time_window},
-                    {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
-                    {"lastUpdated": None, "dateCreated": time_window},
-                ]
+            window_or = self._buildReviewedTimeWindowOr(
+                options.get("since"), options.get("until")
+            )
+            if window_or and "$or" not in filter_by:
+                filter_by["$or"] = window_or
 
         json_fields_to_include = {
             "topLevelFields": [
@@ -5179,19 +5173,9 @@ class DataManager:
                 team_rg_ids = (
                     self.getTeamRecordGroupsList(team_name) if team_name else []
                 )
-                team_rg_object_ids = [
-                    ObjectId(gid) for gid in team_rg_ids if ObjectId.is_valid(gid)
-                ]
-                matching_rg_ids = [
-                    str(doc["_id"])
-                    for doc in self.db.record_groups.find(
-                        {
-                            "_id": {"$in": team_rg_object_ids},
-                            "documentType": {"$in": document_types},
-                        },
-                        {"_id": 1},
-                    )
-                ]
+                matching_rg_ids = self._filterRecordGroupIdsByDocumentTypes(
+                    team_rg_ids, document_types
+                )
                 filter_by = self._constrainRecordGroupFilter(
                     filter_by, matching_rg_ids
                 )
@@ -6625,6 +6609,39 @@ class DataManager:
                 raise ValueError(f"Invalid {param_name}")
         raise ValueError(f"Invalid {param_name}")
 
+    @staticmethod
+    def _buildReviewedTimeWindowOr(since_val=None, until_val=None):
+        time_window = {}
+        if since_val is not None:
+            time_window["$gt"] = float(since_val)
+        if until_val is not None:
+            time_window["$lte"] = float(until_val)
+        if not time_window:
+            return None
+        return [
+            {"lastUpdated": time_window},
+            {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
+            {"lastUpdated": None, "dateCreated": time_window},
+        ]
+
+    def _filterRecordGroupIdsByDocumentTypes(
+        self, candidate_group_ids, document_types
+    ):
+        object_ids = [
+            ObjectId(gid) for gid in candidate_group_ids if ObjectId.is_valid(gid)
+        ]
+        matching_groups = {
+            str(doc["_id"])
+            for doc in self.db.record_groups.find(
+                {
+                    "_id": {"$in": object_ids},
+                    "documentType": {"$in": list(document_types)},
+                },
+                {"_id": 1},
+            )
+        }
+        return [gid for gid in candidate_group_ids if gid in matching_groups]
+
     def createApiKey(self, user_info, name, expires_in_days=90):
         email = (user_info or {}).get("email")
         if not email or email == "anonymous":
@@ -6820,24 +6837,9 @@ class DataManager:
         if cleaned_doc_type is not None:
             if len(cleaned_doc_type) > 200:
                 raise ValueError("Invalid document_type")
-            matching_groups = set()
-            for rg_doc in self.db.record_groups.find(
-                {
-                    "_id": {
-                        "$in": [
-                            ObjectId(gid)
-                            for gid in candidate_group_ids
-                            if ObjectId.is_valid(gid)
-                        ]
-                    },
-                    "documentType": cleaned_doc_type,
-                },
-                {"_id": 1},
-            ):
-                matching_groups.add(str(rg_doc["_id"]))
-            target_group_ids = [
-                gid for gid in candidate_group_ids if gid in matching_groups
-            ]
+            target_group_ids = self._filterRecordGroupIdsByDocumentTypes(
+                candidate_group_ids, doc_types_list
+            )
         else:
             target_group_ids = candidate_group_ids
 
@@ -6868,22 +6870,30 @@ class DataManager:
         if effective_until < effective_since:
             raise ValueError("until must be greater than or equal to since")
 
-        time_window = {"$gt": effective_since, "$lte": effective_until}
-        window_or = [
-            {"lastUpdated": time_window},
-            {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
-            {"lastUpdated": None, "dateCreated": time_window},
-        ]
         query = {
             "record_group_id": {"$in": target_group_ids},
             "review_status": "reviewed",
-            "$or": window_or,
+            "$or": self._buildReviewedTimeWindowOr(effective_since, effective_until),
         }
 
-        total_count = self.db.records.count_documents(query)
+        sort_spec = [
+            ("lastUpdated", ASCENDING),
+            ("dateCreated", ASCENDING),
+            ("_id", ASCENDING),
+        ]
+        matched_record_ids = None
+        if page == 0:
+            matched_record_ids = [
+                str(doc["_id"])
+                for doc in self.db.records.find(query, {"_id": 1}).sort(sort_spec)
+            ]
+            total_count = len(matched_record_ids)
+        else:
+            total_count = self.db.records.count_documents(query)
+
         raw_records = list(
             self.db.records.find(query)
-            .sort([("lastUpdated", ASCENDING), ("dateCreated", ASCENDING), ("_id", ASCENDING)])
+            .sort(sort_spec)
             .skip(page * page_size)
             .limit(page_size)
         )
@@ -6916,12 +6926,6 @@ class DataManager:
         job_id = None
         if page == 0:
             job_id = str(uuid.uuid4())
-            matched_record_ids = [
-                str(doc["_id"])
-                for doc in self.db.records.find(query, {"_id": 1}).sort(
-                    [("lastUpdated", ASCENDING), ("dateCreated", ASCENDING), ("_id", ASCENDING)]
-                )
-            ]
             base_label = (
                 scope_rg_name
                 or scope_project_name
