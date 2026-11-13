@@ -4945,7 +4945,6 @@ class DataManager:
             if user_collaborator != "rrc":
                 reconstruct_original_doc = False
         export_raw_values = bool(options.get("export_raw_values", False))
-        incremental_reviewed = bool(options.get("incremental_reviewed", False))
         since_val = self._parseTimestampParam(options.get("since"), "since")
         until_val = self._parseTimestampParam(options.get("until"), "until")
         raw_record_ids = options.get("record_ids")
@@ -5012,7 +5011,6 @@ class DataManager:
                 "document_types": document_types,
                 "reconstruct_original_doc": reconstruct_original_doc,
                 "export_raw_values": export_raw_values,
-                "incremental_reviewed": incremental_reviewed,
                 "since": since_val,
                 "until": until_val,
                 "record_ids": record_ids,
@@ -5064,7 +5062,7 @@ class DataManager:
                 if isinstance(rid, str) and ObjectId.is_valid(rid)
             ]
             filter_by["_id"] = {"$in": valid_object_ids}
-        elif options.get("incremental_reviewed"):
+        elif options.get("since") is not None or options.get("until") is not None:
             filter_by["review_status"] = "reviewed"
             time_window = {}
             if options.get("since") is not None:
@@ -6852,7 +6850,7 @@ class DataManager:
             "team": team_name,
             "location": location,
             "target_id": target_id,
-            "options.incremental_reviewed": True,
+            "export_source": "reviewed_records_api",
             "options.document_types": doc_types_list,
             "is_watermark": True,
         }
@@ -6972,7 +6970,6 @@ class DataManager:
                     "document_types": doc_types_list,
                     "reconstruct_original_doc": False,
                     "export_raw_values": False,
-                    "incremental_reviewed": True,
                     "since": effective_since,
                     "until": effective_until,
                     "record_ids": matched_record_ids,

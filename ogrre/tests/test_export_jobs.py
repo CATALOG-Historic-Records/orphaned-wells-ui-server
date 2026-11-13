@@ -639,7 +639,6 @@ def test_reviewed_records_endpoint_watermark_and_updates(manager, export_project
     asyncio.run(rerun_tasks())
     completed_rerun = router.get_export_job(job_id=rerun_job["job_id"], user_info=USER)
     assert completed_rerun["status"] == "completed"
-    assert completed_rerun["options"]["incremental_reviewed"] is True
     assert completed_rerun["options"]["since"] == pytest.approx(first_run["since"])
     assert completed_rerun["options"]["until"] == pytest.approx(first_run["until"])
     assert completed_rerun["artifact"]["record_count"] == 1

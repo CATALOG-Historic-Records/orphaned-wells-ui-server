@@ -115,7 +115,6 @@ def summary_projection():
         "options.reconstruct_original_doc",
         "options.export_raw_values",
         "options.document_types",
-        "options.incremental_reviewed",
         "options.since",
         "options.until",
         "artifact.filename",
