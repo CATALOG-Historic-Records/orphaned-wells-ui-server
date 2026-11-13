@@ -8,7 +8,9 @@ import re
 import uuid
 import copy
 import hashlib
+import secrets
 import tempfile
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from contextvars import ContextVar
 from importlib.metadata import version, PackageNotFoundError
@@ -5873,8 +5875,9 @@ class DataManager:
             if attribute_operation
             else {"_id": ObjectId(record_id)}
         )
+        db_update = {**data_update, "lastUpdated": time.time()}
         updated = self.db.records.find_one_and_update(
-            query, {"$set": data_update}, return_document=ReturnDocument.AFTER
+            query, {"$set": db_update}, return_document=ReturnDocument.AFTER
         )
         if updated is None:
             raise schema_rules.SchemaError(
@@ -6283,16 +6286,13 @@ class DataManager:
         return util.reconstruct_records_by_original_filename(records)
 
     ## miscellaneous functions
-    def downloadRecords(
+    def _formatRecordsForExport(
         self,
         records,
         exportType,
         user_info,
-        _id,
-        location,
         selectedColumns=[],
         keep_all_columns=False,
-        output_filename=None,
         request_origin="",
         export_raw_values=False,
     ):
@@ -6317,16 +6317,8 @@ class DataManager:
                 }
             )
         records = export_records
-        ## TODO: Should we use aliases for export?
         USE_ALIASES = True
-        user = user_info.get("email", None)
         rg_attribute_map = self.create_record_group_processor_attribute_map(user_info)
-        today = time.time()
-        output_dir = tempfile.gettempdir()
-        if output_filename is None:
-            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
-        else:
-            output_file = f"{output_filename}.{exportType}"
         attributes = ["file"]
         subattributes = []
         record_attributes = []
@@ -6346,13 +6338,10 @@ class DataManager:
             for document_subattribute in document_subattributes or []:
                 subattribute_key = document_subattribute["key"]
 
-                ## TODO: use alias?
                 rg_schema = rg_attribute_map.get(record_group_id, {})
                 subattribute_alias = self._getAttributeAlias(
                     document_subattribute, rg_schema
                 )
-                # if not subattribute_alias:
-                #     _log.info(f"could not find subattribute_alias for {subattribute_key}")
                 if USE_ALIASES and subattribute_alias:
                     subattribute_name = f"{parent_column_name}[{subattribute_alias}"
                 else:
@@ -6364,8 +6353,6 @@ class DataManager:
                     subattribute_name in current_attributes
                     or subattribute_name in current_parent_attributes
                 ):
-                    ## add a number to the end of the attribute so it
-                    ## is differentiable from other instances of the attribute
                     subattribute_name = f"{original_subattribute_name}_{i}"
                     i += 1
                 current_attributes.add(subattribute_name)
@@ -6404,7 +6391,6 @@ class DataManager:
                     for document_attribute in document.get("attributesList", []):
                         attribute_key = document_attribute["key"].replace(" ", "")
 
-                        ## TODO: use alias?
                         rg_schema = rg_attribute_map.get(record_group_id, {})
                         attribute_alias = self._getAttributeAlias(
                             document_attribute, rg_schema
@@ -6435,8 +6421,6 @@ class DataManager:
                                 attribute_name in current_attributes
                                 or attribute_name in current_parent_attributes
                             ):
-                                ## add a number to the end of the attribute so it (and its subattributes)
-                                ## is differentiable from other instances of the attribute
                                 attribute_name = f"{original_attribute_name}_{i}"
                                 i += 1
                             if document_attribute.get("subattributes", None):
@@ -6476,34 +6460,65 @@ class DataManager:
                     record_attributes.append(record_attribute)
                 except Exception as e:
                     _log.info(f"unable to add {document_id}: {e}")
-            # compute the output file directory and name
+            return record_attributes, attributes + subattributes + ["URL"]
+
+        for document in records:
+            document_id = str(document["_id"])
+            try:
+                record_attribute = {}
+                for document_attribute in document.get("attributesList", []):
+                    attribute_name = document_attribute["key"]
+                    if attribute_name in selectedColumns or keep_all_columns:
+                        record_attribute[attribute_name] = document_attribute
+                if "record_notes" in selectedColumns or keep_all_columns:
+                    notes_list = document.get("record_notes") or []
+                    active_notes = [
+                        note
+                        for note in notes_list
+                        if not note.get("deleted", False)
+                    ]
+                    record_attribute["record_notes"] = active_notes
+                record_attribute["file"] = document.get("filename", "")
+                record_attributes.append(record_attribute)
+            except Exception as e:
+                _log.info(f"unable to add {document_id}: {e}")
+        return record_attributes, None
+
+    def downloadRecords(
+        self,
+        records,
+        exportType,
+        user_info,
+        _id,
+        location,
+        selectedColumns=[],
+        keep_all_columns=False,
+        output_filename=None,
+        request_origin="",
+        export_raw_values=False,
+    ):
+        user = user_info.get("email", None)
+        today = time.time()
+        output_dir = tempfile.gettempdir()
+        if output_filename is None:
+            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+        else:
+            output_file = f"{output_filename}.{exportType}"
+        record_attributes, fieldnames = self._formatRecordsForExport(
+            records,
+            exportType,
+            user_info,
+            selectedColumns=selectedColumns,
+            keep_all_columns=keep_all_columns,
+            request_origin=request_origin,
+            export_raw_values=export_raw_values,
+        )
+        if exportType == "csv":
             with open(output_file, "w", newline="") as csvfile:
-                writer = csv.DictWriter(
-                    csvfile, fieldnames=attributes + subattributes + ["URL"]
-                )
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(record_attributes)
-        else:  ## export type is JSON
-            for document in records:
-                document_id = str(document["_id"])
-                try:
-                    record_attribute = {}
-                    for document_attribute in document.get("attributesList", []):
-                        attribute_name = document_attribute["key"]
-                        if attribute_name in selectedColumns or keep_all_columns:
-                            record_attribute[attribute_name] = document_attribute
-                    if "record_notes" in selectedColumns or keep_all_columns:
-                        notes_list = document.get("record_notes") or []
-                        active_notes = [
-                            note
-                            for note in notes_list
-                            if not note.get("deleted", False)
-                        ]
-                        record_attribute["record_notes"] = active_notes
-                    record_attribute["file"] = document.get("filename", "")
-                    record_attributes.append(record_attribute)
-                except Exception as e:
-                    _log.info(f"unable to add {document_id}: {e}")
+        else:
             with open(output_file, "w", newline="") as jsonfile:
                 json.dump(
                     record_attributes, jsonfile, default=util.defaultJSONDumpHandler
@@ -6518,6 +6533,351 @@ class DataManager:
                 "downloadRecords", user=user, notes="downloaded team records"
             )
         return output_file
+
+    @staticmethod
+    def _parseTimestampParam(value, param_name="timestamp"):
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid {param_name}")
+        if isinstance(value, (int, float)):
+            if not (value >= 0 and value != float("inf")):
+                raise ValueError(f"Invalid {param_name}")
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                numeric = float(stripped)
+                if not (numeric >= 0 and numeric != float("inf")):
+                    raise ValueError(f"Invalid {param_name}")
+                return numeric
+            except ValueError:
+                pass
+            try:
+                iso_val = (
+                    stripped[:-1] + "+00:00"
+                    if stripped.endswith("Z")
+                    else stripped
+                )
+                parsed_dt = datetime.fromisoformat(iso_val)
+                if parsed_dt.tzinfo is None:
+                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                return float(parsed_dt.timestamp())
+            except Exception:
+                raise ValueError(f"Invalid {param_name}")
+        raise ValueError(f"Invalid {param_name}")
+
+    def createApiKey(self, user_info, name, expires_in_days=90):
+        email = (user_info or {}).get("email")
+        if not email or email == "anonymous":
+            raise PermissionError("Authentication is required to create API keys")
+        user = self.getUser(email)
+        if not user:
+            raise PermissionError("User account not found")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+            raise ValueError("API key name must be between 1 and 100 characters")
+        if (
+            type(expires_in_days) is not int
+            or expires_in_days < 1
+            or expires_in_days > 365
+        ):
+            raise ValueError("expires_in_days must be an integer between 1 and 365")
+
+        cleaned_name = name.strip()
+        raw_key = f"ogrre_{secrets.token_urlsafe(32)}"
+        key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        key_id = str(ObjectId())
+        now = time.time()
+        expires_at = now + (expires_in_days * 86400)
+        team = user.get("default_team")
+        collaborator = self.getCollaboratorForUser(user)
+
+        doc = {
+            "_id": key_id,
+            "key_id": key_id,
+            "name": cleaned_name,
+            "key_prefix": raw_key[:12],
+            "key_hash": key_hash,
+            "user_email": email,
+            "team": team,
+            "collaborator": collaborator,
+            "created_at": now,
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "revoked_at": None,
+        }
+        self.db.api_keys.insert_one(doc)
+        self.recordHistory(
+            "createApiKey",
+            user=email,
+            notes={"key_id": key_id, "name": cleaned_name, "expires_at": expires_at},
+        )
+        return {
+            "key_id": key_id,
+            "name": cleaned_name,
+            "key_prefix": doc["key_prefix"],
+            "created_at": now,
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "api_key": raw_key,
+        }
+
+    def listApiKeys(self, user_info):
+        email = (user_info or {}).get("email")
+        if not email or email == "anonymous":
+            raise PermissionError("Authentication is required to list API keys")
+        now = time.time()
+        keys = []
+        for doc in self.db.api_keys.find(
+            {"user_email": email, "revoked_at": None}
+        ).sort("created_at", DESCENDING):
+            expires_at = doc.get("expires_at")
+            keys.append(
+                {
+                    "key_id": str(doc.get("key_id") or doc["_id"]),
+                    "name": doc.get("name", ""),
+                    "key_prefix": doc.get("key_prefix", ""),
+                    "created_at": doc.get("created_at"),
+                    "expires_at": expires_at,
+                    "last_used_at": doc.get("last_used_at"),
+                    "expired": bool(expires_at is not None and expires_at <= now),
+                }
+            )
+        return keys
+
+    def revokeApiKey(self, user_info, key_id):
+        email = (user_info or {}).get("email")
+        if not email or email == "anonymous":
+            raise PermissionError("Authentication is required to revoke API keys")
+        if not isinstance(key_id, str) or not key_id.strip():
+            raise ValueError("Invalid key_id")
+        now = time.time()
+        result = self.db.api_keys.find_one_and_update(
+            {"_id": key_id.strip(), "user_email": email, "revoked_at": None},
+            {"$set": {"revoked_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if result is None:
+            raise ValueError("API key not found")
+        self.recordHistory(
+            "revokeApiKey",
+            user=email,
+            notes={"key_id": key_id.strip()},
+        )
+        return {"key_id": key_id.strip(), "revoked": True, "revoked_at": now}
+
+    def authenticateApiKey(self, raw_token):
+        if not isinstance(raw_token, str) or not raw_token.startswith("ogrre_"):
+            raise ValueError("Invalid API key")
+        key_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        doc = self.db.api_keys.find_one({"key_hash": key_hash, "revoked_at": None})
+        if doc is None:
+            raise ValueError("Invalid or revoked API key")
+        now = time.time()
+        expires_at = doc.get("expires_at")
+        if expires_at is not None and expires_at <= now:
+            raise ValueError("API key has expired")
+        email = doc.get("user_email")
+        if not email or self.getUser(email) is None:
+            raise ValueError("API key owner no longer exists")
+        self.db.api_keys.update_one(
+            {"_id": doc["_id"]}, {"$set": {"last_used_at": now}}
+        )
+        return {
+            "email": email,
+            "api_key_id": str(doc.get("key_id") or doc["_id"]),
+        }
+
+    def fetchReviewedRecordsExport(
+        self,
+        user_info,
+        since=None,
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="json",
+        request_origin="",
+    ):
+        email = (user_info or {}).get("email")
+        if not email or email == "anonymous":
+            raise PermissionError("Authentication is required to fetch reviewed records")
+        if type(page) is not int or page < 0 or page > 100000:
+            raise ValueError("Invalid page")
+        if type(page_size) is not int or page_size < 1 or page_size > 1000:
+            raise ValueError("page_size must be between 1 and 1000")
+        export_format = (export_format or "json").strip().lower()
+        if export_format not in ("json", "csv"):
+            raise ValueError("format must be 'json' or 'csv'")
+
+        scope_body = {}
+        if project_id:
+            scope_body["project_id"] = project_id
+        if record_group_id:
+            scope_body["record_group_id"] = record_group_id
+        _, group_map, resolved_project_id, resolved_group_id = (
+            self._resolveJobHistoryScope(
+                user_info, scope_body, resource_label="reviewed records"
+            )
+        )
+
+        if resolved_group_id is not None:
+            candidate_group_ids = [resolved_group_id]
+        elif resolved_project_id is not None:
+            candidate_group_ids = [
+                gid
+                for gid, info in group_map.items()
+                if info["project_id"] == resolved_project_id
+            ]
+        else:
+            candidate_group_ids = list(group_map.keys())
+
+        cleaned_doc_type = (
+            document_type.strip()
+            if isinstance(document_type, str) and document_type.strip()
+            else None
+        )
+        if cleaned_doc_type is not None:
+            if len(cleaned_doc_type) > 200:
+                raise ValueError("Invalid document_type")
+            matching_groups = set()
+            for rg_doc in self.db.record_groups.find(
+                {
+                    "_id": {
+                        "$in": [
+                            ObjectId(gid)
+                            for gid in candidate_group_ids
+                            if ObjectId.is_valid(gid)
+                        ]
+                    },
+                    "documentType": cleaned_doc_type,
+                },
+                {"_id": 1},
+            ):
+                matching_groups.add(str(rg_doc["_id"]))
+            target_group_ids = [
+                gid for gid in candidate_group_ids if gid in matching_groups
+            ]
+        else:
+            target_group_ids = candidate_group_ids
+
+        parsed_since = self._parseTimestampParam(since, "since")
+        parsed_until = self._parseTimestampParam(until, "until")
+        now = time.time()
+        team_name = self._getUserTeamName(user_info)
+
+        watermark_scope = {
+            "user_email": email,
+            "team": team_name,
+            "project_id": resolved_project_id,
+            "record_group_id": resolved_group_id,
+            "document_type": cleaned_doc_type,
+        }
+        if parsed_since is None:
+            last_export = self.db.reviewed_record_exports.find_one(
+                {**watermark_scope, "is_watermark": True},
+                sort=[("exported_at", DESCENDING), ("_id", DESCENDING)],
+            )
+            effective_since = (
+                float(last_export["until"])
+                if last_export and last_export.get("until") is not None
+                else 0.0
+            )
+        else:
+            effective_since = parsed_since
+
+        effective_until = parsed_until if parsed_until is not None else now
+        if effective_until < effective_since:
+            raise ValueError("until must be greater than or equal to since")
+
+        time_window = {"$gt": effective_since, "$lte": effective_until}
+        query = {
+            "record_group_id": {"$in": target_group_ids},
+            "review_status": "reviewed",
+            "$or": [
+                {"lastUpdated": time_window},
+                {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
+                {"lastUpdated": None, "dateCreated": time_window},
+            ],
+        }
+
+        total_count = self.db.records.count_documents(query)
+        raw_records = list(
+            self.db.records.find(query)
+            .sort([("lastUpdated", ASCENDING), ("dateCreated", ASCENDING), ("_id", ASCENDING)])
+            .skip(page * page_size)
+            .limit(page_size)
+        )
+
+        record_attributes, fieldnames = self._formatRecordsForExport(
+            raw_records,
+            export_format,
+            user_info,
+            keep_all_columns=True,
+            request_origin=request_origin,
+        )
+
+        export_log = {
+            **watermark_scope,
+            "since": effective_since,
+            "until": effective_until,
+            "exported_at": now,
+            "page": page,
+            "page_size": page_size,
+            "total_count": total_count,
+            "returned_count": len(raw_records),
+            "first_record_id": str(raw_records[0]["_id"]) if raw_records else None,
+            "last_record_id": str(raw_records[-1]["_id"]) if raw_records else None,
+            "format": export_format,
+            "is_watermark": bool(page == 0 and parsed_until is None),
+        }
+        self.db.reviewed_record_exports.insert_one(export_log)
+        self.recordHistory(
+            "fetchReviewedRecords",
+            user=email,
+            project_id=resolved_project_id,
+            rg_id=resolved_group_id,
+            notes={
+                "since": effective_since,
+                "until": effective_until,
+                "page": page,
+                "returned_count": len(raw_records),
+                "format": export_format,
+            },
+        )
+
+        has_more = (page + 1) * page_size < total_count
+        if export_format == "csv":
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(record_attributes)
+            return {
+                "since": effective_since,
+                "until": effective_until,
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "has_more": has_more,
+                "csv": csv_buffer.getvalue(),
+            }
+
+        serialized_records = json.loads(
+            json.dumps(record_attributes, default=util.defaultJSONDumpHandler)
+        )
+        return {
+            "since": effective_since,
+            "until": effective_until,
+            "page": page,
+            "page_size": page_size,
+            "total_count": total_count,
+            "has_more": has_more,
+            "records": serialized_records,
+        }
 
     def getUserPermissions(self, user):
         user_team = user["default_team"]
