@@ -406,17 +406,17 @@ def authenticate(request: Request, token: str = Depends(oauth2_scheme)):
     Returns:
         user account information
     """
-    if not REQUIRE_AUTH:
-        return _get_anonymous_user_from_request(request)
     token_to_verify = get_bearer_or_session_token(request, token)
-    if not token_to_verify:
-        raise HTTPException(status_code=401, detail="missing authentication token")
-    if token_to_verify.startswith("ogrre_"):
+    if token_to_verify and token_to_verify.startswith("ogrre_"):
         try:
             return data_manager.authenticateApiKey(token_to_verify)
         except Exception as e:
             _log.info(f"unable to authenticate api key: {e}")
             raise HTTPException(status_code=401, detail=f"unable to authenticate: {e}")
+    if not REQUIRE_AUTH:
+        return _get_anonymous_user_from_request(request)
+    if not token_to_verify:
+        raise HTTPException(status_code=401, detail="missing authentication token")
     try:
         user_info = identity_provider.verify_id_token(token_to_verify)
         _resolve_user_email(user_info)

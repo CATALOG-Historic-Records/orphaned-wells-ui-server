@@ -6669,11 +6669,14 @@ class DataManager:
 
     def createApiKey(self, user_info, name, expires_in_days=90):
         email = (user_info or {}).get("email")
-        if not email or email == "anonymous":
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
             raise PermissionError("Authentication is required to create API keys")
         user = self.getUser(email)
         if not user:
-            raise PermissionError("User account not found")
+            if not REQUIRE_AUTH and email == "anonymous":
+                user = user_info or {}
+            else:
+                raise PermissionError("User account not found")
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
             raise ValueError("API key name must be between 1 and 100 characters")
         if (
@@ -6724,7 +6727,7 @@ class DataManager:
 
     def listApiKeys(self, user_info):
         email = (user_info or {}).get("email")
-        if not email or email == "anonymous":
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
             raise PermissionError("Authentication is required to list API keys")
         now = time.time()
         keys = []
@@ -6747,7 +6750,7 @@ class DataManager:
 
     def revokeApiKey(self, user_info, key_id):
         email = (user_info or {}).get("email")
-        if not email or email == "anonymous":
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
             raise PermissionError("Authentication is required to revoke API keys")
         if not isinstance(key_id, str) or not key_id.strip():
             raise ValueError("Invalid key_id")
@@ -6778,15 +6781,25 @@ class DataManager:
         if expires_at is not None and expires_at <= now:
             raise ValueError("API key has expired")
         email = doc.get("user_email")
-        if not email or self.getUser(email) is None:
+        if not email or (
+            self.getUser(email) is None
+            and not (not REQUIRE_AUTH and email == "anonymous")
+        ):
             raise ValueError("API key owner no longer exists")
         self.db.api_keys.update_one(
             {"_id": doc["_id"]}, {"$set": {"last_used_at": now}}
         )
-        return {
+        result = {
             "email": email,
             "api_key_id": str(doc.get("key_id") or doc["_id"]),
         }
+        if not REQUIRE_AUTH and email == "anonymous":
+            result["anonymous"] = True
+            result["default_team"] = (
+                doc.get("team") or DEFAULT_UNAUTHENTICATED_TEAM["name"]
+            )
+            result["collaborator"] = doc.get("collaborator")
+        return result
 
     def fetchReviewedRecordsExport(
         self,
@@ -6802,7 +6815,7 @@ class DataManager:
         request_origin="",
     ):
         email = (user_info or {}).get("email")
-        if not email or email == "anonymous":
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
             raise PermissionError(
                 "Authentication is required to fetch reviewed records"
             )
