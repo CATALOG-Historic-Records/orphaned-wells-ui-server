@@ -726,4 +726,3 @@ def test_reviewed_records_endpoint_filters_pagination_and_csv(manager, export_pr
     csv_body = csv_resp.body.decode("utf-8")
     assert "well-001.pdf" in csv_body
     assert "well-002.pdf" in csv_body
-

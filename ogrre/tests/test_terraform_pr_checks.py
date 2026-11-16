@@ -57,7 +57,9 @@ def bootstrap(tmp_path):
     binary_dir = tmp_path / "bin"
     binary_dir.mkdir()
     cli = binary_dir / "gcloud"
-    cli.write_text(f"#!{sys.executable}\n" + """import json
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        + """import json
 import os
 from pathlib import Path
 import sys
@@ -86,7 +88,8 @@ elif args[:3] == ["iam", "service-accounts", "remove-iam-policy-binding"]:
         if binding.get("role") == "roles/iam.workloadIdentityUser" and not binding.get("condition"):
             binding["members"] = [value for value in binding["members"] if value != member]
     path.write_text(json.dumps(policy))
-""")
+"""
+    )
     cli.chmod(0o700)
     (binary_dir / "gh").symlink_to(cli)
     (binary_dir / "python3").symlink_to(sys.executable)

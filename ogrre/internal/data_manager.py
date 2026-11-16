@@ -5147,9 +5147,7 @@ class DataManager:
                 matching_rg_ids = self._filterRecordGroupIdsByDocumentTypes(
                     team_rg_ids, document_types
                 )
-                filter_by = self._constrainRecordGroupFilter(
-                    filter_by, matching_rg_ids
-                )
+                filter_by = self._constrainRecordGroupFilter(filter_by, matching_rg_ids)
             records, _ = self.fetchRecordsByTeam(
                 user_info,
                 page=None,
@@ -6044,9 +6042,9 @@ class DataManager:
                 processor_attributes = self.getRecordGroupSchemaAttributes(
                     rg_document=rg, user=user
                 )
-                rg_processor_attribute_map[rg_id] = (
-                    util.convert_processor_attributes_to_dict(processor_attributes)
-                )
+                rg_processor_attribute_map[
+                    rg_id
+                ] = util.convert_processor_attributes_to_dict(processor_attributes)
             # _log.info(f"rg_processor_attribute_map: {rg_processor_attribute_map}")
             return rg_processor_attribute_map
         except Exception as e:
@@ -6483,9 +6481,9 @@ class DataManager:
                                 current_attributes.add(attribute_name)
                                 if attribute_name not in attributes:
                                     attributes.append(attribute_name)
-                                record_attribute[attribute_name] = (
-                                    get_attr_export_value(document_attribute)
-                                )
+                                record_attribute[
+                                    attribute_name
+                                ] = get_attr_export_value(document_attribute)
 
                     record_attribute["file"] = document.get("filename", "")
                     if "record_notes" in selectedColumns or keep_all_columns:
@@ -6546,9 +6544,7 @@ class DataManager:
                 if "record_notes" in selectedColumns or keep_all_columns:
                     notes_list = document.get("record_notes") or []
                     active_notes = [
-                        note
-                        for note in notes_list
-                        if not note.get("deleted", False)
+                        note for note in notes_list if not note.get("deleted", False)
                     ]
                     record_attribute["record_notes"] = active_notes
                 record_attribute["file"] = document.get("filename", "")
@@ -6630,9 +6626,7 @@ class DataManager:
                 pass
             try:
                 iso_val = (
-                    stripped[:-1] + "+00:00"
-                    if stripped.endswith("Z")
-                    else stripped
+                    stripped[:-1] + "+00:00" if stripped.endswith("Z") else stripped
                 )
                 parsed_dt = datetime.fromisoformat(iso_val)
                 if parsed_dt.tzinfo is None:
@@ -6657,9 +6651,7 @@ class DataManager:
             {"lastUpdated": None, "dateCreated": time_window},
         ]
 
-    def _filterRecordGroupIdsByDocumentTypes(
-        self, candidate_group_ids, document_types
-    ):
+    def _filterRecordGroupIdsByDocumentTypes(self, candidate_group_ids, document_types):
         object_ids = [
             ObjectId(gid) for gid in candidate_group_ids if ObjectId.is_valid(gid)
         ]
@@ -6811,7 +6803,9 @@ class DataManager:
     ):
         email = (user_info or {}).get("email")
         if not email or email == "anonymous":
-            raise PermissionError("Authentication is required to fetch reviewed records")
+            raise PermissionError(
+                "Authentication is required to fetch reviewed records"
+            )
         if type(page) is not int or page < 0 or page > 100000:
             raise ValueError("Invalid page")
         if type(page_size) is not int or page_size < 1 or page_size > 1000:
@@ -6825,10 +6819,13 @@ class DataManager:
             scope_body["project_id"] = project_id
         if record_group_id:
             scope_body["record_group_id"] = record_group_id
-        project_map, group_map, resolved_project_id, resolved_group_id = (
-            self._resolveJobHistoryScope(
-                user_info, scope_body, resource_label="reviewed records"
-            )
+        (
+            project_map,
+            group_map,
+            resolved_project_id,
+            resolved_group_id,
+        ) = self._resolveJobHistoryScope(
+            user_info, scope_body, resource_label="reviewed records"
         )
 
         team_name = self._getUserTeamName(user_info)
@@ -6910,9 +6907,7 @@ class DataManager:
         }
 
         matched_stubs = list(
-            self.db.records.find(
-                query, {"_id": 1, "lastUpdated": 1, "dateCreated": 1}
-            )
+            self.db.records.find(query, {"_id": 1, "lastUpdated": 1, "dateCreated": 1})
         )
         matched_stubs.sort(
             key=lambda doc: (
@@ -6922,9 +6917,7 @@ class DataManager:
         )
         matched_record_ids = [str(doc["_id"]) for doc in matched_stubs]
         total_count = len(matched_record_ids)
-        page_record_ids = matched_record_ids[
-            page * page_size : (page + 1) * page_size
-        ]
+        page_record_ids = matched_record_ids[page * page_size : (page + 1) * page_size]
         if page_record_ids:
             fetched_records, _ = self.fetchRecords(
                 filter_by={
@@ -6975,12 +6968,7 @@ class DataManager:
         job_id = None
         if page == 0:
             job_id = str(uuid.uuid4())
-            base_label = (
-                scope_rg_name
-                or scope_project_name
-                or team_name
-                or "records"
-            )
+            base_label = scope_rg_name or scope_project_name or team_name or "records"
             clean_output_name = (
                 f"{util.sanitize_filename_component(str(base_label))}_reviewed_records"
             )
