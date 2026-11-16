@@ -110,9 +110,7 @@ def migrate_schema_bindings(db, apply=False, resolutions=None, expected_state=No
                 created_by = (
                     creator.get("email")
                     if isinstance(creator, dict)
-                    else creator
-                    if isinstance(creator, str)
-                    else None
+                    else creator if isinstance(creator, str) else None
                 )
                 embedded = {
                     "_id": ObjectId(target),
