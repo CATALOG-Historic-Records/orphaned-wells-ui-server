@@ -2413,7 +2413,6 @@ def list_api_keys(
     user_info: dict = Depends(authenticate),
 ):
     """List active API keys for the authenticated user."""
-    require_authenticated_admin_route()
     try:
         return {"api_keys": data_manager.listApiKeys(user_info)}
     except PermissionError as e:
@@ -2428,7 +2427,6 @@ async def create_api_key(
     user_info: dict = Depends(authenticate),
 ):
     """Create a new API key for the authenticated user."""
-    require_authenticated_admin_route()
     try:
         body = await request.json()
     except Exception:
@@ -2453,7 +2451,6 @@ def revoke_api_key(
     user_info: dict = Depends(authenticate),
 ):
     """Revoke an active API key owned by the authenticated user."""
-    require_authenticated_admin_route()
     try:
         return data_manager.revokeApiKey(user_info, key_id)
     except PermissionError as e:
