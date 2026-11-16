@@ -6876,27 +6876,45 @@ class DataManager:
             "$or": self._buildReviewedTimeWindowOr(effective_since, effective_until),
         }
 
-        sort_spec = [
-            ("lastUpdated", ASCENDING),
-            ("dateCreated", ASCENDING),
-            ("_id", ASCENDING),
-        ]
-        matched_record_ids = None
-        if page == 0:
-            matched_record_ids = [
-                str(doc["_id"])
-                for doc in self.db.records.find(query, {"_id": 1}).sort(sort_spec)
-            ]
-            total_count = len(matched_record_ids)
-        else:
-            total_count = self.db.records.count_documents(query)
-
-        raw_records = list(
-            self.db.records.find(query)
-            .sort(sort_spec)
-            .skip(page * page_size)
-            .limit(page_size)
+        matched_stubs = list(
+            self.db.records.find(
+                query, {"_id": 1, "lastUpdated": 1, "dateCreated": 1}
+            )
         )
+        matched_stubs.sort(
+            key=lambda doc: (
+                doc.get("lastUpdated") is not None,
+                doc.get("lastUpdated") or 0,
+                doc.get("dateCreated") is not None,
+                doc.get("dateCreated") or 0,
+                str(doc["_id"]),
+            )
+        )
+        matched_record_ids = [str(doc["_id"]) for doc in matched_stubs]
+        total_count = len(matched_record_ids)
+        page_record_ids = matched_record_ids[
+            page * page_size : (page + 1) * page_size
+        ]
+        if page_record_ids:
+            docs_by_id = {
+                str(doc["_id"]): doc
+                for doc in self.db.records.find(
+                    {
+                        "_id": {
+                            "$in": [
+                                ObjectId(rid)
+                                for rid in page_record_ids
+                                if ObjectId.is_valid(rid)
+                            ]
+                        }
+                    }
+                )
+            }
+            raw_records = [
+                docs_by_id[rid] for rid in page_record_ids if rid in docs_by_id
+            ]
+        else:
+            raw_records = []
 
         record_attributes, fieldnames = self._formatRecordsForExport(
             raw_records,
