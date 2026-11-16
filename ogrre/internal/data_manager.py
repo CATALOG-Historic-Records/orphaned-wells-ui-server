@@ -6916,10 +6916,7 @@ class DataManager:
         )
         matched_stubs.sort(
             key=lambda doc: (
-                doc.get("lastUpdated") is not None,
-                doc.get("lastUpdated") or 0,
-                doc.get("dateCreated") is not None,
-                doc.get("dateCreated") or 0,
+                doc.get("lastUpdated") or doc.get("dateCreated") or 0,
                 str(doc["_id"]),
             )
         )

@@ -2503,6 +2503,8 @@ def get_reviewed_records(
             "X-Page-Size": str(result["page_size"]),
             "X-Has-More": str(result["has_more"]).lower(),
         }
+        if result.get("job_id"):
+            headers["X-Export-Job-Id"] = str(result["job_id"])
         return Response(
             content=result["csv"],
             media_type="text/csv",
