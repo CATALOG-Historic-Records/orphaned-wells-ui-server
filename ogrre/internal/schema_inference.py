@@ -6,7 +6,6 @@ from collections import Counter
 
 from ogrre.internal import schema_validation as rules
 
-
 MAX_RECORD_BYTES = 256 * 1024
 MAX_SAMPLE_BYTES = 8 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 1024 * 1024
@@ -199,9 +198,11 @@ def infer_fields(records, existing=()):
                 "data_type": data_type,
                 "database_data_type": database_type,
                 "page_order_sort": order,
-                "occurrence": "Optional multiple"
-                if observation["multiple"]
-                else "Optional single",
+                "occurrence": (
+                    "Optional multiple"
+                    if observation["multiple"]
+                    else "Optional single"
+                ),
             }
         )
         if messages:

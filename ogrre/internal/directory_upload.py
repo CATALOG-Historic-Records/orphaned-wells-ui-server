@@ -6,13 +6,16 @@ import re
 import time
 from pathlib import PurePosixPath
 
-from google.cloud.documentai_toolbox import constants
-
 
 def processing_record_id(job_id, source_uri):
     """Keep record identity stable across finalization, worker starts, and retries."""
     return hashlib.sha256(f"{job_id}:{source_uri}".encode()).hexdigest()[:24]
 
+
+# Google Cloud Document AI batch content limits:
+# https://cloud.google.com/document-ai/quotas#content_limits
+BATCH_MAX_FILES = 1000
+BATCH_MAX_FILE_SIZE = 1073741824  # 1 GiB in bytes
 
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -28,8 +31,8 @@ SESSION_SECONDS = 7 * 24 * 60 * 60
 
 def limits():
     return {
-        "max_files": 1000,
-        "max_file_bytes": constants.BATCH_MAX_FILE_SIZE,
+        "max_files": BATCH_MAX_FILES,
+        "max_file_bytes": BATCH_MAX_FILE_SIZE,
         "max_total_bytes": int(
             os.getenv("DIRECTORY_UPLOAD_MAX_BYTES", str(20 * 1024**3))
         ),

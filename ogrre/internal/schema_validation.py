@@ -3,7 +3,6 @@
 import math
 import copy
 
-
 DESTRUCTIVE_PERMISSION = "manage_schema_destructive"
 SAFE_FIELD_UPDATES = {
     "alias",

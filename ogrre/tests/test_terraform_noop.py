@@ -9,7 +9,6 @@ import subprocess
 import pytest
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "terraform_ci_noop", ROOT / "deployment/ci/terraform_ci.py"

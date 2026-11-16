@@ -11,18 +11,30 @@ from typing import NamedTuple
 
 import fitz
 from google.cloud import documentai
-from google.cloud.documentai_toolbox import constants as documentai_toolbox_constants
 from PIL import Image
 
 from ogrre.internal import document_ai_api
 from ogrre.internal import storage_api
 from ogrre.internal import util
 from ogrre.internal.directory_upload import (
+    BATCH_MAX_FILES,
+    BATCH_MAX_FILE_SIZE,
     processing_record_id as _processing_record_id,
 )
 from ogrre.internal.whitespace_detector import detect_whitespace_from_bytes
 
 _log = logging.getLogger(__name__)
+
+# https://cloud.google.com/document-ai/docs/file-types
+VALID_MIME_TYPES = {
+    "application/pdf",
+    "image/bmp",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+}
 
 BATCH_SIZE = 1000
 MAX_CONCURRENT_BATCH_LROS = 5
@@ -980,10 +992,10 @@ def _get_gcs_documents(input_config):
 
 
 def _create_gcs_document_batches(bucket_name, prefix, batch_size):
-    if batch_size > documentai_toolbox_constants.BATCH_MAX_FILES:
+    if batch_size > BATCH_MAX_FILES:
         raise ValueError(
             "Batch size must be less than "
-            f"{documentai_toolbox_constants.BATCH_MAX_FILES}. "
+            f"{BATCH_MAX_FILES}. "
             f"You provided {batch_size}."
         )
 
@@ -996,7 +1008,7 @@ def _create_gcs_document_batches(bucket_name, prefix, batch_size):
             continue
 
         content_type = blob.content_type or mimetypes.guess_type(blob.name)[0]
-        if content_type not in documentai_toolbox_constants.VALID_MIME_TYPES:
+        if content_type not in VALID_MIME_TYPES:
             _log.info(
                 "skipping batch file with invalid MIME type: %s (%s)",
                 blob.name,
@@ -1004,7 +1016,7 @@ def _create_gcs_document_batches(bucket_name, prefix, batch_size):
             )
             continue
 
-        if int(blob.size or 0) > documentai_toolbox_constants.BATCH_MAX_FILE_SIZE:
+        if int(blob.size or 0) > BATCH_MAX_FILE_SIZE:
             _log.info(
                 "skipping batch file over size limit: %s (%s bytes)",
                 blob.name,

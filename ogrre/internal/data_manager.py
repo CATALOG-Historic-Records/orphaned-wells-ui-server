@@ -8,6 +8,9 @@ import re
 import uuid
 import copy
 import hashlib
+import secrets
+import tempfile
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from contextvars import ContextVar
 from importlib.metadata import version, PackageNotFoundError
@@ -24,6 +27,7 @@ from pymongo.errors import DuplicateKeyError, ExecutionTimeout
 import ogrre_data_cleaning.processor_schemas.processor_api as processor_api
 from ogrre.internal import storage_api
 from ogrre.internal import directory_upload
+from ogrre.internal import export_job_history
 from ogrre.internal import processing_job_history
 from ogrre.internal import schema_validation as schema_rules
 from ogrre.internal import schema_import
@@ -458,9 +462,9 @@ class DataManager:
                 ),
                 schema_name=(schema or {}).get("displayName")
                 or (schema or {}).get("name"),
-                active_schema_id=str(schema["_id"])
-                if schema and "_id" in schema
-                else None,
+                active_schema_id=(
+                    str(schema["_id"]) if schema and "_id" in schema else None
+                ),
                 schema_error=None,
             )
         except schema_rules.SchemaLookupError as error:
@@ -1148,9 +1152,11 @@ class DataManager:
                                 "user": user_info.get("email"),
                                 "timestamp": time.time(),
                                 "schema_import_id": import_id,
-                                "record_group_id": str(operation["before"]["_id"])
-                                if operation["kind"] == "binding"
-                                else operation.get("group_id"),
+                                "record_group_id": (
+                                    str(operation["before"]["_id"])
+                                    if operation["kind"] == "binding"
+                                    else operation.get("group_id")
+                                ),
                                 "source": job["source"],
                                 "step": index,
                                 "previous_state": operation.get("before"),
@@ -1604,9 +1610,11 @@ class DataManager:
                 {"_id": f"schema-generation:{preview['preview_id']}"},
                 {
                     "$setOnInsert": {
-                        "action": "generateSchema"
-                        if preview["mode"] == "generate"
-                        else "extendSchema",
+                        "action": (
+                            "generateSchema"
+                            if preview["mode"] == "generate"
+                            else "extendSchema"
+                        ),
                         "user": user_info.get("email"),
                         "timestamp": time.time(),
                         "record_group_id": rg_id,
@@ -2424,6 +2432,30 @@ class DataManager:
         record_count = counts[0]["count"] if counts else 0
         return records, record_count
 
+    def _getUserTeamName(self, user_info):
+        if not isinstance(user_info, dict):
+            return None
+        email = user_info.get("email")
+        anonymous_team = user_info.get("default_team")
+        if user_info.get("anonymous", False) and not REQUIRE_AUTH:
+            return anonymous_team or DEFAULT_UNAUTHENTICATED_TEAM["name"]
+        team_name = self.getDefaultTeamForUser(email, anonymous_team)
+        return team_name or anonymous_team
+
+    def _constrainRecordGroupFilter(self, filter_by, allowed_rg_ids):
+        filter_by = dict(filter_by or {})
+        allowed = set(allowed_rg_ids)
+        current = filter_by.get("record_group_id")
+        if current is None:
+            filter_by["record_group_id"] = {"$in": list(allowed_rg_ids)}
+        elif isinstance(current, dict) and "$in" in current:
+            filter_by["record_group_id"] = {
+                "$in": [rg_id for rg_id in current["$in"] if rg_id in allowed]
+            }
+        elif current not in allowed:
+            filter_by["record_group_id"] = {"$in": []}
+        return filter_by
+
     def fetchRecordsByTeam(
         self,
         user,
@@ -2435,9 +2467,9 @@ class DataManager:
         exclude_attribute_fields=None,
         forDownload=False,
     ):
-        team_info = self.fetchTeamInfo(user["email"], user.get("default_team"))
-        rg_list = self.getTeamRecordGroupsList(team_info["name"])
-        filter_by["record_group_id"] = {"$in": rg_list}
+        team_name = self._getUserTeamName(user)
+        rg_list = self.getTeamRecordGroupsList(team_name) if team_name else []
+        filter_by = self._constrainRecordGroupFilter(filter_by, rg_list)
         return self.fetchRecords(
             sort_by,
             filter_by,
@@ -2485,10 +2517,8 @@ class DataManager:
         exclude_attribute_fields=None,
         forDownload=False,
     ):
-        ## if we arent filtering by record_group_id, add filter to look for ALL record_ids in given project
-        if "record_group_id" not in filter_by:
-            record_group_ids = self.getProjectRecordGroupsList(project_id)
-            filter_by["record_group_id"] = {"$in": record_group_ids}
+        record_group_ids = self.getProjectRecordGroupsList(project_id)
+        filter_by = self._constrainRecordGroupFilter(filter_by, record_group_ids)
         return self.fetchRecords(
             sort_by,
             filter_by,
@@ -3191,9 +3221,11 @@ class DataManager:
         if not isinstance(fields, list):
             raise schema_rules.SchemaError("Import schema fields must be an array.")
         fields = [
-            dict(field, name=field.get("name") or field.get("key"))
-            if isinstance(field, dict)
-            else field
+            (
+                dict(field, name=field.get("name") or field.get("key"))
+                if isinstance(field, dict)
+                else field
+            )
             for field in fields
         ]
         return schema_rules.validate_fields(
@@ -3452,12 +3484,14 @@ class DataManager:
             "existing_duplicate_count": len(existing_duplicates),
             "internal_duplicates": internal_duplicates,
             "internal_duplicate_count": len(internal_duplicates),
-            "skipped_duplicates": [
-                duplicate["filename"]
-                for duplicate in existing_duplicates + internal_duplicates
-            ]
-            if prevent_duplicates
-            else [],
+            "skipped_duplicates": (
+                [
+                    duplicate["filename"]
+                    for duplicate in existing_duplicates + internal_duplicates
+                ]
+                if prevent_duplicates
+                else []
+            ),
             "skipped_duplicate_count": skipped_duplicate_count,
             "duplicate_filename_bases_in_file": duplicate_filename_bases,
             "duplicate_filename_base_count_in_file": len(duplicate_filename_bases),
@@ -3960,9 +3994,11 @@ class DataManager:
                 },
             )
             self.recordHistory(
-                "prepareProcessingRecord"
-                if existing.get("status") == "queued"
-                else "retryProcessingRecord",
+                (
+                    "prepareProcessingRecord"
+                    if existing.get("status") == "queued"
+                    else "retryProcessingRecord"
+                ),
                 user_info.get("email"),
                 record_id=record_id,
                 notes={"job_id": record["processing_job_id"]},
@@ -4253,7 +4289,7 @@ class DataManager:
             .limit(10)
         ]
 
-    def getProcessingHistoryProjects(self, user_info):
+    def getJobScopeProjects(self, user_info):
         """Return only projects/groups visible through the user's current team."""
         projects = self.fetchProjects(user_info)
         group_ids = {
@@ -4297,7 +4333,7 @@ class DataManager:
             key=lambda project: (project["name"].casefold(), project["id"]),
         )
 
-    def fetchAllProcessingJobHistory(self, user_info, body):
+    def _resolveJobHistoryScope(self, user_info, body, resource_label="uploads"):
         if not isinstance(body, dict):
             raise ValueError("Expected a history query object")
         for key in ("project_id", "record_group_id"):
@@ -4305,30 +4341,67 @@ class DataManager:
                 not isinstance(body[key], str) or not ObjectId.is_valid(body[key])
             ):
                 raise ValueError(f"Invalid {key}")
-        projects = self.getProcessingHistoryProjects(user_info)
-        project_id = body.get("project_id")
-        if project_id is not None:
-            projects = [project for project in projects if project["id"] == project_id]
-            if not projects:
-                raise PermissionError(
-                    "You are not authorized to view this project's uploads"
-                )
-        groups = {
+
+        projects = self.getJobScopeProjects(user_info)
+        project_map = {project["id"]: project["name"] for project in projects}
+        group_map = {
             group["id"]: {
                 "project_id": project["id"],
                 "project_name": project["name"],
                 "record_group_name": group["name"],
             }
             for project in projects
-            for group in project["record_groups"]
+            for group in project.get("record_groups", [])
         }
+
+        project_id = body.get("project_id")
+        if project_id is not None and project_id not in project_map:
+            raise PermissionError(
+                f"You are not authorized to view this project's {resource_label}"
+            )
+
         group_id = body.get("record_group_id")
         if group_id is not None:
-            if group_id not in groups:
+            if group_id not in group_map or (
+                project_id is not None
+                and group_map[group_id]["project_id"] != project_id
+            ):
                 raise PermissionError(
                     "This record group is not available in the selected projects"
                 )
-            groups = {group_id: groups[group_id]}
+
+        return project_map, group_map, project_id, group_id
+
+    def _paginateJobCollection(
+        self, collection, query, page_number, page_size, projection
+    ):
+        return [
+            self._serializeJob(job)
+            for job in collection.aggregate(
+                [
+                    {"$match": query},
+                    {"$sort": {"created_at": -1, "_id": -1}},
+                    {"$skip": page_number * page_size},
+                    {"$limit": page_size},
+                    {"$project": projection},
+                ]
+            )
+        ]
+
+    def fetchAllProcessingJobHistory(self, user_info, body):
+        _, group_map, project_id, group_id = self._resolveJobHistoryScope(
+            user_info, body, resource_label="uploads"
+        )
+        if group_id is not None:
+            groups = {group_id: group_map[group_id]}
+        elif project_id is not None:
+            groups = {
+                gid: info
+                for gid, info in group_map.items()
+                if info["project_id"] == project_id
+            }
+        else:
+            groups = group_map
         # Apply the authorized group set after parsing client filters, even when empty.
         result = self._fetchProcessingJobHistory({"$in": list(groups)}, body)
         for job in result["active_jobs"] + result["jobs"]:
@@ -4346,25 +4419,24 @@ class DataManager:
             "record_group_id": group_scope,
             "status": {"$in": processing_job_history.ACTIVE_STATUSES},
         }
-
-        def page(query, number):
-            return [
-                self._serializeProcessingJob(job)
-                for job in self.db.processing_jobs.aggregate(
-                    [
-                        {"$match": query},
-                        {"$sort": {"created_at": -1, "_id": -1}},
-                        {"$skip": number * pagination["page_size"]},
-                        {"$limit": pagination["page_size"]},
-                        {"$project": processing_job_history.summary_projection()},
-                    ]
-                )
-            ]
+        projection = processing_job_history.summary_projection()
 
         return {
-            "active_jobs": page(active_filter, pagination["active_page"]),
+            "active_jobs": self._paginateJobCollection(
+                self.db.processing_jobs,
+                active_filter,
+                pagination["active_page"],
+                pagination["page_size"],
+                projection,
+            ),
             "active_count": self.db.processing_jobs.count_documents(active_filter),
-            "jobs": page(history_filter, pagination["page"]),
+            "jobs": self._paginateJobCollection(
+                self.db.processing_jobs,
+                history_filter,
+                pagination["page"],
+                pagination["page_size"],
+                projection,
+            ),
             "count": self.db.processing_jobs.count_documents(history_filter),
         }
 
@@ -4435,9 +4507,11 @@ class DataManager:
                 files.append(
                     {
                         "source_uri": uri,
-                        "name": item.get("relative_path", item["name"])
-                        if isinstance(item, dict)
-                        else uri.rsplit("/", 1)[-1],
+                        "name": (
+                            item.get("relative_path", item["name"])
+                            if isinstance(item, dict)
+                            else uri.rsplit("/", 1)[-1]
+                        ),
                         "record_id": directory_upload.processing_record_id(job_id, uri),
                     }
                 )
@@ -4475,25 +4549,25 @@ class DataManager:
             return "The upload has expired. Contact an administrator to recover failed records."
         return None
 
-    def getActiveProcessingJobs(self):
+    def _getActiveJobs(self, collection, projection=None):
         return [
-            self._serializeProcessingJob(job)
+            self._serializeJob(job)
             for statuses in (["dispatched", "running"], ["queued"])
-            for job in self.db.processing_jobs.find(
+            for job in collection.find(
                 {"status": {"$in": statuses}},
-                {"input.documents": 0},
+                projection,
             )
             .sort("created_at", ASCENDING)
             .limit(100)
         ]
 
-    def reserveProcessingCapacity(self, job_id, maximum):
+    def _reserveJobCapacity(self, pool_id, job_id, maximum):
         if maximum <= 0:
             return True
         try:
             self.db.processing_capacity.update_one(
                 {
-                    "_id": "batch_document",
+                    "_id": pool_id,
                     "$or": [
                         {"jobs": job_id},
                         {f"jobs.{maximum - 1}": {"$exists": False}},
@@ -4506,10 +4580,21 @@ class DataManager:
         except DuplicateKeyError:
             return False
 
-    def releaseProcessingCapacity(self, job_id):
+    def _releaseJobCapacity(self, pool_id, job_id):
         self.db.processing_capacity.update_one(
-            {"_id": "batch_document"}, {"$pull": {"jobs": job_id}}
+            {"_id": pool_id}, {"$pull": {"jobs": job_id}}
         )
+
+    def getActiveProcessingJobs(self):
+        return self._getActiveJobs(
+            self.db.processing_jobs, projection={"input.documents": 0}
+        )
+
+    def reserveProcessingCapacity(self, job_id, maximum):
+        return self._reserveJobCapacity("batch_document", job_id, maximum)
+
+    def releaseProcessingCapacity(self, job_id):
+        self._releaseJobCapacity("batch_document", job_id)
 
     def retryProcessingJob(self, job_id):
         job = self.db.processing_jobs.find_one_and_update(
@@ -4584,13 +4669,16 @@ class DataManager:
             is not None
         )
 
-    def _serializeProcessingJob(self, job):
+    def _serializeJob(self, job):
         if job is None:
             return None
         job = dict(job)
         job["job_id"] = str(job.get("job_id") or job.get("_id"))
         job.pop("_id", None)
         return job
+
+    _serializeProcessingJob = _serializeJob
+    _serializeExportJob = _serializeJob
 
     def getProcessingJob(self, job_id):
         return self._serializeProcessingJob(
@@ -4732,6 +4820,674 @@ class DataManager:
                 notes={"job_id": job["job_id"], "status": status},
             )
         return job or self.getProcessingJob(job_id)
+
+    ## export job functions
+    def getExportJob(self, job_id):
+        self.expireExportJobs()
+        return self._serializeExportJob(
+            self.db.export_jobs.find_one({"_id": str(job_id)})
+        )
+
+    def validateExportScope(self, location, target_id, user_info):
+        projects = self.getJobScopeProjects(user_info)
+        team_name = self._getUserTeamName(user_info)
+        target_str = str(target_id or "")
+
+        if location in ("project", "documentType"):
+            if not ObjectId.is_valid(target_str):
+                raise ValueError("Invalid project_id")
+            for project in projects:
+                if project["id"] == target_str:
+                    return {
+                        "location": location,
+                        "target_id": target_str,
+                        "team": team_name,
+                        "project_id": project["id"],
+                        "project_name": project["name"],
+                        "record_group_id": None,
+                        "record_group_name": None,
+                    }
+            raise PermissionError("You are not authorized to export from this project")
+
+        if location == "record_group":
+            if not ObjectId.is_valid(target_str):
+                raise ValueError("Invalid record_group_id")
+            for project in projects:
+                for group in project.get("record_groups", []):
+                    if group["id"] == target_str:
+                        return {
+                            "location": "record_group",
+                            "target_id": target_str,
+                            "team": team_name,
+                            "project_id": project["id"],
+                            "project_name": project["name"],
+                            "record_group_id": group["id"],
+                            "record_group_name": group["name"],
+                        }
+            raise PermissionError(
+                "You are not authorized to export from this record group"
+            )
+
+        if location == "team":
+            if not team_name and not projects:
+                raise PermissionError("You are not authorized to export team records")
+            return {
+                "location": "team",
+                "target_id": target_str or team_name or "team",
+                "team": team_name,
+                "project_id": None,
+                "project_name": (
+                    f"All Records ({team_name})" if team_name else "All Records"
+                ),
+                "record_group_id": None,
+                "record_group_name": None,
+            }
+
+        raise ValueError(f"Unsupported export location: {location}")
+
+    def createExportJob(
+        self,
+        location,
+        target_id,
+        user_info,
+        options,
+        output_name=None,
+        request_origin="",
+        job_id=None,
+    ):
+        if not isinstance(options, dict):
+            raise ValueError("Expected an export options object")
+
+        scope = self.validateExportScope(location, target_id, user_info)
+        export_csv = bool(options.get("export_csv", False))
+        export_json = bool(options.get("export_json", False))
+        export_images = bool(options.get("export_images", False))
+        export_embedded_pdfs = bool(options.get("export_embedded_pdfs", False))
+        if not any((export_csv, export_json, export_images, export_embedded_pdfs)):
+            raise ValueError("Select at least one export type")
+
+        filter_by = options.get("filter") or {}
+        if not isinstance(filter_by, dict):
+            raise ValueError("filter must be an object")
+
+        raw_sort = options.get("sort")
+        if (
+            isinstance(raw_sort, (list, tuple))
+            and len(raw_sort) == 2
+            and isinstance(raw_sort[0], str)
+            and raw_sort[0]
+            and raw_sort[1] in (-1, 1)
+        ):
+            sort_by = [raw_sort[0], int(raw_sort[1])]
+        else:
+            sort_by = ["dateCreated", 1]
+
+        raw_columns = options.get("columns") or []
+        if not isinstance(raw_columns, list) or any(
+            not isinstance(col, str) for col in raw_columns
+        ):
+            raise ValueError("columns must be a list of strings")
+        columns = list(raw_columns)
+
+        raw_doc_types = options.get("document_types")
+        if raw_doc_types is not None:
+            if not isinstance(raw_doc_types, list) or any(
+                not isinstance(dt, str) for dt in raw_doc_types
+            ):
+                raise ValueError("document_types must be a list of strings")
+            document_types = list(raw_doc_types)
+        else:
+            document_types = None
+
+        reconstruct_original_doc = bool(options.get("reconstruct_original_doc", False))
+        if reconstruct_original_doc:
+            user_collaborator = (self.getCollaboratorForUser(user_info) or "").lower()
+            if user_collaborator != "rrc":
+                reconstruct_original_doc = False
+        export_raw_values = bool(options.get("export_raw_values", False))
+        since_val = self._parseTimestampParam(options.get("since"), "since")
+        until_val = self._parseTimestampParam(options.get("until"), "until")
+        raw_record_ids = options.get("record_ids")
+        if raw_record_ids is not None:
+            if not isinstance(raw_record_ids, list) or any(
+                not isinstance(rid, str) for rid in raw_record_ids
+            ):
+                raise ValueError("record_ids must be a list of strings")
+            record_ids = list(raw_record_ids)
+        else:
+            record_ids = None
+
+        raw_output_name = (
+            output_name if output_name is not None else options.get("output_name")
+        )
+        if isinstance(raw_output_name, str) and raw_output_name.strip():
+            clean_output_name = os.path.basename(raw_output_name.strip())
+            if clean_output_name.lower().endswith(".zip"):
+                clean_output_name = clean_output_name[:-4]
+            clean_output_name = clean_output_name.strip() or "export"
+        else:
+            default_base = (
+                scope["record_group_name"]
+                or scope["project_name"]
+                or scope["team"]
+                or "export"
+            )
+            clean_output_name = f"{os.path.basename(str(default_base).strip())}_export"
+
+        now = time.time()
+        job_id = str(job_id or uuid.uuid4())
+        job = {
+            "_id": job_id,
+            "job_id": job_id,
+            "job_type": "export",
+            "status": "queued",
+            "stage": "queued",
+            "status_text": "Queued for export",
+            "attempt": 0,
+            "location": scope["location"],
+            "target_id": scope["target_id"],
+            "team": scope["team"],
+            "project_id": scope["project_id"],
+            "project_name": scope["project_name"],
+            "record_group_id": scope["record_group_id"],
+            "record_group_name": scope["record_group_name"],
+            "output_name": clean_output_name,
+            "request_origin": str(request_origin or ""),
+            "request_user": {
+                "email": user_info.get("email"),
+                "name": user_info.get("name"),
+                "hd": user_info.get("hd"),
+                "default_team": scope["team"],
+                "anonymous": bool(user_info.get("anonymous", False)),
+            },
+            "options": {
+                "export_csv": export_csv,
+                "export_json": export_json,
+                "export_images": export_images,
+                "export_embedded_pdfs": export_embedded_pdfs,
+                "columns": columns,
+                "filter": filter_by,
+                "sort": sort_by,
+                "document_types": document_types,
+                "reconstruct_original_doc": reconstruct_original_doc,
+                "export_raw_values": export_raw_values,
+                "since": since_val,
+                "until": until_val,
+                "record_ids": record_ids,
+            },
+            "progress": {
+                "current": 0,
+                "total": 0,
+                "percent": 0,
+            },
+            "artifact": None,
+            "worker": {},
+            "created_at": now,
+            "started_at": None,
+            "last_progress_at": None,
+            "completed_at": None,
+            "expires_at": None,
+            "updated_at": now,
+            "notification_read_at": None,
+            "error": None,
+        }
+        self.db.export_jobs.insert_one(job)
+        self.recordHistory(
+            "createExportJob",
+            user_info.get("email"),
+            project_id=scope["project_id"],
+            rg_id=scope["record_group_id"],
+            notes={"job_id": job_id, "location": scope["location"]},
+        )
+        return self._serializeExportJob(job)
+
+    def fetchExportRecordsForJob(self, job):
+        user_info = job.get("request_user") or {}
+        location = job.get("location")
+        target_id = job.get("target_id")
+        options = job.get("options") or {}
+
+        self.validateExportScope(location, target_id, user_info)
+
+        sort_by = options.get("sort") or ["dateCreated", 1]
+        filter_by = copy.deepcopy(options.get("filter") or {})
+        document_types = options.get("document_types")
+        reconstruct = bool(options.get("reconstruct_original_doc", False))
+        export_raw_values = bool(options.get("export_raw_values", False))
+
+        if options.get("record_ids") is not None:
+            valid_object_ids = [
+                ObjectId(rid)
+                for rid in options["record_ids"]
+                if isinstance(rid, str) and ObjectId.is_valid(rid)
+            ]
+            filter_by["_id"] = {"$in": valid_object_ids}
+        elif options.get("since") is not None or options.get("until") is not None:
+            filter_by["review_status"] = "reviewed"
+            window_or = self._buildReviewedTimeWindowOr(
+                options.get("since"), options.get("until")
+            )
+            if window_or and "$or" not in filter_by:
+                filter_by["$or"] = window_or
+
+        json_fields_to_include = self._getExportFieldsToInclude(
+            export_raw_values=export_raw_values
+        )
+
+        output_name = job.get("output_name") or str(target_id)
+
+        if location == "documentType" or (
+            location == "project" and document_types is not None
+        ):
+            if not document_types:
+                records = []
+            else:
+                records, _ = self.fetchRecordsByProjectAndDocumentTypes(
+                    user_info,
+                    target_id,
+                    document_types,
+                    page=None,
+                    records_per_page=None,
+                    sort_by=sort_by,
+                    filter_by=filter_by,
+                    include_attribute_fields=json_fields_to_include,
+                    forDownload=True,
+                )
+            if reconstruct:
+                records = self.reconstructRecordsByOriginalFilename(records)
+            sets_of_records = [(output_name, records)]
+        elif location == "project":
+            records, _ = self.fetchRecordsByProject(
+                user_info,
+                target_id,
+                page=None,
+                records_per_page=None,
+                sort_by=sort_by,
+                filter_by=filter_by,
+                include_attribute_fields=json_fields_to_include,
+                forDownload=True,
+            )
+            if reconstruct:
+                records = self.reconstructRecordsByOriginalFilename(records)
+                sets_of_records = [(output_name, records)]
+            else:
+                organized = self.organizeRecordsByDocumentType(records)
+                project_name = util.sanitize_filename_component(output_name)
+                sets_of_records = [
+                    (
+                        (
+                            f"{project_name}_{set_identifier}"
+                            if project_name
+                            else set_identifier
+                        ),
+                        set_records,
+                    )
+                    for set_identifier, set_records in organized.items()
+                ] or [(output_name, [])]
+        elif location == "record_group":
+            records, _ = self.fetchRecordsByRecordGroup(
+                user_info,
+                target_id,
+                page=None,
+                records_per_page=None,
+                sort_by=sort_by,
+                filter_by=filter_by,
+                include_attribute_fields=json_fields_to_include,
+                forDownload=True,
+            )
+            if reconstruct:
+                records = self.reconstructRecordsByOriginalFilename(records)
+            sets_of_records = [(output_name, records)]
+        elif location == "team":
+            if document_types is not None:
+                team_name = self._getUserTeamName(user_info)
+                team_rg_ids = (
+                    self.getTeamRecordGroupsList(team_name) if team_name else []
+                )
+                matching_rg_ids = self._filterRecordGroupIdsByDocumentTypes(
+                    team_rg_ids, document_types
+                )
+                filter_by = self._constrainRecordGroupFilter(filter_by, matching_rg_ids)
+            records, _ = self.fetchRecordsByTeam(
+                user_info,
+                page=None,
+                records_per_page=None,
+                sort_by=sort_by,
+                filter_by=filter_by,
+                include_attribute_fields=json_fields_to_include,
+                forDownload=True,
+            )
+            if reconstruct:
+                records = self.reconstructRecordsByOriginalFilename(records)
+                sets_of_records = [(output_name, records)]
+            else:
+                organized = self.organizeRecordsByDocumentType(records)
+                sets_of_records = list(organized.items()) or [(output_name, [])]
+        else:
+            raise ValueError(f"Unsupported export location: {location}")
+
+        return records, sets_of_records
+
+    def reserveExportCapacity(self, job_id, maximum):
+        return self._reserveJobCapacity("export", job_id, maximum)
+
+    def releaseExportCapacity(self, job_id):
+        self._releaseJobCapacity("export", job_id)
+
+    def getActiveExportJobs(self):
+        return self._getActiveJobs(self.db.export_jobs)
+
+    def beginExportJobDispatch(self, job_id, fields, attempt=0):
+        now = time.time()
+        result = self.db.export_jobs.update_one(
+            {
+                "_id": str(job_id),
+                "status": "queued",
+                "attempt": {"$in": [0, None]} if attempt == 0 else attempt,
+            },
+            {
+                "$set": {
+                    **fields,
+                    "status": "dispatched",
+                    "stage": "dispatched",
+                    "status_text": "Starting export worker",
+                    "updated_at": now,
+                }
+            },
+        )
+        return result.modified_count == 1
+
+    def claimExportJob(self, job_id, attempt=0):
+        now = time.time()
+        job = self.db.export_jobs.find_one_and_update(
+            {
+                "_id": str(job_id),
+                "status": {"$in": ["queued", "dispatched"]},
+                "attempt": {"$in": [0, None]} if attempt == 0 else attempt,
+            },
+            {
+                "$set": {
+                    "status": "running",
+                    "started_at": now,
+                    "last_progress_at": now,
+                    "stage": "fetching_records",
+                    "status_text": "Fetching records for export",
+                    "updated_at": now,
+                    "error": None,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._serializeExportJob(job)
+
+    def updateExportJobProgress(
+        self, job_id, stage, status_text=None, current=None, total=None
+    ):
+        now = time.time()
+        fields = {
+            "stage": stage,
+            "last_progress_at": now,
+            "updated_at": now,
+        }
+        if status_text is not None:
+            fields["status_text"] = status_text
+        if current is not None and total is not None:
+            safe_total = max(int(total), 0)
+            safe_current = min(max(int(current), 0), safe_total) if safe_total else 0
+            percent = (
+                int(round((safe_current / safe_total) * 100)) if safe_total > 0 else 0
+            )
+            fields["progress"] = {
+                "current": safe_current,
+                "total": safe_total,
+                "percent": percent,
+            }
+        self.db.export_jobs.update_one(
+            {"_id": str(job_id), "status": "running"},
+            {"$set": fields},
+        )
+
+    def completeExportJob(
+        self,
+        job_id,
+        status,
+        artifact=None,
+        error=None,
+        ttl_seconds=3600,
+        attempt=None,
+    ):
+        if status not in ("completed", "error"):
+            raise ValueError(f"Unsupported export job terminal status: {status}")
+        query = {
+            "_id": str(job_id),
+            "status": {"$in": ["queued", "dispatched", "running"]},
+        }
+        if attempt is not None:
+            query["attempt"] = {"$in": [0, None]} if attempt == 0 else attempt
+
+        now = time.time()
+        fields = {
+            "status": status,
+            "stage": "completed" if status == "completed" else "error",
+            "status_text": (
+                "Export ready for download"
+                if status == "completed"
+                else "Export failed"
+            ),
+            "completed_at": now,
+            "updated_at": now,
+            "notification_read_at": None,
+            "error": str(error)[:2000] if error else None,
+        }
+        if status == "completed" and artifact is not None:
+            fields["artifact"] = artifact
+            fields["expires_at"] = now + max(int(ttl_seconds or 3600), 60)
+            record_count = int(artifact.get("record_count") or 0)
+            fields["progress"] = {
+                "current": record_count,
+                "total": record_count,
+                "percent": 100,
+            }
+
+        job = self._serializeExportJob(
+            self.db.export_jobs.find_one_and_update(
+                query,
+                {"$set": fields},
+                return_document=ReturnDocument.AFTER,
+            )
+        )
+        if job is not None:
+            self.releaseExportCapacity(f"{job_id}:{job.get('attempt', 0)}")
+            self.recordHistory(
+                "completeExportJob",
+                job.get("request_user", {}).get("email"),
+                project_id=job.get("project_id"),
+                rg_id=job.get("record_group_id"),
+                notes={"job_id": job["job_id"], "status": status},
+            )
+        return job or self.getExportJob(job_id)
+
+    def expireExportJobs(self, now=None):
+        now = time.time() if now is None else float(now)
+        expired_jobs = list(
+            self.db.export_jobs.find(
+                {
+                    "status": "completed",
+                    "expires_at": {"$ne": None, "$lte": now},
+                }
+            )
+        )
+        for job in expired_jobs:
+            artifact = job.get("artifact") or {}
+            storage_key = artifact.get("storage_key")
+            if storage_key:
+                try:
+                    storage_api.delete_export_artifact(storage_key)
+                except Exception:
+                    _log.exception(
+                        f"Failed to delete expired export artifact {storage_key}"
+                    )
+            self.db.export_jobs.update_one(
+                {"_id": job["_id"], "status": "completed"},
+                {
+                    "$set": {
+                        "status": "expired",
+                        "stage": "expired",
+                        "status_text": "Export file expired after 1 hour",
+                        "updated_at": now,
+                    }
+                },
+            )
+        return len(expired_jobs)
+
+    def canUserAccessExportJob(self, job, user_info):
+        if job is None:
+            return False
+        try:
+            self.validateExportScope(
+                job.get("location"), job.get("target_id"), user_info
+            )
+            return True
+        except (PermissionError, ValueError):
+            return False
+
+    def fetchExportJobHistory(self, user_info, body):
+        self.expireExportJobs()
+        project_map, group_map, project_id, group_id = self._resolveJobHistoryScope(
+            user_info, body, resource_label="exports"
+        )
+        team_name = self._getUserTeamName(user_info)
+
+        (
+            pagination,
+            history_filter,
+            view_scope,
+        ) = export_job_history.export_history_query(body)
+
+        scope_clauses = []
+        if group_id is not None:
+            scope_clauses.append({"record_group_id": group_id})
+        elif project_id is not None:
+            project_group_ids = [
+                gid
+                for gid, info in group_map.items()
+                if info["project_id"] == project_id
+            ]
+            scope_clauses.append(
+                {
+                    "$or": [
+                        {"project_id": project_id},
+                        {"record_group_id": {"$in": project_group_ids}},
+                    ]
+                }
+            )
+        else:
+            or_branches = [
+                {"project_id": {"$in": list(project_map)}},
+                {"record_group_id": {"$in": list(group_map)}},
+            ]
+            if team_name:
+                or_branches.append({"location": "team", "team": team_name})
+            scope_clauses.append({"$or": or_branches})
+
+        if view_scope == "mine":
+            scope_clauses.append({"request_user.email": user_info.get("email")})
+
+        def combine_filters(base_filter):
+            clauses = list(scope_clauses)
+            if base_filter:
+                clauses.append(base_filter)
+            if len(clauses) == 1:
+                return clauses[0]
+            return {"$and": clauses}
+
+        scoped_history_filter = combine_filters(history_filter)
+        active_base_filter = {"status": {"$in": export_job_history.ACTIVE_STATUSES}}
+        if "$or" in history_filter:
+            active_base_filter["$or"] = history_filter["$or"]
+        scoped_active_filter = combine_filters(active_base_filter)
+        projection = export_job_history.summary_projection()
+
+        result = {
+            "active_jobs": self._paginateJobCollection(
+                self.db.export_jobs,
+                scoped_active_filter,
+                pagination["active_page"],
+                pagination["page_size"],
+                projection,
+            ),
+            "active_count": self.db.export_jobs.count_documents(scoped_active_filter),
+            "jobs": self._paginateJobCollection(
+                self.db.export_jobs,
+                scoped_history_filter,
+                pagination["page"],
+                pagination["page_size"],
+                projection,
+            ),
+            "count": self.db.export_jobs.count_documents(scoped_history_filter),
+        }
+        for job in result["active_jobs"] + result["jobs"]:
+            rg_id = job.get("record_group_id")
+            proj_id = job.get("project_id")
+            if rg_id and rg_id in group_map:
+                job.update(group_map[rg_id])
+            elif proj_id and proj_id in project_map:
+                job["project_name"] = project_map[proj_id]
+        return result
+
+    def getUserExportNotifications(self, user_info, limit=8):
+        self.expireExportJobs()
+        email = user_info.get("email")
+        if not email:
+            return {"unread_count": 0, "active_count": 0, "notifications": []}
+        team_name = self._getUserTeamName(user_info)
+        base_query = {"request_user.email": email}
+        if team_name:
+            base_query["team"] = team_name
+
+        active_count = self.db.export_jobs.count_documents(
+            {
+                **base_query,
+                "status": {"$in": export_job_history.ACTIVE_STATUSES},
+            }
+        )
+        unread_count = self.db.export_jobs.count_documents(
+            {
+                **base_query,
+                "status": {"$in": ["completed", "error", "expired"]},
+                "notification_read_at": None,
+            }
+        )
+        notifications = [
+            self._serializeExportJob(job)
+            for job in self.db.export_jobs.aggregate(
+                [
+                    {"$match": base_query},
+                    {"$sort": {"created_at": -1, "_id": -1}},
+                    {"$limit": max(1, min(int(limit or 8), 25))},
+                    {"$project": export_job_history.summary_projection()},
+                ]
+            )
+        ]
+        return {
+            "unread_count": unread_count,
+            "active_count": active_count,
+            "notifications": notifications,
+        }
+
+    def markExportNotificationsRead(self, user_info, job_id=None, mark_all=False):
+        email = user_info.get("email")
+        if not email:
+            return {"modified_count": 0}
+        now = time.time()
+        query = {"request_user.email": email, "notification_read_at": None}
+        if job_id is not None and not mark_all:
+            query["_id"] = str(job_id)
+        result = self.db.export_jobs.update_many(
+            query,
+            {"$set": {"notification_read_at": now, "updated_at": now}},
+        )
+        return {"modified_count": result.modified_count}
 
     ## update functions
     def updateProject(self, project_id, new_data, user_info={}):
@@ -5128,8 +5884,9 @@ class DataManager:
             if attribute_operation
             else {"_id": ObjectId(record_id)}
         )
+        db_update = {**data_update, "lastUpdated": time.time()}
         updated = self.db.records.find_one_and_update(
-            query, {"$set": data_update}, return_document=ReturnDocument.AFTER
+            query, {"$set": db_update}, return_document=ReturnDocument.AFTER
         )
         if updated is None:
             raise schema_rules.SchemaError(
@@ -5285,9 +6042,9 @@ class DataManager:
                 processor_attributes = self.getRecordGroupSchemaAttributes(
                     rg_document=rg, user=user
                 )
-                rg_processor_attribute_map[
-                    rg_id
-                ] = util.convert_processor_attributes_to_dict(processor_attributes)
+                rg_processor_attribute_map[rg_id] = (
+                    util.convert_processor_attributes_to_dict(processor_attributes)
+                )
             # _log.info(f"rg_processor_attribute_map: {rg_processor_attribute_map}")
             return rg_processor_attribute_map
         except Exception as e:
@@ -5538,16 +6295,49 @@ class DataManager:
         return util.reconstruct_records_by_original_filename(records)
 
     ## miscellaneous functions
-    def downloadRecords(
+    @staticmethod
+    def _getExportFieldsToInclude(export_raw_values=False):
+        json_fields_to_include = {
+            "topLevelFields": [
+                "name",
+                "filename",
+                "image_files",
+                "record_group_id",
+                "record_notes",
+            ],
+            "attributesList": [
+                "key",
+                "value",
+                "normalized_vertices",
+                "subattributes",
+                "page",
+                "parentAttribute",
+                "topLevelAttribute",
+                "user_provided_coordinates",
+            ],
+            "subattributes": [
+                "key",
+                "value",
+                "normalized_vertices",
+                "page",
+                "subattributes",
+                "parentAttribute",
+                "topLevelAttribute",
+                "user_provided_coordinates",
+            ],
+        }
+        if export_raw_values:
+            json_fields_to_include["attributesList"].append("raw_text")
+            json_fields_to_include["subattributes"].append("raw_text")
+        return json_fields_to_include
+
+    def _formatRecordsForExport(
         self,
         records,
         exportType,
         user_info,
-        _id,
-        location,
         selectedColumns=[],
         keep_all_columns=False,
-        output_filename=None,
         request_origin="",
         export_raw_values=False,
     ):
@@ -5572,16 +6362,8 @@ class DataManager:
                 }
             )
         records = export_records
-        ## TODO: Should we use aliases for export?
         USE_ALIASES = True
-        user = user_info.get("email", None)
         rg_attribute_map = self.create_record_group_processor_attribute_map(user_info)
-        today = time.time()
-        output_dir = self.app_settings.export_dir
-        if output_filename is None:
-            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
-        else:
-            output_file = f"{output_filename}.{exportType}"
         attributes = ["file"]
         subattributes = []
         record_attributes = []
@@ -5601,13 +6383,10 @@ class DataManager:
             for document_subattribute in document_subattributes or []:
                 subattribute_key = document_subattribute["key"]
 
-                ## TODO: use alias?
                 rg_schema = rg_attribute_map.get(record_group_id, {})
                 subattribute_alias = self._getAttributeAlias(
                     document_subattribute, rg_schema
                 )
-                # if not subattribute_alias:
-                #     _log.info(f"could not find subattribute_alias for {subattribute_key}")
                 if USE_ALIASES and subattribute_alias:
                     subattribute_name = f"{parent_column_name}[{subattribute_alias}"
                 else:
@@ -5619,8 +6398,6 @@ class DataManager:
                     subattribute_name in current_attributes
                     or subattribute_name in current_parent_attributes
                 ):
-                    ## add a number to the end of the attribute so it
-                    ## is differentiable from other instances of the attribute
                     subattribute_name = f"{original_subattribute_name}_{i}"
                     i += 1
                 current_attributes.add(subattribute_name)
@@ -5659,7 +6436,6 @@ class DataManager:
                     for document_attribute in document.get("attributesList", []):
                         attribute_key = document_attribute["key"].replace(" ", "")
 
-                        ## TODO: use alias?
                         rg_schema = rg_attribute_map.get(record_group_id, {})
                         attribute_alias = self._getAttributeAlias(
                             document_attribute, rg_schema
@@ -5690,8 +6466,6 @@ class DataManager:
                                 attribute_name in current_attributes
                                 or attribute_name in current_parent_attributes
                             ):
-                                ## add a number to the end of the attribute so it (and its subattributes)
-                                ## is differentiable from other instances of the attribute
                                 attribute_name = f"{original_attribute_name}_{i}"
                                 i += 1
                             if document_attribute.get("subattributes", None):
@@ -5707,9 +6481,9 @@ class DataManager:
                                 current_attributes.add(attribute_name)
                                 if attribute_name not in attributes:
                                     attributes.append(attribute_name)
-                                record_attribute[
-                                    attribute_name
-                                ] = get_attr_export_value(document_attribute)
+                                record_attribute[attribute_name] = (
+                                    get_attr_export_value(document_attribute)
+                                )
 
                     record_attribute["file"] = document.get("filename", "")
                     if "record_notes" in selectedColumns or keep_all_columns:
@@ -5731,34 +6505,89 @@ class DataManager:
                     record_attributes.append(record_attribute)
                 except Exception as e:
                     _log.info(f"unable to add {document_id}: {e}")
-            # compute the output file directory and name
+            return record_attributes, attributes + subattributes + ["URL"]
+
+        export_fields = self._getExportFieldsToInclude(
+            export_raw_values=export_raw_values
+        )
+        attr_fields = export_fields["attributesList"]
+        subattr_fields = export_fields["subattributes"]
+
+        def filter_export_attribute(attr, is_subattribute=False):
+            allowed = subattr_fields if is_subattribute else attr_fields
+            filtered = {}
+            for key in allowed:
+                if key == "subattributes":
+                    raw_subs = attr.get("subattributes")
+                    filtered["subattributes"] = (
+                        [
+                            filter_export_attribute(sub, is_subattribute=True)
+                            for sub in raw_subs
+                        ]
+                        if isinstance(raw_subs, list)
+                        else raw_subs
+                    )
+                else:
+                    filtered[key] = attr.get(key)
+            return filtered
+
+        for document in records:
+            document_id = str(document["_id"])
+            try:
+                record_attribute = {}
+                for document_attribute in document.get("attributesList", []):
+                    attribute_name = document_attribute["key"]
+                    if attribute_name in selectedColumns or keep_all_columns:
+                        record_attribute[attribute_name] = filter_export_attribute(
+                            document_attribute
+                        )
+                if "record_notes" in selectedColumns or keep_all_columns:
+                    notes_list = document.get("record_notes") or []
+                    active_notes = [
+                        note for note in notes_list if not note.get("deleted", False)
+                    ]
+                    record_attribute["record_notes"] = active_notes
+                record_attribute["file"] = document.get("filename", "")
+                record_attributes.append(record_attribute)
+            except Exception as e:
+                _log.info(f"unable to add {document_id}: {e}")
+        return record_attributes, None
+
+    def downloadRecords(
+        self,
+        records,
+        exportType,
+        user_info,
+        _id,
+        location,
+        selectedColumns=[],
+        keep_all_columns=False,
+        output_filename=None,
+        request_origin="",
+        export_raw_values=False,
+    ):
+        user = user_info.get("email", None)
+        today = time.time()
+        output_dir = tempfile.gettempdir()
+        if output_filename is None:
+            output_file = os.path.join(output_dir, f"{_id}_{today}.{exportType}")
+        else:
+            output_file = f"{output_filename}.{exportType}"
+        record_attributes, fieldnames = self._formatRecordsForExport(
+            records,
+            exportType,
+            user_info,
+            selectedColumns=selectedColumns,
+            keep_all_columns=keep_all_columns,
+            request_origin=request_origin,
+            export_raw_values=export_raw_values,
+        )
+        if exportType == "csv":
             with open(output_file, "w", newline="") as csvfile:
-                writer = csv.DictWriter(
-                    csvfile, fieldnames=attributes + subattributes + ["URL"]
-                )
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(record_attributes)
-        else:  ## export type is JSON
-            for document in records:
-                document_id = str(document["_id"])
-                try:
-                    record_attribute = {}
-                    for document_attribute in document.get("attributesList", []):
-                        attribute_name = document_attribute["key"]
-                        if attribute_name in selectedColumns or keep_all_columns:
-                            record_attribute[attribute_name] = document_attribute
-                    if "record_notes" in selectedColumns or keep_all_columns:
-                        notes_list = document.get("record_notes") or []
-                        active_notes = [
-                            note
-                            for note in notes_list
-                            if not note.get("deleted", False)
-                        ]
-                        record_attribute["record_notes"] = active_notes
-                    record_attribute["file"] = document.get("filename", "")
-                    record_attributes.append(record_attribute)
-                except Exception as e:
-                    _log.info(f"unable to add {document_id}: {e}")
+        else:
             with open(output_file, "w", newline="") as jsonfile:
                 json.dump(
                     record_attributes, jsonfile, default=util.defaultJSONDumpHandler
@@ -5773,6 +6602,492 @@ class DataManager:
                 "downloadRecords", user=user, notes="downloaded team records"
             )
         return output_file
+
+    @staticmethod
+    def _parseTimestampParam(value, param_name="timestamp"):
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid {param_name}")
+        if isinstance(value, (int, float)):
+            if not (value >= 0 and value != float("inf")):
+                raise ValueError(f"Invalid {param_name}")
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                numeric = float(stripped)
+                if not (numeric >= 0 and numeric != float("inf")):
+                    raise ValueError(f"Invalid {param_name}")
+                return numeric
+            except ValueError:
+                pass
+            try:
+                iso_val = (
+                    stripped[:-1] + "+00:00" if stripped.endswith("Z") else stripped
+                )
+                parsed_dt = datetime.fromisoformat(iso_val)
+                if parsed_dt.tzinfo is None:
+                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                return float(parsed_dt.timestamp())
+            except Exception:
+                raise ValueError(f"Invalid {param_name}")
+        raise ValueError(f"Invalid {param_name}")
+
+    @staticmethod
+    def _buildReviewedTimeWindowOr(since_val=None, until_val=None):
+        time_window = {}
+        if since_val is not None:
+            time_window["$gt"] = float(since_val)
+        if until_val is not None:
+            time_window["$lte"] = float(until_val)
+        if not time_window:
+            return None
+        return [
+            {"lastUpdated": time_window},
+            {"lastUpdated": {"$exists": False}, "dateCreated": time_window},
+            {"lastUpdated": None, "dateCreated": time_window},
+        ]
+
+    def _filterRecordGroupIdsByDocumentTypes(self, candidate_group_ids, document_types):
+        object_ids = [
+            ObjectId(gid) for gid in candidate_group_ids if ObjectId.is_valid(gid)
+        ]
+        matching_groups = {
+            str(doc["_id"])
+            for doc in self.db.record_groups.find(
+                {
+                    "_id": {"$in": object_ids},
+                    "documentType": {"$in": list(document_types)},
+                },
+                {"_id": 1},
+            )
+        }
+        return [gid for gid in candidate_group_ids if gid in matching_groups]
+
+    def createApiKey(self, user_info, name, expires_in_days=90):
+        email = (user_info or {}).get("email")
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
+            raise PermissionError("Authentication is required to create API keys")
+        user = self.getUser(email)
+        if not user:
+            if not REQUIRE_AUTH and email == "anonymous":
+                user = user_info or {}
+            else:
+                raise PermissionError("User account not found")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+            raise ValueError("API key name must be between 1 and 100 characters")
+        if (
+            type(expires_in_days) is not int
+            or expires_in_days < 1
+            or expires_in_days > 365
+        ):
+            raise ValueError("expires_in_days must be an integer between 1 and 365")
+
+        cleaned_name = name.strip()
+        raw_key = f"ogrre_{secrets.token_urlsafe(32)}"
+        key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        key_id = str(ObjectId())
+        now = time.time()
+        expires_at = now + (expires_in_days * 86400)
+        team = user.get("default_team")
+        collaborator = self.getCollaboratorForUser(user)
+
+        doc = {
+            "_id": key_id,
+            "key_id": key_id,
+            "name": cleaned_name,
+            "key_prefix": raw_key[:12],
+            "key_hash": key_hash,
+            "user_email": email,
+            "team": team,
+            "collaborator": collaborator,
+            "created_at": now,
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "revoked_at": None,
+        }
+        self.db.api_keys.insert_one(doc)
+        self.recordHistory(
+            "createApiKey",
+            user=email,
+            notes={"key_id": key_id, "name": cleaned_name, "expires_at": expires_at},
+        )
+        return {
+            "key_id": key_id,
+            "name": cleaned_name,
+            "key_prefix": doc["key_prefix"],
+            "created_at": now,
+            "expires_at": expires_at,
+            "last_used_at": None,
+            "api_key": raw_key,
+        }
+
+    def listApiKeys(self, user_info):
+        email = (user_info or {}).get("email")
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
+            raise PermissionError("Authentication is required to list API keys")
+        now = time.time()
+        keys = []
+        for doc in self.db.api_keys.find(
+            {"user_email": email, "revoked_at": None}
+        ).sort("created_at", DESCENDING):
+            expires_at = doc.get("expires_at")
+            keys.append(
+                {
+                    "key_id": str(doc.get("key_id") or doc["_id"]),
+                    "name": doc.get("name", ""),
+                    "key_prefix": doc.get("key_prefix", ""),
+                    "created_at": doc.get("created_at"),
+                    "expires_at": expires_at,
+                    "last_used_at": doc.get("last_used_at"),
+                    "expired": bool(expires_at is not None and expires_at <= now),
+                }
+            )
+        return keys
+
+    def revokeApiKey(self, user_info, key_id):
+        email = (user_info or {}).get("email")
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
+            raise PermissionError("Authentication is required to revoke API keys")
+        if not isinstance(key_id, str) or not key_id.strip():
+            raise ValueError("Invalid key_id")
+        now = time.time()
+        result = self.db.api_keys.find_one_and_update(
+            {"_id": key_id.strip(), "user_email": email, "revoked_at": None},
+            {"$set": {"revoked_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if result is None:
+            raise ValueError("API key not found")
+        self.recordHistory(
+            "revokeApiKey",
+            user=email,
+            notes={"key_id": key_id.strip()},
+        )
+        return {"key_id": key_id.strip(), "revoked": True, "revoked_at": now}
+
+    def authenticateApiKey(self, raw_token):
+        if not isinstance(raw_token, str) or not raw_token.startswith("ogrre_"):
+            raise ValueError("Invalid API key")
+        key_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        doc = self.db.api_keys.find_one({"key_hash": key_hash, "revoked_at": None})
+        if doc is None:
+            raise ValueError("Invalid or revoked API key")
+        now = time.time()
+        expires_at = doc.get("expires_at")
+        if expires_at is not None and expires_at <= now:
+            raise ValueError("API key has expired")
+        email = doc.get("user_email")
+        if not email or (
+            self.getUser(email) is None
+            and not (not REQUIRE_AUTH and email == "anonymous")
+        ):
+            raise ValueError("API key owner no longer exists")
+        self.db.api_keys.update_one(
+            {"_id": doc["_id"]}, {"$set": {"last_used_at": now}}
+        )
+        result = {
+            "email": email,
+            "api_key_id": str(doc.get("key_id") or doc["_id"]),
+        }
+        if not REQUIRE_AUTH and email == "anonymous":
+            result["anonymous"] = True
+            result["default_team"] = (
+                doc.get("team") or DEFAULT_UNAUTHENTICATED_TEAM["name"]
+            )
+            result["collaborator"] = doc.get("collaborator")
+        return result
+
+    def fetchReviewedRecordsExport(
+        self,
+        user_info,
+        since=None,
+        until=None,
+        project_id=None,
+        record_group_id=None,
+        document_type=None,
+        page=0,
+        page_size=100,
+        export_format="json",
+        request_origin="",
+    ):
+        email = (user_info or {}).get("email")
+        if not email or (REQUIRE_AUTH and email == "anonymous"):
+            raise PermissionError(
+                "Authentication is required to fetch reviewed records"
+            )
+        if type(page) is not int or page < 0 or page > 100000:
+            raise ValueError("Invalid page")
+        if type(page_size) is not int or page_size < 1 or page_size > 1000:
+            raise ValueError("page_size must be between 1 and 1000")
+        export_format = (export_format or "json").strip().lower()
+        if export_format not in ("json", "csv"):
+            raise ValueError("format must be 'json' or 'csv'")
+
+        scope_body = {}
+        if project_id:
+            scope_body["project_id"] = project_id
+        if record_group_id:
+            scope_body["record_group_id"] = record_group_id
+        (
+            project_map,
+            group_map,
+            resolved_project_id,
+            resolved_group_id,
+        ) = self._resolveJobHistoryScope(
+            user_info, scope_body, resource_label="reviewed records"
+        )
+
+        team_name = self._getUserTeamName(user_info)
+        if resolved_group_id is not None:
+            candidate_group_ids = [resolved_group_id]
+            location = "record_group"
+            target_id = resolved_group_id
+            group_info = group_map.get(resolved_group_id, {})
+            scope_project_id = group_info.get("project_id")
+            scope_project_name = group_info.get("project_name")
+            scope_rg_name = group_info.get("record_group_name")
+        elif resolved_project_id is not None:
+            candidate_group_ids = [
+                gid
+                for gid, info in group_map.items()
+                if info["project_id"] == resolved_project_id
+            ]
+            location = "project"
+            target_id = resolved_project_id
+            scope_project_id = resolved_project_id
+            scope_project_name = project_map.get(resolved_project_id)
+            scope_rg_name = None
+        else:
+            candidate_group_ids = list(group_map.keys())
+            location = "team"
+            target_id = team_name or "team"
+            scope_project_id = None
+            scope_project_name = (
+                f"All Records ({team_name})" if team_name else "All Records"
+            )
+            scope_rg_name = None
+
+        cleaned_doc_type = (
+            document_type.strip()
+            if isinstance(document_type, str) and document_type.strip()
+            else None
+        )
+        doc_types_list = [cleaned_doc_type] if cleaned_doc_type is not None else None
+        if cleaned_doc_type is not None:
+            if len(cleaned_doc_type) > 200:
+                raise ValueError("Invalid document_type")
+            target_group_ids = self._filterRecordGroupIdsByDocumentTypes(
+                candidate_group_ids, doc_types_list
+            )
+        else:
+            target_group_ids = candidate_group_ids
+
+        parsed_since = self._parseTimestampParam(since, "since")
+        parsed_until = self._parseTimestampParam(until, "until")
+        now = time.time()
+
+        watermark_query = {
+            "request_user.email": email,
+            "team": team_name,
+            "location": location,
+            "target_id": target_id,
+            "export_source": "reviewed_records_api",
+            "options.document_types": doc_types_list,
+            "is_watermark": True,
+        }
+        if parsed_since is None:
+            last_export = self.db.export_jobs.find_one(
+                watermark_query,
+                sort=[("created_at", DESCENDING), ("_id", DESCENDING)],
+            )
+            last_until = (last_export or {}).get("options", {}).get("until")
+            effective_since = float(last_until) if last_until is not None else 0.0
+        else:
+            effective_since = parsed_since
+
+        effective_until = parsed_until if parsed_until is not None else now
+        if effective_until < effective_since:
+            raise ValueError("until must be greater than or equal to since")
+
+        query = {
+            "record_group_id": {"$in": target_group_ids},
+            "review_status": "reviewed",
+            "$or": self._buildReviewedTimeWindowOr(effective_since, effective_until),
+        }
+
+        matched_stubs = list(
+            self.db.records.find(query, {"_id": 1, "lastUpdated": 1, "dateCreated": 1})
+        )
+        matched_stubs.sort(
+            key=lambda doc: (
+                doc.get("lastUpdated") or doc.get("dateCreated") or 0,
+                str(doc["_id"]),
+            )
+        )
+        matched_record_ids = [str(doc["_id"]) for doc in matched_stubs]
+        total_count = len(matched_record_ids)
+        page_record_ids = matched_record_ids[page * page_size : (page + 1) * page_size]
+        if page_record_ids:
+            fetched_records, _ = self.fetchRecords(
+                filter_by={
+                    "_id": {
+                        "$in": [
+                            ObjectId(rid)
+                            for rid in page_record_ids
+                            if ObjectId.is_valid(rid)
+                        ]
+                    }
+                },
+                include_attribute_fields=self._getExportFieldsToInclude(),
+                forDownload=True,
+                user=user_info,
+            )
+            docs_by_id = {str(doc["_id"]): doc for doc in fetched_records}
+            raw_records = [
+                docs_by_id[rid] for rid in page_record_ids if rid in docs_by_id
+            ]
+        else:
+            raw_records = []
+
+        record_attributes, fieldnames = self._formatRecordsForExport(
+            raw_records,
+            export_format,
+            user_info,
+            keep_all_columns=True,
+            request_origin=request_origin,
+        )
+
+        has_more = (page + 1) * page_size < total_count
+        csv_text = None
+        serialized_records = None
+        if export_format == "csv":
+            csv_buffer = io.StringIO()
+            writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(record_attributes)
+            csv_text = csv_buffer.getvalue()
+            payload_size_bytes = len(csv_text.encode("utf-8"))
+        else:
+            serialized_text = json.dumps(
+                record_attributes, default=util.defaultJSONDumpHandler
+            )
+            payload_size_bytes = len(serialized_text.encode("utf-8"))
+            serialized_records = json.loads(serialized_text)
+
+        job_id = None
+        if page == 0:
+            job_id = str(uuid.uuid4())
+            base_label = scope_rg_name or scope_project_name or team_name or "records"
+            clean_output_name = (
+                f"{util.sanitize_filename_component(str(base_label))}_reviewed_records"
+            )
+            export_job_doc = {
+                "_id": job_id,
+                "job_id": job_id,
+                "job_type": "export",
+                "export_source": "reviewed_records_api",
+                "is_watermark": bool(parsed_until is None),
+                "status": "expired",
+                "stage": "completed",
+                "status_text": "Exported via API (direct download)",
+                "attempt": 0,
+                "location": location,
+                "target_id": target_id,
+                "team": team_name,
+                "project_id": scope_project_id,
+                "project_name": scope_project_name,
+                "record_group_id": resolved_group_id,
+                "record_group_name": scope_rg_name,
+                "output_name": clean_output_name,
+                "request_origin": str(request_origin or ""),
+                "request_user": {
+                    "email": email,
+                    "name": user_info.get("name"),
+                    "hd": user_info.get("hd"),
+                    "default_team": team_name,
+                    "anonymous": bool(user_info.get("anonymous", False)),
+                },
+                "options": {
+                    "export_csv": export_format == "csv",
+                    "export_json": export_format == "json",
+                    "export_images": False,
+                    "export_embedded_pdfs": False,
+                    "columns": [],
+                    "filter": {
+                        "review_status": "reviewed",
+                    },
+                    "sort": ["dateCreated", 1],
+                    "document_types": doc_types_list,
+                    "reconstruct_original_doc": False,
+                    "export_raw_values": False,
+                    "since": effective_since,
+                    "until": effective_until,
+                    "record_ids": matched_record_ids,
+                },
+                "progress": {
+                    "current": total_count,
+                    "total": total_count,
+                    "percent": 100,
+                },
+                "artifact": {
+                    "storage_key": None,
+                    "filename": f"{clean_output_name}.{export_format}",
+                    "size_bytes": payload_size_bytes,
+                    "record_count": total_count,
+                },
+                "worker": {},
+                "created_at": now,
+                "started_at": now,
+                "last_progress_at": now,
+                "completed_at": now,
+                "expires_at": None,
+                "updated_at": now,
+                "notification_read_at": now,
+                "error": None,
+            }
+            self.db.export_jobs.insert_one(export_job_doc)
+
+        self.recordHistory(
+            "fetchReviewedRecords",
+            user=email,
+            project_id=scope_project_id,
+            rg_id=resolved_group_id,
+            notes={
+                "job_id": job_id,
+                "since": effective_since,
+                "until": effective_until,
+                "page": page,
+                "returned_count": len(raw_records),
+                "format": export_format,
+            },
+        )
+
+        if export_format == "csv":
+            return {
+                "job_id": job_id,
+                "since": effective_since,
+                "until": effective_until,
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "has_more": has_more,
+                "csv": csv_text,
+            }
+
+        return {
+            "job_id": job_id,
+            "since": effective_since,
+            "until": effective_until,
+            "page": page,
+            "page_size": page_size,
+            "total_count": total_count,
+            "has_more": has_more,
+            "records": serialized_records,
+        }
 
     def getUserPermissions(self, user):
         user_team = user["default_team"]

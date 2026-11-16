@@ -49,9 +49,11 @@ def test_complete_read_path_works_in_both_schema_modes(
     monkeypatch.setattr(
         data_manager.processor_api,
         "get_processor_by_id",
-        lambda collaborator, processor_id: copy.deepcopy(repo_processor)
-        if collaborator == "isgs" and processor_id == PROCESSOR["processorId"]
-        else None,
+        lambda collaborator, processor_id: (
+            copy.deepcopy(repo_processor)
+            if collaborator == "isgs" and processor_id == PROCESSOR["processorId"]
+            else None
+        ),
     )
 
     schema_id = manager.db.processors.find_one()["_id"]
@@ -175,9 +177,11 @@ def unavailable_group(request, schema_manager, monkeypatch):
     monkeypatch.setattr(
         data_manager.processor_api,
         "get_processor_by_id",
-        lambda collaborator, processor_id: copy.deepcopy(PROCESSOR)
-        if collaborator == "isgs" and processor_id == "extractor"
-        else None,
+        lambda collaborator, processor_id: (
+            copy.deepcopy(PROCESSOR)
+            if collaborator == "isgs" and processor_id == "extractor"
+            else None
+        ),
     )
     schema_id = manager.db.record_groups.find_one()["schema_id"]
     valid_id = str(ObjectId())
@@ -319,9 +323,9 @@ def test_collaborator_switch_restores_schema_without_changing_binding(
     monkeypatch.setattr(
         data_manager.processor_api,
         "get_processor_by_id",
-        lambda collaborator, processor_id: copy.deepcopy(PROCESSOR)
-        if collaborator == "isgs"
-        else None,
+        lambda collaborator, processor_id: (
+            copy.deepcopy(PROCESSOR) if collaborator == "isgs" else None
+        ),
     )
     manager.db.record_groups.update_one({}, {"$set": {"processorId": "extractor"}})
     group = manager.db.record_groups.find_one()

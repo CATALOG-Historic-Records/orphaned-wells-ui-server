@@ -5,7 +5,6 @@ from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 from google.oauth2 import service_account
 
-
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 DOCUMENT_AI_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
 
