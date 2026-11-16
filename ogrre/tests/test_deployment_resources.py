@@ -9,7 +9,6 @@ import subprocess
 import pytest
 import yaml
 
-
 pytestmark = pytest.mark.skipif(
     shutil.which("bash") is None or shutil.which("jq") is None,
     reason="Deployment parser checks require bash and jq",

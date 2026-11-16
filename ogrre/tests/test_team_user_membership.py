@@ -7,7 +7,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-
 ADMIN = {"email": "admin@example.com"}
 EMAIL = "member@example.com"
 
