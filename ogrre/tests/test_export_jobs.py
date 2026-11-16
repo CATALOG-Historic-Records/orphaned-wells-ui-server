@@ -552,6 +552,8 @@ def test_reviewed_records_endpoint_watermark_and_updates(manager, export_project
     assert first_run["total_count"] == 1
     assert first_run["has_more"] is False
     assert [row["file"] for row in first_run["records"]] == ["well-001.pdf"]
+    assert "confidence" not in first_run["records"][0]["API Number"]
+    assert "raw_text" not in first_run["records"][0]["API Number"]
 
     # Immediate second run without changes returns 0 records and uses first_run["until"] as since
     second_run = router.get_reviewed_records(

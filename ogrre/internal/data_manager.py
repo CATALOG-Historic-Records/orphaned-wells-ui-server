@@ -5070,38 +5070,9 @@ class DataManager:
             if window_or and "$or" not in filter_by:
                 filter_by["$or"] = window_or
 
-        json_fields_to_include = {
-            "topLevelFields": [
-                "name",
-                "filename",
-                "image_files",
-                "record_group_id",
-                "record_notes",
-            ],
-            "attributesList": [
-                "key",
-                "value",
-                "normalized_vertices",
-                "subattributes",
-                "page",
-                "parentAttribute",
-                "topLevelAttribute",
-                "user_provided_coordinates",
-            ],
-            "subattributes": [
-                "key",
-                "value",
-                "normalized_vertices",
-                "page",
-                "subattributes",
-                "parentAttribute",
-                "topLevelAttribute",
-                "user_provided_coordinates",
-            ],
-        }
-        if export_raw_values:
-            json_fields_to_include["attributesList"].append("raw_text")
-            json_fields_to_include["subattributes"].append("raw_text")
+        json_fields_to_include = self._getExportFieldsToInclude(
+            export_raw_values=export_raw_values
+        )
 
         output_name = job.get("output_name") or str(target_id)
 
@@ -6326,6 +6297,42 @@ class DataManager:
         return util.reconstruct_records_by_original_filename(records)
 
     ## miscellaneous functions
+    @staticmethod
+    def _getExportFieldsToInclude(export_raw_values=False):
+        json_fields_to_include = {
+            "topLevelFields": [
+                "name",
+                "filename",
+                "image_files",
+                "record_group_id",
+                "record_notes",
+            ],
+            "attributesList": [
+                "key",
+                "value",
+                "normalized_vertices",
+                "subattributes",
+                "page",
+                "parentAttribute",
+                "topLevelAttribute",
+                "user_provided_coordinates",
+            ],
+            "subattributes": [
+                "key",
+                "value",
+                "normalized_vertices",
+                "page",
+                "subattributes",
+                "parentAttribute",
+                "topLevelAttribute",
+                "user_provided_coordinates",
+            ],
+        }
+        if export_raw_values:
+            json_fields_to_include["attributesList"].append("raw_text")
+            json_fields_to_include["subattributes"].append("raw_text")
+        return json_fields_to_include
+
     def _formatRecordsForExport(
         self,
         records,
@@ -6502,6 +6509,30 @@ class DataManager:
                     _log.info(f"unable to add {document_id}: {e}")
             return record_attributes, attributes + subattributes + ["URL"]
 
+        export_fields = self._getExportFieldsToInclude(
+            export_raw_values=export_raw_values
+        )
+        attr_fields = export_fields["attributesList"]
+        subattr_fields = export_fields["subattributes"]
+
+        def filter_export_attribute(attr, is_subattribute=False):
+            allowed = subattr_fields if is_subattribute else attr_fields
+            filtered = {}
+            for key in allowed:
+                if key == "subattributes":
+                    raw_subs = attr.get("subattributes")
+                    filtered["subattributes"] = (
+                        [
+                            filter_export_attribute(sub, is_subattribute=True)
+                            for sub in raw_subs
+                        ]
+                        if isinstance(raw_subs, list)
+                        else raw_subs
+                    )
+                else:
+                    filtered[key] = attr.get(key)
+            return filtered
+
         for document in records:
             document_id = str(document["_id"])
             try:
@@ -6509,7 +6540,9 @@ class DataManager:
                 for document_attribute in document.get("attributesList", []):
                     attribute_name = document_attribute["key"]
                     if attribute_name in selectedColumns or keep_all_columns:
-                        record_attribute[attribute_name] = document_attribute
+                        record_attribute[attribute_name] = filter_export_attribute(
+                            document_attribute
+                        )
                 if "record_notes" in selectedColumns or keep_all_columns:
                     notes_list = document.get("record_notes") or []
                     active_notes = [
@@ -6896,20 +6929,21 @@ class DataManager:
             page * page_size : (page + 1) * page_size
         ]
         if page_record_ids:
-            docs_by_id = {
-                str(doc["_id"]): doc
-                for doc in self.db.records.find(
-                    {
-                        "_id": {
-                            "$in": [
-                                ObjectId(rid)
-                                for rid in page_record_ids
-                                if ObjectId.is_valid(rid)
-                            ]
-                        }
+            fetched_records, _ = self.fetchRecords(
+                filter_by={
+                    "_id": {
+                        "$in": [
+                            ObjectId(rid)
+                            for rid in page_record_ids
+                            if ObjectId.is_valid(rid)
+                        ]
                     }
-                )
-            }
+                },
+                include_attribute_fields=self._getExportFieldsToInclude(),
+                forDownload=True,
+                user=user_info,
+            )
+            docs_by_id = {str(doc["_id"]): doc for doc in fetched_records}
             raw_records = [
                 docs_by_id[rid] for rid in page_record_ids if rid in docs_by_id
             ]
