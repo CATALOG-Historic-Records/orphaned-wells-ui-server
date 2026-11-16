@@ -94,4 +94,5 @@ docker compose --env-file ../ogrre/.env up web
 
 - [Schema management](documentation/schema-management.md)
 - [Batch processing and directory uploads](documentation/batch-processing-and-directory-uploads.md)
+- [API keys and incremental reviewed record exports](documentation/api-keys-and-reviewed-exports.md)
 - [Testing and validation](documentation/testing-and-validation.md)
