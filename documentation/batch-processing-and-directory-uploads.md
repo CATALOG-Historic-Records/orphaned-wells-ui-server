@@ -43,7 +43,7 @@ explains directory and GCS batch workflows, progress, and recovery.
   [../deployment/kubernetes/README.md](../deployment/kubernetes/README.md).
 - `DIRECTORY_UPLOAD_MAX_BYTES` defaults to 21474836480 (20 GiB). The manifest is
   limited to 1,000 files and 2 MiB of JSON. Each original file must also fit the
-  installed Document AI Toolbox batch file-size limit.
+  Document AI batch file-size limit (1 GiB).
 - Sessions last seven days. Terraform expires objects under `directory_uploads/`
   and `directory_upload_outputs/` after 14 days. Keep this retention longer than
   the session window plus the configured worker deadline. Record images under

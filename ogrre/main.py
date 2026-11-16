@@ -29,6 +29,7 @@ from ogrre.internal.schema_validation import SchemaError
 
 
 async def maintain_jobs():
+    from ogrre.internal.export_job_runner import maintain_export_jobs
     from ogrre.internal.processing_job_runner import maintain_processing_jobs
 
     while True:
@@ -36,6 +37,10 @@ async def maintain_jobs():
             await run_in_threadpool(maintain_processing_jobs, router.data_manager)
         except Exception:
             _log.exception("processing job maintenance failed")
+        try:
+            await run_in_threadpool(maintain_export_jobs, router.data_manager)
+        except Exception:
+            _log.exception("export job maintenance failed")
         await asyncio.sleep(30)
 
 
