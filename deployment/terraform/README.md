@@ -15,7 +15,7 @@ the secret-update commands below apply only to the disabled rollout fallback.
 - `main.tf` orchestrates core providers and project services.
 - `gke.tf` creates the shared GKE deployment infrastructure unless `enable_gke=false`, including per-environment API and batch-worker resource defaults exported to deployment automation.
 - `kubernetes_rbac.tf` creates each backend namespace, its two workload ServiceAccounts, and the API Job-dispatch Role/RoleBinding.
-- `storage.tf` creates one Cloud Storage upload bucket per unique GKE backend bucket name.
+- `storage.tf` creates one Cloud Storage upload bucket per unique GKE backend bucket name and grants `roles/storage.objectUser` on each bucket to the storage and Document AI runtime service accounts.
 - `terraform.tfvars.example` documents the required project-level variables (`project_id`, `dns_managed_zone`, `backend_dns_domain`) and collaborator backend definitions (`gke_backends`).
 - `backend.tf` configures the shared GCS backend for Terraform state.
 - `scripts/bootstrap_terraform_state_bucket.sh` creates or updates the GCS state bucket.
@@ -422,6 +422,8 @@ rrc     -> rrc_uploads
 ```
 
 Bucket resources are keyed by bucket name, so collaborators can intentionally share a bucket without Terraform creating duplicate resources. Buckets use `force_destroy=false` and `prevent_destroy=true` to protect uploaded files.
+
+Terraform automatically grants `roles/storage.objectUser` on each managed upload bucket to `ogrre-storage-runtime@<project_id>.iam.gserviceaccount.com` and `ogrre-document-ai@<project_id>.iam.gserviceaccount.com` (customizable via `storage_runtime_service_account` and `document_ai_runtime_service_account`, or set to `""` to skip).
 
 To customize a new collaborator:
 

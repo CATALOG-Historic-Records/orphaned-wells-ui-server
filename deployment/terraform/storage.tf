@@ -46,3 +46,32 @@ resource "google_storage_bucket" "backend_uploads" {
     google_project_service.gke_required,
   ]
 }
+
+locals {
+  storage_runtime_sa_email = trimspace(
+    var.storage_runtime_service_account != null
+    ? var.storage_runtime_service_account
+    : "ogrre-storage-runtime@${var.project_id}.iam.gserviceaccount.com"
+  )
+  document_ai_runtime_sa_email = trimspace(
+    var.document_ai_runtime_service_account != null
+    ? var.document_ai_runtime_service_account
+    : "ogrre-document-ai@${var.project_id}.iam.gserviceaccount.com"
+  )
+}
+
+resource "google_storage_bucket_iam_member" "storage_runtime_object_user" {
+  for_each = local.storage_runtime_sa_email != "" ? google_storage_bucket.backend_uploads : {}
+
+  bucket = each.value.name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${local.storage_runtime_sa_email}"
+}
+
+resource "google_storage_bucket_iam_member" "document_ai_runtime_object_user" {
+  for_each = local.document_ai_runtime_sa_email != "" ? google_storage_bucket.backend_uploads : {}
+
+  bucket = each.value.name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${local.document_ai_runtime_sa_email}"
+}

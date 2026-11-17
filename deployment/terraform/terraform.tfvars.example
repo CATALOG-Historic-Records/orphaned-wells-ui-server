@@ -11,6 +11,12 @@ backend_dns_domain = "your-domain.org"
 # Optional: default region for resources (defaults to "us-central1")
 # region = "us-central1"
 
+# Optional: runtime service accounts granted roles/storage.objectUser on each upload bucket
+# (defaults to ogrre-storage-runtime@<project_id>.iam.gserviceaccount.com and
+# ogrre-document-ai@<project_id>.iam.gserviceaccount.com; set to "" to skip)
+# storage_runtime_service_account     = "ogrre-storage-runtime@your-gcp-project-id.iam.gserviceaccount.com"
+# document_ai_runtime_service_account = "ogrre-document-ai@your-gcp-project-id.iam.gserviceaccount.com"
+
 # ==============================================================================
 # 2. Environments and Collaborator Backends
 # ==============================================================================
