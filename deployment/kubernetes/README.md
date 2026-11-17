@@ -572,12 +572,17 @@ GKE Autopilot does not expose a normal "restart the cluster" operation like rest
 
 ## Adding a new collaborator backend
 
-1. Add the collaborator to `gke_backend_overrides` in `deployment/terraform/terraform.tfvars`, or add it to the default `gke_backends` map in `variables.tf` when the collaborator should be part of the shared defaults.
+1. Pull the shared `terraform.tfvars` configuration and add the collaborator to `gke_backends` in `deployment/terraform/terraform.tfvars`:
 
-For a standard GKE-only collaborator, the override is enough:
+```bash
+./deployment/terraform/scripts/sync_tfvars.sh pull
+```
+
+For a standard GKE collaborator, an empty map entry uses the default naming and resource sizing:
 
 ```hcl
-gke_backend_overrides = {
+gke_backends = {
+  # existing backends...
   boots = {}
 }
 ```
@@ -588,10 +593,11 @@ Terraform then omits the namespace, runtime ServiceAccounts/RBAC, and
 `kubernetes_deploy_targets` entry. CA currently uses this setting; change it to
 `true` before deploying CA through its existing workflow.
 
-Optional per-backend settings can be added in the same map:
+Optional per-backend settings can be added in the same map (or via `gke_backend_overrides`):
 
 ```hcl
-gke_backend_overrides = {
+gke_backends = {
+  # existing backends...
   boots = {
     # Only set this when the bucket cannot use the default "boots_uploads" name.
     upload_bucket_name   = "existing-bucket-name"
@@ -605,21 +611,15 @@ gke_backend_overrides = {
 }
 ```
 
-2. Apply Terraform:
+2. Upload the updated `terraform.tfvars` to GCS and sync `PROD_TERRAFORM_TFVARS`:
 
 ```bash
-cd orphaned-wells-ui-server/deployment/terraform
-terraform plan
-terraform apply
+./deployment/terraform/scripts/sync_tfvars.sh push --secret
 ```
 
-3. Enabled CI reads targets live after the approved apply. Only for the disabled rollout fallback, update `K8S_DEPLOY_TARGETS` (authenticate with `gh auth login` first):
+When `ENABLE_TERRAFORM_CI=true`, merging `collaborators.json` to `main` (or dispatching `deploy-k8s-staging.yml` on `main`) automatically plans the new collaborator infrastructure in GitHub Actions and waits for `terraform-apply` approval. You do not need to run `terraform plan` or `terraform apply` locally.
 
-```bash
-gh secret set K8S_DEPLOY_TARGETS \
-  --repo CATALOG-Historic-Records/orphaned-wells-ui-server \
-  --body "$(terraform output -json kubernetes_deploy_targets | jq -c .)"
-```
+3. Enabled CI reads `kubernetes_deploy_targets` live from the remote Terraform state after the approved apply. (Only for the disabled rollout fallback, run `terraform apply` locally and update the `K8S_DEPLOY_TARGETS` secret).
 
 4. Add the `RUNTIME_ENV` secret for the collaborator environment:
    ```bash
