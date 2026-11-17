@@ -171,15 +171,3 @@ variable "upload_bucket_location" {
   default     = "US"
   description = "Default Cloud Storage location for newly created collaborator upload buckets."
 }
-
-variable "storage_runtime_service_account" {
-  type        = string
-  default     = null
-  description = "Service account email granted roles/storage.objectUser on each backend upload bucket. Defaults to ogrre-storage-runtime@<project_id>.iam.gserviceaccount.com when null; set to \"\" to skip."
-}
-
-variable "document_ai_runtime_service_account" {
-  type        = string
-  default     = null
-  description = "Service account email granted roles/storage.objectUser on each backend upload bucket for batch Document AI input/output. Defaults to ogrre-document-ai@<project_id>.iam.gserviceaccount.com when null; set to \"\" to skip."
-}
