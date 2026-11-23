@@ -128,3 +128,107 @@ def test_missing_disabled_or_malformed_target_stops_deployment(parse_target, raw
 def test_invalid_required_field_stops_deployment(parse_target, value):
     with pytest.raises(subprocess.CalledProcessError):
         parse_target("staging", {"host": value})
+
+
+def test_runtime_env_defaults_and_overrides(tmp_path):
+    workflow_path = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/deploy-k8s-dispatch.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text())
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["deploy"]["steps"]
+        if step.get("id") == "runtime_env"
+    )
+    (tmp_path / "deployment/secrets").mkdir(parents=True)
+
+    base_env = {
+        "PATH": os.environ["PATH"],
+        "DEPLOY_ENV": "boots",
+        "HOSTNAME": "boots-server.uow-carbon.org",
+        "NAMESPACE": "uow-boots",
+        "IMAGE": "example/image:sha",
+        "STORAGE_BUCKET_NAME": "boots_uploads",
+        "API_UVICORN_WORKERS": "2",
+        "PROCESSING_JOB_CPU_REQUEST": "1850m",
+        "PROCESSING_JOB_MEMORY_REQUEST": "12Gi",
+        "PROCESSING_JOB_CPU_LIMIT": "1850m",
+        "PROCESSING_JOB_MEMORY_LIMIT": "12Gi",
+        "PROCESSING_JOB_EPHEMERAL_STORAGE": "10Gi",
+        "PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS": "86400",
+        "PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED": "604800",
+        "PROCESSING_JOB_MAX_ACTIVE": "1",
+        "PROJECT_ID": "tidy-outlet-412020",
+        "GOOGLE_CLIENT_ID": "repo-client-id",
+        "GOOGLE_CLIENT_SECRET": "repo-client-secret",
+        "RUNTIME_ENV_CONTENT": (
+            "DB_NAME=ogrre_boots\n"
+            "DB_CONNECTION=cluster0.example.mongodb.net\n"
+            "DB_USERNAME=boots_user\n"
+            "DB_PASSWORD=boots_pass\n"
+        ),
+    }
+
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env=base_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    rendered = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "deployment/secrets/runtime.k8s.env")
+        .read_text()
+        .splitlines()
+    )
+    assert rendered["DB_NAME"] == "ogrre_boots"
+    assert rendered["COLLABORATOR"] == "boots"
+    assert rendered["ALLOWED_ORIGINS"] == "https://boots.uow-carbon.org"
+    assert rendered["REQUIRE_AUTH"] == "true"
+    assert rendered["AUTH_PROVIDER"] == "google"
+    assert rendered["token_uri"] == "https://oauth2.googleapis.com/token"
+    assert rendered["client_id"] == "repo-client-id"
+    assert rendered["client_secret"] == "repo-client-secret"
+    assert rendered["SESSION_COOKIE_DOMAIN"] == ".uow-carbon.org"
+    assert rendered["SESSION_COOKIE_SECURE"] == "true"
+    assert rendered["SESSION_COOKIE_SAMESITE"] == "lax"
+    assert rendered["PROJECT_ID"] == "tidy-outlet-412020"
+    assert rendered["LOCATION"] == "us"
+    assert rendered["STORAGE_BACKEND"] == "google"
+    assert rendered["DOCUMENT_AI_BACKEND"] == "google"
+    assert rendered["USE_DB_SCHEMAS"] == "false"
+
+    # Explicit RUNTIME_ENV values override the defaults
+    override_env = {
+        **base_env,
+        "RUNTIME_ENV_CONTENT": (
+            "DB_NAME=ogrre_boots\n"
+            "COLLABORATOR=custom_collab\n"
+            "USE_DB_SCHEMAS=true\n"
+            "client_id=custom-client-id\n"
+        ),
+    }
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env=override_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    rendered_override = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "deployment/secrets/runtime.k8s.env")
+        .read_text()
+        .splitlines()
+    )
+    assert rendered_override["COLLABORATOR"] == "custom_collab"
+    assert rendered_override["USE_DB_SCHEMAS"] == "true"
+    assert rendered_override["client_id"] == "custom-client-id"
+    assert rendered_override["client_secret"] == "repo-client-secret"

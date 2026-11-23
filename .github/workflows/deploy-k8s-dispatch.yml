@@ -51,6 +51,12 @@ on:
       RUNTIME_ENV:
         description: Direct runtime environment variables content (from GitHub environment or repository secret)
         required: false
+      GOOGLE_CLIENT_ID:
+        description: Optional repository-level Google OAuth client ID fallback for RUNTIME_ENV
+        required: false
+      GOOGLE_CLIENT_SECRET:
+        description: Optional repository-level Google OAuth client secret fallback for RUNTIME_ENV
+        required: false
 
 defaults:
   run:
@@ -314,6 +320,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare runtime env file
+        id: runtime_env
         env:
           DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
           HOSTNAME: ${{ steps.target.outputs.host }}
@@ -329,6 +336,9 @@ jobs:
           PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS: ${{ steps.target.outputs.processing_job_active_deadline_seconds }}
           PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED: ${{ steps.target.outputs.processing_job_ttl_seconds_after_finished }}
           PROCESSING_JOB_MAX_ACTIVE: ${{ steps.target.outputs.processing_job_max_active }}
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           RUNTIME_ENV_CONTENT: ${{ secrets.RUNTIME_ENV }}
         run: |
           runtime_env="${RUNTIME_ENV_CONTENT:-}"
@@ -367,8 +377,48 @@ jobs:
                 continue
                 ;;
             esac
+            if [ -z "$value" ]; then
+              continue
+            fi
             printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
           done < "$raw_env_file"
+
+          if [[ "$HOSTNAME" == *-server.* ]]; then
+            base_domain="${HOSTNAME#*-server.}"
+          else
+            base_domain="${HOSTNAME#*.}"
+          fi
+
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            default_allowed_origins="https://${base_domain},http://localhost:3000,http://localhost:3001"
+          else
+            default_allowed_origins="https://${DEPLOY_ENV}.${base_domain}"
+          fi
+          default_cookie_domain=".${base_domain}"
+
+          set_default_if_missing() {
+            local key="$1"
+            local default_val="$2"
+            if [ -n "$default_val" ] && ! grep -Eq "^${key}=.+" "$k8s_env_file"; then
+              printf '%s=%s\n' "$key" "$default_val" >> "$k8s_env_file"
+            fi
+          }
+
+          set_default_if_missing "COLLABORATOR" "$DEPLOY_ENV"
+          set_default_if_missing "ALLOWED_ORIGINS" "$default_allowed_origins"
+          set_default_if_missing "REQUIRE_AUTH" "true"
+          set_default_if_missing "AUTH_PROVIDER" "google"
+          set_default_if_missing "token_uri" "https://oauth2.googleapis.com/token"
+          set_default_if_missing "client_id" "${GOOGLE_CLIENT_ID:-}"
+          set_default_if_missing "client_secret" "${GOOGLE_CLIENT_SECRET:-}"
+          set_default_if_missing "SESSION_COOKIE_DOMAIN" "$default_cookie_domain"
+          set_default_if_missing "SESSION_COOKIE_SECURE" "true"
+          set_default_if_missing "SESSION_COOKIE_SAMESITE" "lax"
+          set_default_if_missing "PROJECT_ID" "${PROJECT_ID:-}"
+          set_default_if_missing "LOCATION" "us"
+          set_default_if_missing "STORAGE_BACKEND" "google"
+          set_default_if_missing "DOCUMENT_AI_BACKEND" "google"
+          set_default_if_missing "USE_DB_SCHEMAS" "false"
 
           {
             echo "ENVIRONMENT=$DEPLOY_ENV"
@@ -402,7 +452,7 @@ jobs:
           )
           missing_keys=()
           for key in "${required_runtime_keys[@]}"; do
-            if ! grep -Eq "^${key}=" "$k8s_env_file"; then
+            if ! grep -Eq "^${key}=.+" "$k8s_env_file"; then
               missing_keys+=("$key")
             fi
           done
