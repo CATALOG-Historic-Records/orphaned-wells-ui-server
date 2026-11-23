@@ -617,6 +617,7 @@ This provisions:
 - GKE static IP address (`boots-uow-gke-ip`)
 - Primary DNS record (`boots-server.uow-carbon.org`)
 - Test DNS record (`boots-k8s-server.uow-carbon.org`)
+- Frontend DNS `A` and `AAAA` records (`boots.uow-carbon.org`)
 - `kubernetes_deploy_targets.boots` output
 
 For local testing:
@@ -650,13 +651,12 @@ This single file drives:
 - `.github/workflows/deploy-k8s-collaborator.yml`: Automatically deploys pushes to any collaborator branch listed in `collaborators.json`.
 - `.github/workflows/sync-collaborators.yml`: Automatically opens synchronization PRs from `main` to each branch in `collaborators.json`.
 
-### 3. Branch & Runtime Secrets
+### 3. Branch & Deployment
 
 1. Create and push the collaborator branch (e.g. `boots`).
-2. Add the runtime secret in GitHub:
-   - For standard multi-environment setups: create the environment first (`gh api --method PUT repos/CATALOG-Historic-Records/orphaned-wells-ui-server/environments/boots`), then configure `RUNTIME_ENV` inside it (`gh secret set RUNTIME_ENV -R CATALOG-Historic-Records/orphaned-wells-ui-server --env boots < boots.env`).
-   - For standalone or single-collaborator forks: `RUNTIME_ENV` can be set as a repository secret and will be picked up directly via fallback.
-3. Pushes to the branch will trigger `deploy-k8s-collaborator.yml` and deploy the backend to GKE.
+2. Pushes to the branch trigger `deploy-k8s-collaborator.yml` and deploy the backend to GKE:
+   - On the first deployment, if `RUNTIME_ENV` is not set and MongoDB Atlas API secrets (`ATLAS_PROJECT_ID`, `ATLAS_PUBLIC_KEY`/`ATLAS_PRIVATE_KEY` or `ATLAS_CLIENT_ID`/`ATLAS_CLIENT_SECRET`, `DB_CONNECTION`) are configured, the workflow automatically provisions a scoped `ogrre-<collaborator>` database user, initializes the empty `ogrre-<collaborator>` database, and saves the complete rendered runtime `.env` snapshot to `gs://<TF_STATE_BUCKET>/secrets/<collaborator>.env`.
+   - To supply custom runtime overrides or manual database credentials, create the GitHub Environment (`gh api --method PUT repos/CATALOG-Historic-Records/orphaned-wells-ui-server/environments/boots`) and set `RUNTIME_ENV` (`gh secret set RUNTIME_ENV -R CATALOG-Historic-Records/orphaned-wells-ui-server --env boots < boots.env`), or set `RUNTIME_ENV` as a repository secret for standalone single-collaborator forks.
 
 ## Notes
 
