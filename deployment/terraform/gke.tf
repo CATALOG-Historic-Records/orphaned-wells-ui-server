@@ -44,18 +44,9 @@ locals {
       enable_kubernetes_workloads               = coalesce(try(backend.enable_kubernetes_workloads, null), true)
       create_primary_dns_record                 = coalesce(try(backend.create_primary_dns_record, null), true)
       create_test_dns_record                    = coalesce(try(backend.create_test_dns_record, null), true)
-      create_frontend_dns_records = coalesce(
-        try(backend.create_frontend_dns_records, null),
-        !contains(["staging", "osage", "isgs", "newts", "ca", "rrc"], name)
-      )
-      frontend_hostname = trimsuffix(
-        coalesce(
-          try(backend.frontend_hostname, null),
-          name == "staging" ? var.backend_dns_domain : "${name}.${var.backend_dns_domain}"
-        ),
-        "."
-      )
-      dns_ttl = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
+      create_frontend_dns_records               = coalesce(try(backend.create_frontend_dns_records, null), !contains(["staging", "osage", "isgs", "newts", "ca", "rrc"], name))
+      frontend_hostname                         = trimsuffix(coalesce(try(backend.frontend_hostname, null), name == "staging" ? var.backend_dns_domain : "${name}.${var.backend_dns_domain}"), ".")
+      dns_ttl                                   = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
     }
   }
 
