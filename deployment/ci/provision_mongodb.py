@@ -191,6 +191,23 @@ def initialize_empty_database(db, team_name: str, admin_emails: list[str]) -> bo
     return True
 
 
+def _extract_error_detail(resp) -> str:
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            parts = [
+                str(data.get(k))
+                for k in ("error", "error_description", "errorCode", "detail", "reason")
+                if data.get(k)
+            ]
+            if parts:
+                return " - ".join(parts)
+    except Exception:
+        pass
+    text = (getattr(resp, "text", "") or "").strip()
+    return text[:200] if text else "no error details returned"
+
+
 def _build_atlas_auth(
     public_key: str,
     private_key: str,
@@ -201,23 +218,31 @@ def _build_atlas_auth(
     from requests.auth import HTTPDigestAuth
 
     if client_id and client_secret:
+        # If the user passed an Atlas API Key (which does not start with mdb_sa_id_)
+        # into ATLAS_CLIENT_ID/ATLAS_CLIENT_SECRET, try OAuth first and fall back to Digest Auth.
         token_resp = http.post(
             "https://cloud.mongodb.com/api/oauth/token",
             auth=(client_id, client_secret),
             data={"grant_type": "client_credentials"},
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
             timeout=30,
         )
-        if token_resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to obtain MongoDB Atlas OAuth token: HTTP {token_resp.status_code}"
-            )
-        token = (token_resp.json() or {}).get("access_token")
-        if not token:
-            raise RuntimeError(
-                "MongoDB Atlas OAuth response did not include access_token"
-            )
-        return None, {"Authorization": f"Bearer {token}"}
+        if token_resp.status_code == 200:
+            token = (token_resp.json() or {}).get("access_token")
+            if not token:
+                raise RuntimeError(
+                    "MongoDB Atlas OAuth response did not include access_token"
+                )
+            return None, {"Authorization": f"Bearer {token}"}
+        if not client_id.startswith("mdb_sa_id_"):
+            return HTTPDigestAuth(client_id, client_secret), {}
+        raise RuntimeError(
+            f"Failed to obtain MongoDB Atlas OAuth token: HTTP {token_resp.status_code} "
+            f"({_extract_error_detail(token_resp)})"
+        )
 
     return HTTPDigestAuth(public_key, private_key), {}
 
@@ -262,7 +287,7 @@ def create_atlas_database_user(
     if check_resp.status_code != 404:
         raise RuntimeError(
             f"Failed to check existing MongoDB Atlas user '{username}': "
-            f"HTTP {check_resp.status_code}"
+            f"HTTP {check_resp.status_code} ({_extract_error_detail(check_resp)})"
         )
 
     create_url = f"{ATLAS_API_BASE}/groups/{project_id}/databaseUsers"
@@ -285,7 +310,7 @@ def create_atlas_database_user(
     if create_resp.status_code not in (200, 201):
         raise RuntimeError(
             f"Failed to create MongoDB Atlas user '{username}': "
-            f"HTTP {create_resp.status_code}"
+            f"HTTP {create_resp.status_code} ({_extract_error_detail(create_resp)})"
         )
     print(
         f"Created MongoDB Atlas user '{username}' scoped to readWrite on database '{db_name}'."
@@ -373,6 +398,17 @@ def main() -> int:
     if not args.dry_run and not args.env_file.strip():
         raise ValueError("--env-file is required unless --dry-run is set")
 
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        repo_root = Path(__file__).resolve().parents[2]
+        for dotenv_path in (repo_root / ".env", repo_root / "ogrre" / ".env"):
+            if dotenv_path.is_file():
+                load_dotenv(dotenv_path, override=False)
+    except Exception:
+        pass
+
     project_id = (os.getenv("ATLAS_PROJECT_ID") or "").strip()
     public_key = (os.getenv("ATLAS_PUBLIC_KEY") or "").strip()
     private_key = (os.getenv("ATLAS_PRIVATE_KEY") or "").strip()
@@ -395,6 +431,20 @@ def main() -> int:
 
     if args.dry_run:
         import requests
+
+        def _mask(val: str) -> str:
+            if not val:
+                return "<empty>"
+            if len(val) <= 10:
+                return f"{val[:2]}... (len={len(val)})"
+            return f"{val[:10]}...{val[-4:]} (len={len(val)})"
+
+        print(
+            f"[DRY RUN] Using ATLAS_PROJECT_ID={project_id}, "
+            f"ATLAS_CLIENT_ID={_mask(client_id)}, "
+            f"ATLAS_CLIENT_SECRET={_mask(client_secret)}, "
+            f"ATLAS_PUBLIC_KEY={_mask(public_key)}"
+        )
 
         auth, extra_headers = _build_atlas_auth(
             public_key=public_key,
@@ -423,7 +473,8 @@ def main() -> int:
             )
         else:
             raise RuntimeError(
-                f"[DRY RUN] Atlas API check returned unexpected status: HTTP {resp.status_code}"
+                f"[DRY RUN] Atlas API check returned unexpected status: "
+                f"HTTP {resp.status_code} ({_extract_error_detail(resp)})"
             )
         return 0
 
