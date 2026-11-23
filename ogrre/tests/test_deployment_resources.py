@@ -380,3 +380,233 @@ def test_provision_mongodb_guards_against_existing_user_and_non_empty_db():
     assert session.posts[0][1]["json"]["roles"] == [
         {"roleName": "readWrite", "databaseName": "ogrre-boots"}
     ]
+
+
+def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path):
+    """Simulate Priority 2 (GCS and GKE secret reuse) and Priority 3 (first-time Atlas provisioning)."""
+    workflow_path = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/deploy-k8s-dispatch.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text())
+    steps = workflow["jobs"]["deploy"]["steps"]
+    runtime_script = next(
+        step["run"] for step in steps if step.get("id") == "runtime_env"
+    )
+    create_secrets_script = next(
+        step["run"] for step in steps if step.get("name") == "Create deployment secrets"
+    )
+
+    (tmp_path / "deployment/secrets").mkdir(parents=True)
+    (tmp_path / "deployment/terraform").mkdir(parents=True)
+    (tmp_path / "deployment/terraform/backend.tf").write_text(
+        'terraform {\n  backend "gcs" {\n    bucket = "test-state-bucket"\n  }\n}\n'
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    github_output = tmp_path / "github-output"
+
+    base_env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "DEPLOY_ENV": "boots",
+        "HOSTNAME": "boots-server.uow-carbon.org",
+        "NAMESPACE": "uow-boots",
+        "IMAGE": "example/image:sha",
+        "STORAGE_BUCKET_NAME": "boots_uploads",
+        "API_UVICORN_WORKERS": "2",
+        "PROCESSING_JOB_CPU_REQUEST": "1850m",
+        "PROCESSING_JOB_MEMORY_REQUEST": "12Gi",
+        "PROCESSING_JOB_CPU_LIMIT": "1850m",
+        "PROCESSING_JOB_MEMORY_LIMIT": "12Gi",
+        "PROCESSING_JOB_EPHEMERAL_STORAGE": "10Gi",
+        "PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS": "86400",
+        "PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED": "604800",
+        "PROCESSING_JOB_MAX_ACTIVE": "1",
+        "PROJECT_ID": "tidy-outlet-412020",
+        "GOOGLE_CLIENT_ID": "repo-client-id",
+        "GOOGLE_CLIENT_SECRET": "repo-client-secret",
+        "REPO_DB_CONNECTION": "cluster0.example",
+        "RUNTIME_ENV_CONTENT": "",
+        "GITHUB_OUTPUT": str(github_output),
+    }
+
+    # --- Case 2a: Priority 2 loads existing snapshot from GCS when RUNTIME_ENV is empty ---
+    gcloud_stub = bin_dir / "gcloud"
+    gcloud_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "storage" ] && [ "$2" = "cat" ] && [ "$3" = "gs://test-state-bucket/secrets/boots.env" ]; then\n'
+        '  printf "DB_NAME=ogrre-boots\\nDB_CONNECTION=cluster0.example\\nDB_USERNAME=ogrre-boots\\nDB_PASSWORD=gcs-saved-pass\\n"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    gcloud_stub.chmod(0o755)
+
+    res_gcs = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", runtime_script],
+        cwd=tmp_path,
+        env=base_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "Loaded existing runtime environment snapshot" in res_gcs.stdout
+    lines = (tmp_path / "deployment/secrets/runtime.k8s.env").read_text().splitlines()
+    rendered_gcs = dict(line.split("=", 1) for line in lines)
+    assert rendered_gcs["DB_PASSWORD"] == "gcs-saved-pass"
+    assert sum(1 for line in lines if line.startswith("DB_CONNECTION=")) == 1
+    assert "gcs_env_uri=gs://test-state-bucket/secrets/boots.env" in github_output.read_text()
+
+    # --- Case 2b: Priority 2 falls back to GKE secret when GCS object does not exist ---
+    import base64
+
+    gcloud_stub.write_text("#!/usr/bin/env bash\nexit 1\n")
+    b64 = lambda s: base64.b64encode(s.encode()).decode()
+    k8s_secret_json = json.dumps(
+        {
+            "data": {
+                "DB_NAME": b64("ogrre-boots"),
+                "DB_CONNECTION": b64("cluster0.example"),
+                "DB_USERNAME": b64("ogrre-boots"),
+                "DB_PASSWORD": b64("k8s-saved-pass"),
+            }
+        }
+    )
+    kubectl_stub = bin_dir / "kubectl"
+    kubectl_stub.write_text(
+        f"#!/usr/bin/env bash\n"
+        f"cat <<'EOF'\n{k8s_secret_json}\nEOF\n"
+    )
+    kubectl_stub.chmod(0o755)
+
+    res_k8s = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", runtime_script],
+        cwd=tmp_path,
+        env=base_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "Loaded existing runtime environment from Kubernetes secret" in res_k8s.stdout
+    rendered_k8s = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "deployment/secrets/runtime.k8s.env")
+        .read_text()
+        .splitlines()
+    )
+    assert rendered_k8s["DB_PASSWORD"] == "k8s-saved-pass"
+
+    # --- Case 3: Priority 3 runs provision_mongodb.py on first-time deploy ---
+    kubectl_stub.write_text("#!/usr/bin/env bash\nexit 1\n")
+    (tmp_path / "deployment/ci").mkdir(parents=True)
+    (tmp_path / "deployment/ci/provision_mongodb.py").write_text(
+        "import argparse, os\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--collaborator')\n"
+        "p.add_argument('--env-file')\n"
+        "args = p.parse_args()\n"
+        "with open(args.env_file, 'a') as f:\n"
+        "    f.write(f'DB_NAME=ogrre-{args.collaborator}\\n')\n"
+        "    f.write(f'DB_CONNECTION={os.environ[\"DB_CONNECTION\"]}\\n')\n"
+        "    f.write(f'DB_USERNAME=ogrre-{args.collaborator}\\n')\n"
+        "    f.write('DB_PASSWORD=provisioned-pass\\n')\n"
+    )
+    python_stub = bin_dir / "python3"
+    python_stub.write_text(
+        f"#!/usr/bin/env bash\n"
+        f'if [ "$1" = "-c" ]; then exit 0; fi\n'
+        f'exec "{shutil.which("python3")}" "$@"\n'
+    )
+    python_stub.chmod(0o755)
+
+    first_deploy_env = {
+        **base_env,
+        "ATLAS_PROJECT_ID": "atlas-proj-123",
+        "ATLAS_PUBLIC_KEY": "atlas-pub",
+        "ATLAS_PRIVATE_KEY": "atlas-priv",
+    }
+    res_prov = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", runtime_script],
+        cwd=tmp_path,
+        env=first_deploy_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "First-time deployment detected for 'boots'" in res_prov.stdout
+    prov_lines = (tmp_path / "deployment/secrets/runtime.k8s.env").read_text().splitlines()
+    rendered_prov = dict(line.split("=", 1) for line in prov_lines)
+    assert rendered_prov["DB_NAME"] == "ogrre-boots"
+    assert rendered_prov["DB_USERNAME"] == "ogrre-boots"
+    assert rendered_prov["DB_PASSWORD"] == "provisioned-pass"
+    assert sum(1 for line in prov_lines if line.startswith("DB_CONNECTION=")) == 1
+
+    # --- Test Create deployment secrets step (both GCS upload success and graceful warning on failure) ---
+    (tmp_path / "deployment/secrets/storage-service-key.json").write_text("{}")
+    (tmp_path / "deployment/secrets/document-ai-service-key.json").write_text("{}")
+    kubectl_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    gcloud_stub.write_text("#!/usr/bin/env bash\nexit 1\n")  # Simulate GCS upload 403 failure
+
+    res_create = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", create_secrets_script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "NAMESPACE": "uow-boots",
+            "GCS_ENV_URI": "gs://test-state-bucket/secrets/boots.env",
+            "DOCKERHUB_USERNAME": "user",
+            "DOCKERHUB_ACCESS_TOKEN": "tok",
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "::warning::Could not upload runtime environment snapshot" in res_create.stdout
+
+
+def test_all_workflow_bash_scripts_and_contracts_are_valid():
+    """Validate bash syntax (-n) and workflow_call contracts across all backend and frontend workflows."""
+    backend_root = Path(__file__).resolve().parents[2]
+    frontend_root = backend_root.parent / "orphaned-wells-ui"
+    workflow_dirs = [backend_root / ".github/workflows"]
+    if (frontend_root / ".github/workflows").is_dir():
+        workflow_dirs.append(frontend_root / ".github/workflows")
+
+    for wf_dir in workflow_dirs:
+        for wf_file in sorted(wf_dir.glob("*.yml")):
+            wf = yaml.safe_load(wf_file.read_text())
+            for job_name, job in (wf.get("jobs") or {}).items():
+                # If job calls a local reusable workflow, verify inputs and secrets exist in callee
+                uses = job.get("uses")
+                if uses and uses.startswith("./.github/workflows/"):
+                    callee_path = wf_dir.parent.parent / uses[2:]
+                    assert callee_path.is_file(), f"Missing reusable workflow {callee_path}"
+                    callee = yaml.safe_load(callee_path.read_text())
+                    on_block = callee.get("on") or callee.get(True) or {}
+                    wf_call = on_block.get("workflow_call") or {}
+                    allowed_inputs = set((wf_call.get("inputs") or {}).keys())
+                    allowed_secrets = set((wf_call.get("secrets") or {}).keys())
+                    for passed_input in (job.get("with") or {}).keys():
+                        assert passed_input in allowed_inputs, (
+                            f"{wf_file.name}:{job_name} passes unknown input '{passed_input}' to {callee_path.name}"
+                        )
+                    if isinstance(job.get("secrets"), dict):
+                        for passed_secret in job["secrets"].keys():
+                            assert passed_secret in allowed_secrets, (
+                                f"{wf_file.name}:{job_name} passes unknown secret '{passed_secret}' to {callee_path.name}"
+                            )
+
+                # Check bash -n syntax on every run: block
+                for idx, step in enumerate(job.get("steps") or []):
+                    if "run" in step:
+                        subprocess.run(
+                            ["bash", "-n"],
+                            input=step["run"],
+                            text=True,
+                            check=True,
+                            capture_output=True,
+                        )

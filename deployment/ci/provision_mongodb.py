@@ -355,15 +355,24 @@ def main() -> int:
     )
     parser.add_argument("--collaborator", required=True, help="Collaborator key")
     parser.add_argument(
-        "--env-file", required=True, help="Target runtime .env file path"
+        "--env-file",
+        default="",
+        help="Target runtime .env file path (required unless --dry-run)",
     )
     parser.add_argument("--db-name", default="", help="Override database name")
     parser.add_argument("--team-name", default="", help="Override initial team name")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Verify Atlas API authentication and confirm the target user does not exist without creating anything",
+    )
     args = parser.parse_args()
 
     collaborator = args.collaborator.strip().lower()
     if not collaborator:
         raise ValueError("collaborator is required")
+    if not args.dry_run and not args.env_file.strip():
+        raise ValueError("--env-file is required unless --dry-run is set")
 
     project_id = (os.getenv("ATLAS_PROJECT_ID") or "").strip()
     public_key = (os.getenv("ATLAS_PUBLIC_KEY") or "").strip()
@@ -384,6 +393,37 @@ def main() -> int:
     db_name = args.db_name.strip() or f"ogrre-{collaborator}"
     username = f"ogrre-{collaborator}"
     team_name = args.team_name.strip() or collaborator.upper()
+
+    if args.dry_run:
+        import requests
+
+        auth, extra_headers = _build_atlas_auth(
+            public_key=public_key,
+            private_key=private_key,
+            client_id=client_id,
+            client_secret=client_secret,
+            http=requests,
+        )
+        headers = {
+            "Accept": ATLAS_ACCEPT_HEADER,
+            "Content-Type": "application/json",
+            **extra_headers,
+        }
+        encoded_user = urllib.parse.quote(username, safe="")
+        get_url = f"{ATLAS_API_BASE}/groups/{project_id}/databaseUsers/admin/{encoded_user}"
+        resp = requests.get(get_url, auth=auth, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            print(f"[DRY RUN] Atlas API auth succeeded; user '{username}' already exists.")
+        elif resp.status_code == 404:
+            print(
+                f"[DRY RUN] Atlas API auth succeeded; user '{username}' does not exist and is ready to provision for database '{db_name}' (team '{team_name}', admins: {', '.join(admin_emails)})."
+            )
+        else:
+            raise RuntimeError(
+                f"[DRY RUN] Atlas API check returned unexpected status: HTTP {resp.status_code}"
+            )
+        return 0
+
     password = generate_password()
 
     create_atlas_database_user(

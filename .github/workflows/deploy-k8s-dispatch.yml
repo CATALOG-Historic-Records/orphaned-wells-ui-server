@@ -436,11 +436,11 @@ jobs:
             fi
           }
 
-          set_default_if_missing "DB_CONNECTION" "${REPO_DB_CONNECTION:-}"
-
           has_complete_db_config() {
             grep -Eq '^DB_NAME=.+' "$k8s_env_file" || return 1
-            grep -Eq '^DB_CONNECTION=.+' "$k8s_env_file" || return 1
+            if ! grep -Eq '^DB_CONNECTION=.+' "$k8s_env_file" && [ -z "${REPO_DB_CONNECTION:-}" ]; then
+              return 1
+            fi
             if ! grep -Eq '^DB_CONNECTION=mongodb(\+srv)?://.+' "$k8s_env_file"; then
               grep -Eq '^DB_USERNAME=.+' "$k8s_env_file" || return 1
               grep -Eq '^DB_PASSWORD=.+' "$k8s_env_file" || return 1
@@ -469,7 +469,7 @@ jobs:
           if ! has_complete_db_config; then
             existing_env_file="deployment/secrets/existing.env"
             : > "$existing_env_file"
-            if [ -n "$gcs_env_uri" ] && command -v gcloud >/dev/null 2>&1 && gcloud storage cat "$gcs_env_uri" > "$existing_env_file" 2>/dev/null; then
+            if [ -n "$gcs_env_uri" ] && command -v gcloud >/dev/null 2>&1 && gcloud storage cat "$gcs_env_uri" > "$existing_env_file" 2>/dev/null && [ -s "$existing_env_file" ]; then
               echo "Loaded existing runtime environment snapshot for '${DEPLOY_ENV}' from ${gcs_env_uri}"
               parse_env_stream "$existing_env_file" "true"
             elif command -v kubectl >/dev/null 2>&1 && kubectl -n "$NAMESPACE" get secret backend-runtime-env -o json 2>/dev/null | jq -r '.data // {} | to_entries[] | "\(.key)=\(.value | @base64d)"' > "$existing_env_file" 2>/dev/null && [ -s "$existing_env_file" ]; then
@@ -495,13 +495,19 @@ jobs:
               if ! python3 -c "import pymongo, certifi, requests" >/dev/null 2>&1; then
                 python3 -m pip install --quiet pymongo certifi requests
               fi
-              DB_CONNECTION="$effective_db_conn" python3 deployment/ci/provision_mongodb.py \
+              provision_script="deployment/ci/provision_mongodb.py"
+              if [ ! -f "$provision_script" ] && [ -f ".infra/deployment/ci/provision_mongodb.py" ]; then
+                provision_script=".infra/deployment/ci/provision_mongodb.py"
+              fi
+              DB_CONNECTION="$effective_db_conn" python3 "$provision_script" \
                 --collaborator "$DEPLOY_ENV" \
                 --env-file "$k8s_env_file"
             else
               echo "::warning::Automatic MongoDB provisioning skipped for '${DEPLOY_ENV}' because MongoDB Atlas API secrets (ATLAS_PROJECT_ID, ATLAS_PUBLIC_KEY/ATLAS_PRIVATE_KEY or ATLAS_CLIENT_ID/ATLAS_CLIENT_SECRET, DB_CONNECTION) are not configured. Initialize MongoDB manually with InitializeMongoDB.py and set DB_NAME, DB_CONNECTION, DB_USERNAME, and DB_PASSWORD in RUNTIME_ENV."
             fi
           fi
+
+          set_default_if_missing "DB_CONNECTION" "${REPO_DB_CONNECTION:-}"
 
           if [[ "$HOSTNAME" == *-server.* ]]; then
             base_domain="${HOSTNAME#*-server.}"
@@ -609,9 +615,12 @@ jobs:
             --from-env-file=deployment/secrets/runtime.k8s.env \
             --dry-run=client -o yaml | kubectl apply -f -
 
-          if [ -n "${GCS_ENV_URI:-}" ]; then
-            gcloud storage cp deployment/secrets/runtime.k8s.env "$GCS_ENV_URI"
-            echo "Saved active runtime environment snapshot to ${GCS_ENV_URI}"
+          if [ -n "${GCS_ENV_URI:-}" ] && command -v gcloud >/dev/null 2>&1; then
+            if gcloud storage cp deployment/secrets/runtime.k8s.env "$GCS_ENV_URI"; then
+              echo "Saved active runtime environment snapshot to ${GCS_ENV_URI}"
+            else
+              echo "::warning::Could not upload runtime environment snapshot to ${GCS_ENV_URI}; continuing with Kubernetes secret."
+            fi
           fi
 
           kubectl -n "$NAMESPACE" create secret generic backend-runtime-files \
