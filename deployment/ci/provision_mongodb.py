@@ -215,7 +215,9 @@ def _build_atlas_auth(
             )
         token = (token_resp.json() or {}).get("access_token")
         if not token:
-            raise RuntimeError("MongoDB Atlas OAuth response did not include access_token")
+            raise RuntimeError(
+                "MongoDB Atlas OAuth response did not include access_token"
+            )
         return None, {"Authorization": f"Bearer {token}"}
 
     return HTTPDigestAuth(public_key, private_key), {}
@@ -328,7 +330,9 @@ def connect_with_retry(
                     f"Waiting for MongoDB Atlas user propagation (attempt {attempt}/{retries})..."
                 )
                 time.sleep(delay_seconds)
-    raise RuntimeError(f"Unable to connect to MongoDB after {retries} attempts: {last_error}")
+    raise RuntimeError(
+        f"Unable to connect to MongoDB after {retries} attempts: {last_error}"
+    )
 
 
 def append_db_env(
@@ -350,7 +354,9 @@ def main() -> int:
         description="Provision MongoDB Atlas user and initialize empty OGRRE database."
     )
     parser.add_argument("--collaborator", required=True, help="Collaborator key")
-    parser.add_argument("--env-file", required=True, help="Target runtime .env file path")
+    parser.add_argument(
+        "--env-file", required=True, help="Target runtime .env file path"
+    )
     parser.add_argument("--db-name", default="", help="Override database name")
     parser.add_argument("--team-name", default="", help="Override initial team name")
     args = parser.parse_args()
