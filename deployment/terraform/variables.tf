@@ -113,6 +113,8 @@ variable "gke_backends" {
     enable_kubernetes_workloads               = optional(bool)
     create_primary_dns_record                 = optional(bool)
     create_test_dns_record                    = optional(bool)
+    create_frontend_dns_records               = optional(bool)
+    frontend_hostname                         = optional(string)
     dns_ttl                                   = optional(number)
   }))
 
@@ -147,6 +149,8 @@ variable "gke_backend_overrides" {
     enable_kubernetes_workloads               = optional(bool)
     create_primary_dns_record                 = optional(bool)
     create_test_dns_record                    = optional(bool)
+    create_frontend_dns_records               = optional(bool)
+    frontend_hostname                         = optional(string)
     dns_ttl                                   = optional(number)
   }))
 
@@ -170,4 +174,26 @@ variable "upload_bucket_location" {
   type        = string
   default     = "US"
   description = "Default Cloud Storage location for newly created collaborator upload buckets."
+}
+
+variable "app_engine_ipv4_addresses" {
+  type = list(string)
+  default = [
+    "216.239.32.21",
+    "216.239.34.21",
+    "216.239.36.21",
+    "216.239.38.21",
+  ]
+  description = "Google App Engine custom domain IPv4 (A) record addresses."
+}
+
+variable "app_engine_ipv6_addresses" {
+  type = list(string)
+  default = [
+    "2001:4860:4802:32::15",
+    "2001:4860:4802:34::15",
+    "2001:4860:4802:36::15",
+    "2001:4860:4802:38::15",
+  ]
+  description = "Google App Engine custom domain IPv6 (AAAA) record addresses."
 }
