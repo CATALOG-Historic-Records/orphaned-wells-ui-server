@@ -209,6 +209,8 @@ def test_runtime_env_defaults_and_overrides(tmp_path):
         "RUNTIME_ENV_CONTENT": (
             "DB_NAME=ogrre_boots\n"
             "DB_CONNECTION=cluster0.example.mongodb.net\n"
+            "DB_USERNAME=boots_user\n"
+            "DB_PASSWORD=boots_pass\n"
             "COLLABORATOR=custom_collab\n"
             "USE_DB_SCHEMAS=true\n"
             "client_id=custom-client-id\n"
@@ -234,12 +236,12 @@ def test_runtime_env_defaults_and_overrides(tmp_path):
     assert rendered_override["client_id"] == "custom-client-id"
     assert rendered_override["client_secret"] == "repo-client-secret"
 
-    # Missing client_id/client_secret or DB_NAME/DB_CONNECTION fails fast
+    # Missing client_id/client_secret or DB credentials fails fast (and emits Atlas warning when DB is missing)
     for missing_env in (
         {**base_env, "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": ""},
-        {**base_env, "RUNTIME_ENV_CONTENT": "DB_NAME=ogrre_boots\n"},
+        {**base_env, "RUNTIME_ENV_CONTENT": ""},
     ):
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
             subprocess.run(
                 ["bash", "-e", "-o", "pipefail", "-c", script],
                 cwd=tmp_path,
@@ -249,3 +251,132 @@ def test_runtime_env_defaults_and_overrides(tmp_path):
                 text=True,
                 timeout=30,
             )
+        if not missing_env.get("RUNTIME_ENV_CONTENT"):
+            assert "Automatic MongoDB provisioning skipped" in exc_info.value.stdout
+
+
+def test_provision_mongodb_guards_against_existing_user_and_non_empty_db():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "provision_mongodb",
+        Path(__file__).resolve().parents[2] / "deployment/ci/provision_mongodb.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class FakeCollection:
+        def __init__(self, count=0):
+            self.count = count
+            self.inserted = []
+
+        def count_documents(self, query, limit=None):
+            return self.count
+
+        def insert_many(self, docs):
+            self.inserted.extend(docs)
+
+        def insert_one(self, doc):
+            self.inserted.append(doc)
+
+    class FakeDB:
+        def __init__(self, name, collections=None):
+            self.name = name
+            self._collections = collections or []
+            self.roles = FakeCollection()
+            self.teams = FakeCollection()
+            self.users = FakeCollection()
+            self._by_name = {
+                "roles": self.roles,
+                "teams": self.teams,
+                "users": self.users,
+                "projects": FakeCollection(),
+                "record_groups": FakeCollection(),
+                "records": FakeCollection(),
+            }
+
+        def list_collection_names(self):
+            return list(self._collections)
+
+        def __getitem__(self, key):
+            return self._by_name[key]
+
+    # Non-empty DB is never modified
+    non_empty_db = FakeDB("ogrre-isgs", collections=["records", "users"])
+    assert (
+        mod.initialize_empty_database(non_empty_db, "ISGS", ["admin@example.com"])
+        is False
+    )
+    assert non_empty_db.roles.inserted == []
+    assert non_empty_db.teams.inserted == []
+    assert non_empty_db.users.inserted == []
+
+    # Empty DB is initialized cleanly
+    empty_db = FakeDB("ogrre-boots", collections=[])
+    assert (
+        mod.initialize_empty_database(
+            empty_db, "BOOTS", ["Admin1@Example.com, admin2@example.com"]
+        )
+        is True
+    )
+    assert len(empty_db.roles.inserted) == len(mod.ROLES)
+    assert empty_db.teams.inserted == [
+        {
+            "name": "BOOTS",
+            "display_name": "BOOTS",
+            "users": ["admin1@example.com", "admin2@example.com"],
+            "project_list": [],
+        }
+    ]
+    assert [u["email"] for u in empty_db.users.inserted] == [
+        "admin1@example.com",
+        "admin2@example.com",
+    ]
+
+    # Existing Atlas user is never overwritten
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class FakeSession:
+        def __init__(self, get_status, post_status=201):
+            self.get_status = get_status
+            self.post_status = post_status
+            self.posts = []
+
+        def get(self, url, **kwargs):
+            return FakeResponse(self.get_status)
+
+        def post(self, url, **kwargs):
+            self.posts.append((url, kwargs))
+            return FakeResponse(self.post_status, {"access_token": "tok"})
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        mod.create_atlas_database_user(
+            project_id="proj1",
+            public_key="pub",
+            private_key="priv",
+            db_name="ogrre-isgs",
+            username="ogrre-isgs",
+            password="pw",
+            session=FakeSession(get_status=200),
+        )
+
+    session = FakeSession(get_status=404, post_status=201)
+    mod.create_atlas_database_user(
+        project_id="proj1",
+        public_key="pub",
+        private_key="priv",
+        db_name="ogrre-boots",
+        username="ogrre-boots",
+        password="pw",
+        session=session,
+    )
+    assert len(session.posts) == 1
+    assert session.posts[0][1]["json"]["roles"] == [
+        {"roleName": "readWrite", "databaseName": "ogrre-boots"}
+    ]

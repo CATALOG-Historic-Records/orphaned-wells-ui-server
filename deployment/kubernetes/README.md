@@ -224,9 +224,11 @@ Keep the existing deployment secrets:
 - `DEPLOYMENT_SERVICE_KEY_JSON`
 - `STORAGE_SERVICE_KEY_JSON`
 - `DOCUMENT_AI_SERVICE_KEY_JSON`
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (optional repository-level defaults for `client_id` and `client_secret`)
+- `DB_CONNECTION`, `ATLAS_PROJECT_ID`, and `ATLAS_PUBLIC_KEY` / `ATLAS_PRIVATE_KEY` (or `ATLAS_CLIENT_ID` / `ATLAS_CLIENT_SECRET`) for optional first-time MongoDB Atlas user/database provisioning
 - `K8S_DEPLOY_TARGETS` (only for the disabled Terraform CI rollout fallback)
 
-Each backend environment needs its environment-file variables stored in a `RUNTIME_ENV` secret inside its corresponding GitHub Environment (`staging`, `isgs`, `newts`, `osage`, `rrc`), or as a repository-level secret for single-environment deployments.
+Each backend environment can store custom environment-file variables or database credentials in a `RUNTIME_ENV` secret inside its corresponding GitHub Environment (`staging`, `isgs`, `newts`, `osage`, `rrc`), or as a repository-level secret for single-environment deployments. For new collaborators, if `RUNTIME_ENV` is omitted, the workflow checks `gs://<state_bucket>/secrets/<collaborator>.env` (and `Secret/backend-runtime-env` in GKE) or auto-provisions a scoped `ogrre-<collaborator>` MongoDB Atlas user and database on first deployment. Every deployment saves the complete rendered `runtime.k8s.env` snapshot to `gs://<state_bucket>/secrets/<collaborator>.env`.
 
 To set an environment secret via the GitHub CLI, create the environment first (GitHub's secrets API requires the environment to exist before fetching its public key), then set `RUNTIME_ENV`:
 
