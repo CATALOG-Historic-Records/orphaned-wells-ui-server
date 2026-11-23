@@ -57,6 +57,12 @@ on:
       GOOGLE_CLIENT_SECRET:
         description: Optional repository-level Google OAuth client secret fallback for RUNTIME_ENV
         required: false
+      CLIENT_ID:
+        description: Optional alias for repository-level Google OAuth client ID fallback
+        required: false
+      CLIENT_SECRET:
+        description: Optional alias for repository-level Google OAuth client secret fallback
+        required: false
 
 defaults:
   run:
@@ -337,8 +343,8 @@ jobs:
           PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED: ${{ steps.target.outputs.processing_job_ttl_seconds_after_finished }}
           PROCESSING_JOB_MAX_ACTIVE: ${{ steps.target.outputs.processing_job_max_active }}
           PROJECT_ID: ${{ secrets.PROJECT_ID }}
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID || secrets.CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET || secrets.CLIENT_SECRET }}
           RUNTIME_ENV_CONTENT: ${{ secrets.RUNTIME_ENV }}
         run: |
           runtime_env="${RUNTIME_ENV_CONTENT:-}"
@@ -444,12 +450,20 @@ jobs:
           } >> "$k8s_env_file"
 
           required_runtime_keys=(
+            DB_NAME
+            DB_CONNECTION
             ALLOWED_ORIGINS
             AUTH_PROVIDER
             SESSION_COOKIE_DOMAIN
             SESSION_COOKIE_SAMESITE
             SESSION_COOKIE_SECURE
           )
+          if grep -Eiq '^REQUIRE_AUTH=(1|true|yes)$' "$k8s_env_file" && grep -Eiq '^AUTH_PROVIDER=(google|both)$' "$k8s_env_file"; then
+            required_runtime_keys+=(
+              client_id
+              client_secret
+            )
+          fi
           missing_keys=()
           for key in "${required_runtime_keys[@]}"; do
             if ! grep -Eq "^${key}=.+" "$k8s_env_file"; then

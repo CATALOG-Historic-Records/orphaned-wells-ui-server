@@ -208,6 +208,7 @@ def test_runtime_env_defaults_and_overrides(tmp_path):
         **base_env,
         "RUNTIME_ENV_CONTENT": (
             "DB_NAME=ogrre_boots\n"
+            "DB_CONNECTION=cluster0.example.mongodb.net\n"
             "COLLABORATOR=custom_collab\n"
             "USE_DB_SCHEMAS=true\n"
             "client_id=custom-client-id\n"
@@ -232,3 +233,19 @@ def test_runtime_env_defaults_and_overrides(tmp_path):
     assert rendered_override["USE_DB_SCHEMAS"] == "true"
     assert rendered_override["client_id"] == "custom-client-id"
     assert rendered_override["client_secret"] == "repo-client-secret"
+
+    # Missing client_id/client_secret or DB_NAME/DB_CONNECTION fails fast
+    for missing_env in (
+        {**base_env, "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": ""},
+        {**base_env, "RUNTIME_ENV_CONTENT": "DB_NAME=ogrre_boots\n"},
+    ):
+        with pytest.raises(subprocess.CalledProcessError):
+            subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", script],
+                cwd=tmp_path,
+                env=missing_env,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
