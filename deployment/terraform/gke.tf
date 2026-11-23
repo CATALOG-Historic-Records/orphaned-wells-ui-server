@@ -44,7 +44,18 @@ locals {
       enable_kubernetes_workloads               = coalesce(try(backend.enable_kubernetes_workloads, null), true)
       create_primary_dns_record                 = coalesce(try(backend.create_primary_dns_record, null), true)
       create_test_dns_record                    = coalesce(try(backend.create_test_dns_record, null), true)
-      dns_ttl                                   = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
+      create_frontend_dns_records = coalesce(
+        try(backend.create_frontend_dns_records, null),
+        !contains(["staging", "osage", "isgs", "newts", "ca", "rrc"], name)
+      )
+      frontend_hostname = trimsuffix(
+        coalesce(
+          try(backend.frontend_hostname, null),
+          name == "staging" ? var.backend_dns_domain : "${name}.${var.backend_dns_domain}"
+        ),
+        "."
+      )
+      dns_ttl = coalesce(try(backend.dns_ttl, null), var.gke_dns_ttl)
     }
   }
 
@@ -64,6 +75,11 @@ locals {
   gke_test_dns_backends = {
     for name, backend in local.gke_backends : name => backend
     if backend.create_test_dns_record
+  }
+
+  gke_frontend_dns_backends = {
+    for name, backend in local.gke_backends : name => backend
+    if backend.create_frontend_dns_records
   }
 
   gke_upload_buckets = {
@@ -143,6 +159,34 @@ resource "google_dns_record_set" "gke_backend_test" {
   rrdatas = [
     google_compute_global_address.gke_backend[each.key].address,
   ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_dns_record_set" "frontend_a" {
+  for_each = var.enable_gke ? local.gke_frontend_dns_backends : {}
+
+  name         = "${each.value.frontend_hostname}."
+  type         = "A"
+  ttl          = each.value.dns_ttl
+  managed_zone = var.dns_managed_zone
+  rrdatas      = var.app_engine_ipv4_addresses
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_dns_record_set" "frontend_aaaa" {
+  for_each = var.enable_gke ? local.gke_frontend_dns_backends : {}
+
+  name         = "${each.value.frontend_hostname}."
+  type         = "AAAA"
+  ttl          = each.value.dns_ttl
+  managed_zone = var.dns_managed_zone
+  rrdatas      = var.app_engine_ipv6_addresses
 
   lifecycle {
     prevent_destroy = true

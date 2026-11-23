@@ -622,3 +622,111 @@ def test_all_workflow_bash_scripts_and_contracts_are_valid():
                             check=True,
                             capture_output=True,
                         )
+
+
+def test_tfvars_hydration_and_frontend_backend_url_defaults(tmp_path):
+    """Verify GCS-first terraform.tfvars hydration and frontend BACKEND_URL default resolution."""
+    backend_root = Path(__file__).resolve().parents[2]
+    tf_apply = yaml.safe_load(
+        (backend_root / ".github/workflows/terraform-apply.yml").read_text()
+    )
+    hydrate_script = next(
+        step["run"]
+        for step in tf_apply["jobs"]["plan"]["steps"]
+        if step.get("name") == "Hydrate production terraform.tfvars"
+    )
+
+    (tmp_path / "deployment/terraform").mkdir(parents=True)
+    (tmp_path / "deployment/terraform/backend.tf").write_text(
+        'terraform {\n  backend "gcs" {\n    bucket = "test-state-bucket"\n  }\n}\n'
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gcloud_stub = bin_dir / "gcloud"
+
+    # 1. GCS config/terraform.tfvars is preferred when available
+    gcloud_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "storage" ] && [ "$2" = "cp" ] && [ "$3" = "gs://test-state-bucket/config/terraform.tfvars" ]; then\n'
+        '  printf "project_id = \\"from-gcs\\"\\n" > "$4"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    gcloud_stub.chmod(0o755)
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", hydrate_script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PROD_TERRAFORM_TFVARS": 'project_id = "from-secret"',
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        tmp_path / "deployment/terraform/terraform.tfvars"
+    ).read_text().strip() == 'project_id = "from-gcs"'
+
+    # 2. Falls back to PROD_TERRAFORM_TFVARS secret when GCS copy fails
+    gcloud_stub.write_text("#!/usr/bin/env bash\nexit 1\n")
+    subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", hydrate_script],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PROD_TERRAFORM_TFVARS": 'project_id = "from-secret"',
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        tmp_path / "deployment/terraform/terraform.tfvars"
+    ).read_text().strip() == 'project_id = "from-secret"'
+
+    # 3. Frontend deploy-dispatch.yml defaults BACKEND_URL to https://<collaborator>-server.uow-carbon.org
+    frontend_dispatch = (
+        backend_root.parent / "orphaned-wells-ui/.github/workflows/deploy-dispatch.yml"
+    )
+    if frontend_dispatch.is_file():
+        fe_wf = yaml.safe_load(frontend_dispatch.read_text())
+        fe_script = next(
+            step["run"]
+            for step in fe_wf["jobs"]["deploy"]["steps"]
+            if step.get("id") == "config"
+        )
+        fe_dir = tmp_path / "frontend"
+        (fe_dir / "deployment/app-engine").mkdir(parents=True)
+        (fe_dir / "deployment/app-engine/app.yaml").write_text("runtime: python312\n")
+        fe_output = fe_dir / "github-output"
+        subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", fe_script],
+            cwd=fe_dir,
+            env={
+                "PATH": os.environ["PATH"],
+                "COLLABORATOR": "boots",
+                "TARGET_ENV": "boots",
+                "INPUT_APP_YAML": "auto",
+                "REPO_GOOGLE_CLIENTID": "google-client-123",
+                "GITHUB_OUTPUT": str(fe_output),
+            },
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        fe_env = dict(
+            line.split("=", 1) for line in (fe_dir / ".env").read_text().splitlines()
+        )
+        assert fe_env["REACT_APP_BACKEND_URL"] == "https://boots-server.uow-carbon.org"
+        assert fe_env["REACT_APP_GOOGLE_CLIENTID"] == "google-client-123"
+        assert fe_env["REACT_APP_COLLABORATOR"] == "boots"
+
+    # 4. Verify gke.tf defines frontend_a and frontend_aaaa DNS resources
+    gke_tf = (backend_root / "deployment/terraform/gke.tf").read_text()
+    assert 'resource "google_dns_record_set" "frontend_a"' in gke_tf
+    assert 'resource "google_dns_record_set" "frontend_aaaa"' in gke_tf

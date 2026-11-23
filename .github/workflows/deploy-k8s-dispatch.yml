@@ -179,10 +179,14 @@ jobs:
         env:
           PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
         run: |
-          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+          state_bucket="$(grep -E '^\s*bucket\s*=' .infra/deployment/terraform/backend.tf 2>/dev/null | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]' || true)"
+          if [ -n "$state_bucket" ] && gcloud storage cp "gs://${state_bucket}/config/terraform.tfvars" .infra/deployment/terraform/terraform.tfvars 2>/dev/null; then
+            echo "Hydrated .infra/deployment/terraform/terraform.tfvars from gs://${state_bucket}/config/terraform.tfvars"
+          elif [ -n "$PROD_TERRAFORM_TFVARS" ]; then
             printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > .infra/deployment/terraform/terraform.tfvars
+            echo "Hydrated .infra/deployment/terraform/terraform.tfvars from PROD_TERRAFORM_TFVARS secret"
           elif [ ! -f .infra/deployment/terraform/terraform.tfvars ]; then
-            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and .infra/deployment/terraform/terraform.tfvars was not found."
+            echo "::warning::Neither gs://${state_bucket}/config/terraform.tfvars nor PROD_TERRAFORM_TFVARS was found."
           fi
 
       - name: Require applied infrastructure

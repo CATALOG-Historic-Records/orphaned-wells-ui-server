@@ -617,6 +617,7 @@ This provisions:
 - GKE static IP address (`boots-uow-gke-ip`)
 - Primary DNS record (`boots-server.uow-carbon.org`)
 - Test DNS record (`boots-k8s-server.uow-carbon.org`)
+- Frontend DNS `A` and `AAAA` records (`boots.uow-carbon.org`)
 - `kubernetes_deploy_targets.boots` output
 
 For local testing:
