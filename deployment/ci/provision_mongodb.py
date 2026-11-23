@@ -12,7 +12,6 @@ import sys
 import time
 import urllib.parse
 
-
 ROLES = [
     {
         "id": "proj_collaborator",

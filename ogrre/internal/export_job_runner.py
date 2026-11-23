@@ -181,9 +181,9 @@ def _run_background_export_job(job_id, attempt, data_manager):
             "local export worker failed job_id=%s attempt=%s", job_id, attempt
         )
         with _background_lock:
-            _background_failures[
-                (job_id, attempt)
-            ] = f"Export generation failed ({type(error).__name__}): {error}"
+            _background_failures[(job_id, attempt)] = (
+                f"Export generation failed ({type(error).__name__}): {error}"
+            )
     finally:
         with _background_lock:
             _background_active.discard((job_id, attempt))
