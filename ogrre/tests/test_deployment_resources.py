@@ -456,7 +456,10 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
     rendered_gcs = dict(line.split("=", 1) for line in lines)
     assert rendered_gcs["DB_PASSWORD"] == "gcs-saved-pass"
     assert sum(1 for line in lines if line.startswith("DB_CONNECTION=")) == 1
-    assert "gcs_env_uri=gs://test-state-bucket/secrets/boots.env" in github_output.read_text()
+    assert (
+        "gcs_env_uri=gs://test-state-bucket/secrets/boots.env"
+        in github_output.read_text()
+    )
 
     # --- Case 2b: Priority 2 falls back to GKE secret when GCS object does not exist ---
     import base64
@@ -475,8 +478,7 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
     )
     kubectl_stub = bin_dir / "kubectl"
     kubectl_stub.write_text(
-        f"#!/usr/bin/env bash\n"
-        f"cat <<'EOF'\n{k8s_secret_json}\nEOF\n"
+        f"#!/usr/bin/env bash\n" f"cat <<'EOF'\n{k8s_secret_json}\nEOF\n"
     )
     kubectl_stub.chmod(0o755)
 
@@ -489,7 +491,9 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
         text=True,
         timeout=30,
     )
-    assert "Loaded existing runtime environment from Kubernetes secret" in res_k8s.stdout
+    assert (
+        "Loaded existing runtime environment from Kubernetes secret" in res_k8s.stdout
+    )
     rendered_k8s = dict(
         line.split("=", 1)
         for line in (tmp_path / "deployment/secrets/runtime.k8s.env")
@@ -537,7 +541,9 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
         timeout=30,
     )
     assert "First-time deployment detected for 'boots'" in res_prov.stdout
-    prov_lines = (tmp_path / "deployment/secrets/runtime.k8s.env").read_text().splitlines()
+    prov_lines = (
+        (tmp_path / "deployment/secrets/runtime.k8s.env").read_text().splitlines()
+    )
     rendered_prov = dict(line.split("=", 1) for line in prov_lines)
     assert rendered_prov["DB_NAME"] == "ogrre-boots"
     assert rendered_prov["DB_USERNAME"] == "ogrre-boots"
@@ -548,7 +554,9 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
     (tmp_path / "deployment/secrets/storage-service-key.json").write_text("{}")
     (tmp_path / "deployment/secrets/document-ai-service-key.json").write_text("{}")
     kubectl_stub.write_text("#!/usr/bin/env bash\nexit 0\n")
-    gcloud_stub.write_text("#!/usr/bin/env bash\nexit 1\n")  # Simulate GCS upload 403 failure
+    gcloud_stub.write_text(
+        "#!/usr/bin/env bash\nexit 1\n"
+    )  # Simulate GCS upload 403 failure
 
     res_create = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", create_secrets_script],
@@ -565,7 +573,9 @@ def test_runtime_env_priority_2_gcs_and_k8s_and_priority_3_provisioning(tmp_path
         text=True,
         timeout=30,
     )
-    assert "::warning::Could not upload runtime environment snapshot" in res_create.stdout
+    assert (
+        "::warning::Could not upload runtime environment snapshot" in res_create.stdout
+    )
 
 
 def test_all_workflow_bash_scripts_and_contracts_are_valid():
@@ -584,21 +594,23 @@ def test_all_workflow_bash_scripts_and_contracts_are_valid():
                 uses = job.get("uses")
                 if uses and uses.startswith("./.github/workflows/"):
                     callee_path = wf_dir.parent.parent / uses[2:]
-                    assert callee_path.is_file(), f"Missing reusable workflow {callee_path}"
+                    assert (
+                        callee_path.is_file()
+                    ), f"Missing reusable workflow {callee_path}"
                     callee = yaml.safe_load(callee_path.read_text())
                     on_block = callee.get("on") or callee.get(True) or {}
                     wf_call = on_block.get("workflow_call") or {}
                     allowed_inputs = set((wf_call.get("inputs") or {}).keys())
                     allowed_secrets = set((wf_call.get("secrets") or {}).keys())
                     for passed_input in (job.get("with") or {}).keys():
-                        assert passed_input in allowed_inputs, (
-                            f"{wf_file.name}:{job_name} passes unknown input '{passed_input}' to {callee_path.name}"
-                        )
+                        assert (
+                            passed_input in allowed_inputs
+                        ), f"{wf_file.name}:{job_name} passes unknown input '{passed_input}' to {callee_path.name}"
                     if isinstance(job.get("secrets"), dict):
                         for passed_secret in job["secrets"].keys():
-                            assert passed_secret in allowed_secrets, (
-                                f"{wf_file.name}:{job_name} passes unknown secret '{passed_secret}' to {callee_path.name}"
-                            )
+                            assert (
+                                passed_secret in allowed_secrets
+                            ), f"{wf_file.name}:{job_name} passes unknown secret '{passed_secret}' to {callee_path.name}"
 
                 # Check bash -n syntax on every run: block
                 for idx, step in enumerate(job.get("steps") or []):

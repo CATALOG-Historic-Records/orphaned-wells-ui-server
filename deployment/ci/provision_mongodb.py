@@ -410,10 +410,14 @@ def main() -> int:
             **extra_headers,
         }
         encoded_user = urllib.parse.quote(username, safe="")
-        get_url = f"{ATLAS_API_BASE}/groups/{project_id}/databaseUsers/admin/{encoded_user}"
+        get_url = (
+            f"{ATLAS_API_BASE}/groups/{project_id}/databaseUsers/admin/{encoded_user}"
+        )
         resp = requests.get(get_url, auth=auth, headers=headers, timeout=30)
         if resp.status_code == 200:
-            print(f"[DRY RUN] Atlas API auth succeeded; user '{username}' already exists.")
+            print(
+                f"[DRY RUN] Atlas API auth succeeded; user '{username}' already exists."
+            )
         elif resp.status_code == 404:
             print(
                 f"[DRY RUN] Atlas API auth succeeded; user '{username}' does not exist and is ready to provision for database '{db_name}' (team '{team_name}', admins: {', '.join(admin_emails)})."
