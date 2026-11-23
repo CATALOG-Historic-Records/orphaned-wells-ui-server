@@ -51,6 +51,36 @@ on:
       RUNTIME_ENV:
         description: Direct runtime environment variables content (from GitHub environment or repository secret)
         required: false
+      GOOGLE_CLIENT_ID:
+        description: Optional repository-level Google OAuth client ID fallback for RUNTIME_ENV
+        required: false
+      GOOGLE_CLIENT_SECRET:
+        description: Optional repository-level Google OAuth client secret fallback for RUNTIME_ENV
+        required: false
+      CLIENT_ID:
+        description: Optional alias for repository-level Google OAuth client ID fallback
+        required: false
+      CLIENT_SECRET:
+        description: Optional alias for repository-level Google OAuth client secret fallback
+        required: false
+      DB_CONNECTION:
+        description: Optional shared MongoDB cluster hostname or URI fallback
+        required: false
+      ATLAS_PROJECT_ID:
+        description: Optional MongoDB Atlas project ID for first-time collaborator DB provisioning
+        required: false
+      ATLAS_PUBLIC_KEY:
+        description: Optional MongoDB Atlas API public key for first-time collaborator DB provisioning
+        required: false
+      ATLAS_PRIVATE_KEY:
+        description: Optional MongoDB Atlas API private key for first-time collaborator DB provisioning
+        required: false
+      ATLAS_CLIENT_ID:
+        description: Optional MongoDB Atlas service account client ID for first-time collaborator DB provisioning
+        required: false
+      ATLAS_CLIENT_SECRET:
+        description: Optional MongoDB Atlas service account client secret for first-time collaborator DB provisioning
+        required: false
 
 defaults:
   run:
@@ -149,10 +179,14 @@ jobs:
         env:
           PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
         run: |
-          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+          state_bucket="$(grep -E '^\s*bucket\s*=' .infra/deployment/terraform/backend.tf 2>/dev/null | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]' || true)"
+          if [ -n "$state_bucket" ] && gcloud storage cp "gs://${state_bucket}/config/terraform.tfvars" .infra/deployment/terraform/terraform.tfvars 2>/dev/null; then
+            echo "Hydrated .infra/deployment/terraform/terraform.tfvars from gs://${state_bucket}/config/terraform.tfvars"
+          elif [ -n "$PROD_TERRAFORM_TFVARS" ]; then
             printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > .infra/deployment/terraform/terraform.tfvars
+            echo "Hydrated .infra/deployment/terraform/terraform.tfvars from PROD_TERRAFORM_TFVARS secret"
           elif [ ! -f .infra/deployment/terraform/terraform.tfvars ]; then
-            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and .infra/deployment/terraform/terraform.tfvars was not found."
+            echo "::warning::Neither gs://${state_bucket}/config/terraform.tfvars nor PROD_TERRAFORM_TFVARS was found."
           fi
 
       - name: Require applied infrastructure
@@ -313,7 +347,15 @@ jobs:
             echo "processing_job_max_active=$processing_job_max_active"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v3
+        with:
+          cluster_name: ${{ steps.target.outputs.cluster_name }}
+          location: ${{ steps.target.outputs.cluster_location }}
+          project_id: ${{ secrets.PROJECT_ID }}
+
       - name: Prepare runtime env file
+        id: runtime_env
         env:
           DEPLOY_ENV: ${{ inputs.DEPLOY_ENV }}
           HOSTNAME: ${{ steps.target.outputs.host }}
@@ -329,46 +371,176 @@ jobs:
           PROCESSING_JOB_ACTIVE_DEADLINE_SECONDS: ${{ steps.target.outputs.processing_job_active_deadline_seconds }}
           PROCESSING_JOB_TTL_SECONDS_AFTER_FINISHED: ${{ steps.target.outputs.processing_job_ttl_seconds_after_finished }}
           PROCESSING_JOB_MAX_ACTIVE: ${{ steps.target.outputs.processing_job_max_active }}
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID || secrets.CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET || secrets.CLIENT_SECRET }}
+          REPO_DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
+          ATLAS_PROJECT_ID: ${{ secrets.ATLAS_PROJECT_ID }}
+          ATLAS_PUBLIC_KEY: ${{ secrets.ATLAS_PUBLIC_KEY }}
+          ATLAS_PRIVATE_KEY: ${{ secrets.ATLAS_PRIVATE_KEY }}
+          ATLAS_CLIENT_ID: ${{ secrets.ATLAS_CLIENT_ID }}
+          ATLAS_CLIENT_SECRET: ${{ secrets.ATLAS_CLIENT_SECRET }}
+          DEFAULT_ADMIN_EMAILS: ${{ vars.DEFAULT_ADMIN_EMAILS }}
           RUNTIME_ENV_CONTENT: ${{ secrets.RUNTIME_ENV }}
         run: |
           runtime_env="${RUNTIME_ENV_CONTENT:-}"
-          if [ -z "$runtime_env" ]; then
-            echo "::error::Missing RUNTIME_ENV secret for environment '${DEPLOY_ENV}'. Ensure RUNTIME_ENV is configured in the '${DEPLOY_ENV}' GitHub environment or as a repository secret."
-            exit 1
-          fi
-
           raw_env_file="deployment/secrets/runtime.env"
           k8s_env_file="deployment/secrets/runtime.k8s.env"
           printf '%s\n' "$runtime_env" > "$raw_env_file"
           : > "$k8s_env_file"
 
-          while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in
-              ""|\#*) continue ;;
-            esac
-            line="${line#export }"
-            if [[ "$line" != *"="* ]]; then
-              continue
-            fi
-            key="${line%%=*}"
-            value="${line#*=}"
-            key="${key#"${key%%[![:space:]]*}"}"
-            key="${key%"${key##*[![:space:]]}"}"
-            value="${value#"${value%%[![:space:]]*}"}"
-            value="${value%"${value##*[![:space:]]}"}"
-            if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-              value="${value:1:${#value}-2}"
-            fi
-            if [[ "$value" == \'*\' && "$value" == *\' ]]; then
-              value="${value:1:${#value}-2}"
-            fi
-            case "$key" in
-              ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS|UVICORN_WORKERS|PROCESSING_JOB_*)
+          parse_env_stream() {
+            local source_file="$1"
+            local only_if_missing="${2:-false}"
+            while IFS= read -r line || [ -n "$line" ]; do
+              case "$line" in
+                ""|\#*) continue ;;
+              esac
+              line="${line#export }"
+              if [[ "$line" != *"="* ]]; then
                 continue
-                ;;
-            esac
-            printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
-          done < "$raw_env_file"
+              fi
+              key="${line%%=*}"
+              value="${line#*=}"
+              key="${key#"${key%%[![:space:]]*}"}"
+              key="${key%"${key##*[![:space:]]}"}"
+              value="${value#"${value%%[![:space:]]*}"}"
+              value="${value%"${value##*[![:space:]]}"}"
+              if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+                value="${value:1:${#value}-2}"
+              fi
+              if [[ "$value" == \'*\' && "$value" == *\' ]]; then
+                value="${value:1:${#value}-2}"
+              fi
+              case "$key" in
+                ENVIRONMENT|BACKEND_URL|LOG_DIR|LOCAL_STORAGE_ROOT|LOCAL_STORAGE_URL_BASE|STORAGE_BUCKET_NAME|STORAGE_SERVICE_KEY|DOCUMENT_AI_SERVICE_KEY|GOOGLE_APPLICATION_CREDENTIALS|UVICORN_WORKERS|PROCESSING_JOB_*)
+                  continue
+                  ;;
+              esac
+              if [ -z "$value" ]; then
+                continue
+              fi
+              if [ "$only_if_missing" = "true" ] && grep -Eq "^${key}=.+" "$k8s_env_file"; then
+                continue
+              fi
+              printf '%s=%s\n' "$key" "$value" >> "$k8s_env_file"
+            done < "$source_file"
+          }
+
+          # Priority 1: Parse explicit RUNTIME_ENV secret (if provided)
+          if [ -n "$runtime_env" ]; then
+            parse_env_stream "$raw_env_file" "false"
+          fi
+
+          set_default_if_missing() {
+            local key="$1"
+            local default_val="$2"
+            if [ -n "$default_val" ] && ! grep -Eq "^${key}=.+" "$k8s_env_file"; then
+              printf '%s=%s\n' "$key" "$default_val" >> "$k8s_env_file"
+            fi
+          }
+
+          has_complete_db_config() {
+            grep -Eq '^DB_NAME=.+' "$k8s_env_file" || return 1
+            if ! grep -Eq '^DB_CONNECTION=.+' "$k8s_env_file" && [ -z "${REPO_DB_CONNECTION:-}" ]; then
+              return 1
+            fi
+            if ! grep -Eq '^DB_CONNECTION=mongodb(\+srv)?://.+' "$k8s_env_file"; then
+              grep -Eq '^DB_USERNAME=.+' "$k8s_env_file" || return 1
+              grep -Eq '^DB_PASSWORD=.+' "$k8s_env_file" || return 1
+            fi
+            return 0
+          }
+
+          state_bucket=""
+          for backend_tf in ".infra/deployment/terraform/backend.tf" "deployment/terraform/backend.tf"; do
+            if [ -f "$backend_tf" ]; then
+              state_bucket="$(grep -E '^\s*bucket\s*=' "$backend_tf" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]')"
+              if [ -n "$state_bucket" ]; then
+                break
+              fi
+            fi
+          done
+          gcs_env_uri=""
+          if [ -n "$state_bucket" ]; then
+            gcs_env_uri="gs://${state_bucket}/secrets/${DEPLOY_ENV}.env"
+          fi
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            echo "gcs_env_uri=$gcs_env_uri" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Priority 2: Reuse existing deployed .env from GCS or GKE secret if DB config is not in RUNTIME_ENV
+          if ! has_complete_db_config; then
+            existing_env_file="deployment/secrets/existing.env"
+            : > "$existing_env_file"
+            if [ -n "$gcs_env_uri" ] && command -v gcloud >/dev/null 2>&1 && gcloud storage cat "$gcs_env_uri" > "$existing_env_file" 2>/dev/null && [ -s "$existing_env_file" ]; then
+              echo "Loaded existing runtime environment snapshot for '${DEPLOY_ENV}' from ${gcs_env_uri}"
+              parse_env_stream "$existing_env_file" "true"
+            elif command -v kubectl >/dev/null 2>&1 && kubectl -n "$NAMESPACE" get secret backend-runtime-env -o json 2>/dev/null | jq -r '.data // {} | to_entries[] | "\(.key)=\(.value | @base64d)"' > "$existing_env_file" 2>/dev/null && [ -s "$existing_env_file" ]; then
+              echo "Loaded existing runtime environment from Kubernetes secret ${NAMESPACE}/backend-runtime-env"
+              parse_env_stream "$existing_env_file" "true"
+            fi
+            rm -f "$existing_env_file"
+          fi
+
+          # Priority 3: First-time deploy auto-provisioning in MongoDB Atlas
+          if ! has_complete_db_config; then
+            effective_db_conn="$(grep -E '^DB_CONNECTION=' "$k8s_env_file" | tail -n1 | cut -d= -f2- || true)"
+            effective_db_conn="${effective_db_conn:-${REPO_DB_CONNECTION:-}}"
+            has_atlas_creds=false
+            if [ -n "${ATLAS_PROJECT_ID:-}" ] && [ -n "$effective_db_conn" ]; then
+              if { [ -n "${ATLAS_PUBLIC_KEY:-}" ] && [ -n "${ATLAS_PRIVATE_KEY:-}" ]; } || { [ -n "${ATLAS_CLIENT_ID:-}" ] && [ -n "${ATLAS_CLIENT_SECRET:-}" ]; }; then
+                has_atlas_creds=true
+              fi
+            fi
+
+            if [ "$has_atlas_creds" = "true" ]; then
+              echo "First-time deployment detected for '${DEPLOY_ENV}'. Provisioning scoped MongoDB Atlas user and initializing database..."
+              if ! python3 -c "import pymongo, certifi, requests" >/dev/null 2>&1; then
+                python3 -m pip install --quiet pymongo certifi requests
+              fi
+              provision_script="deployment/ci/provision_mongodb.py"
+              if [ ! -f "$provision_script" ] && [ -f ".infra/deployment/ci/provision_mongodb.py" ]; then
+                provision_script=".infra/deployment/ci/provision_mongodb.py"
+              fi
+              DB_CONNECTION="$effective_db_conn" python3 "$provision_script" \
+                --collaborator "$DEPLOY_ENV" \
+                --env-file "$k8s_env_file"
+            else
+              echo "::warning::Automatic MongoDB provisioning skipped for '${DEPLOY_ENV}' because MongoDB Atlas API secrets (ATLAS_PROJECT_ID, ATLAS_PUBLIC_KEY/ATLAS_PRIVATE_KEY or ATLAS_CLIENT_ID/ATLAS_CLIENT_SECRET, DB_CONNECTION) are not configured. Initialize MongoDB manually with InitializeMongoDB.py and set DB_NAME, DB_CONNECTION, DB_USERNAME, and DB_PASSWORD in RUNTIME_ENV."
+            fi
+          fi
+
+          set_default_if_missing "DB_CONNECTION" "${REPO_DB_CONNECTION:-}"
+
+          if [[ "$HOSTNAME" == *-server.* ]]; then
+            base_domain="${HOSTNAME#*-server.}"
+          else
+            base_domain="${HOSTNAME#*.}"
+          fi
+
+          if [ "$DEPLOY_ENV" = "staging" ]; then
+            default_allowed_origins="https://${base_domain},http://localhost:3000,http://localhost:3001"
+          else
+            default_allowed_origins="https://${DEPLOY_ENV}.${base_domain}"
+          fi
+          default_cookie_domain=".${base_domain}"
+
+          set_default_if_missing "COLLABORATOR" "$DEPLOY_ENV"
+          set_default_if_missing "ALLOWED_ORIGINS" "$default_allowed_origins"
+          set_default_if_missing "REQUIRE_AUTH" "true"
+          set_default_if_missing "AUTH_PROVIDER" "google"
+          set_default_if_missing "token_uri" "https://oauth2.googleapis.com/token"
+          set_default_if_missing "client_id" "${GOOGLE_CLIENT_ID:-}"
+          set_default_if_missing "client_secret" "${GOOGLE_CLIENT_SECRET:-}"
+          set_default_if_missing "SESSION_COOKIE_DOMAIN" "$default_cookie_domain"
+          set_default_if_missing "SESSION_COOKIE_SECURE" "true"
+          set_default_if_missing "SESSION_COOKIE_SAMESITE" "lax"
+          set_default_if_missing "PROJECT_ID" "${PROJECT_ID:-}"
+          set_default_if_missing "LOCATION" "us"
+          set_default_if_missing "STORAGE_BACKEND" "google"
+          set_default_if_missing "DOCUMENT_AI_BACKEND" "google"
+          set_default_if_missing "USE_DB_SCHEMAS" "false"
 
           {
             echo "ENVIRONMENT=$DEPLOY_ENV"
@@ -394,34 +566,42 @@ jobs:
           } >> "$k8s_env_file"
 
           required_runtime_keys=(
+            DB_NAME
+            DB_CONNECTION
             ALLOWED_ORIGINS
             AUTH_PROVIDER
             SESSION_COOKIE_DOMAIN
             SESSION_COOKIE_SAMESITE
             SESSION_COOKIE_SECURE
           )
+          if ! grep -Eq '^DB_CONNECTION=mongodb(\+srv)?://.+' "$k8s_env_file"; then
+            required_runtime_keys+=(
+              DB_USERNAME
+              DB_PASSWORD
+            )
+          fi
+          if grep -Eiq '^REQUIRE_AUTH=(1|true|yes)$' "$k8s_env_file" && grep -Eiq '^AUTH_PROVIDER=(google|both)$' "$k8s_env_file"; then
+            required_runtime_keys+=(
+              client_id
+              client_secret
+            )
+          fi
           missing_keys=()
           for key in "${required_runtime_keys[@]}"; do
-            if ! grep -Eq "^${key}=" "$k8s_env_file"; then
+            if ! grep -Eq "^${key}=.+" "$k8s_env_file"; then
               missing_keys+=("$key")
             fi
           done
 
           if [ "${#missing_keys[@]}" -gt 0 ]; then
-            echo "::error::RUNTIME_ENV for '${DEPLOY_ENV}' did not provide required runtime key(s): ${missing_keys[*]}"
+            echo "::error::Runtime configuration for '${DEPLOY_ENV}' is missing required key(s): ${missing_keys[*]}"
             exit 1
           fi
-
-      - name: Get GKE credentials
-        uses: google-github-actions/get-gke-credentials@v3
-        with:
-          cluster_name: ${{ steps.target.outputs.cluster_name }}
-          location: ${{ steps.target.outputs.cluster_location }}
-          project_id: ${{ secrets.PROJECT_ID }}
 
       - name: Create deployment secrets
         env:
           NAMESPACE: ${{ steps.target.outputs.namespace }}
+          GCS_ENV_URI: ${{ steps.runtime_env.outputs.gcs_env_uri }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         run: |
@@ -438,6 +618,14 @@ jobs:
           kubectl -n "$NAMESPACE" create secret generic backend-runtime-env \
             --from-env-file=deployment/secrets/runtime.k8s.env \
             --dry-run=client -o yaml | kubectl apply -f -
+
+          if [ -n "${GCS_ENV_URI:-}" ] && command -v gcloud >/dev/null 2>&1; then
+            if gcloud storage cp deployment/secrets/runtime.k8s.env "$GCS_ENV_URI"; then
+              echo "Saved active runtime environment snapshot to ${GCS_ENV_URI}"
+            else
+              echo "::warning::Could not upload runtime environment snapshot to ${GCS_ENV_URI}; continuing with Kubernetes secret."
+            fi
+          fi
 
           kubectl -n "$NAMESPACE" create secret generic backend-runtime-files \
             --from-file=storage-service-key.json=deployment/secrets/storage-service-key.json \

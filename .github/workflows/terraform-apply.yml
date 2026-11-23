@@ -41,15 +41,6 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
-      - name: Hydrate production terraform.tfvars
-        env:
-          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
-        run: |
-          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
-            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
-          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
-            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
-          fi
       - name: Verify the approval environment is protected
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,6 +54,19 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           install_components: gke-gcloud-auth-plugin
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          state_bucket="$(grep -E '^\s*bucket\s*=' deployment/terraform/backend.tf 2>/dev/null | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]' || true)"
+          if [ -n "$state_bucket" ] && gcloud storage cp "gs://${state_bucket}/config/terraform.tfvars" deployment/terraform/terraform.tfvars 2>/dev/null; then
+            echo "Hydrated deployment/terraform/terraform.tfvars from gs://${state_bucket}/config/terraform.tfvars"
+          elif [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+            echo "Hydrated deployment/terraform/terraform.tfvars from PROD_TERRAFORM_TFVARS secret"
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::Neither gs://${state_bucket}/config/terraform.tfvars nor PROD_TERRAFORM_TFVARS was found."
+          fi
       - name: Check infrastructure readiness
         id: status
         run: python3 deployment/ci/terraform_ci.py status
@@ -118,15 +122,6 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
-      - name: Hydrate production terraform.tfvars
-        env:
-          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
-        run: |
-          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
-            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
-          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
-            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
-          fi
       - name: Authenticate for no-change verification
         uses: google-github-actions/auth@v3
         with:
@@ -134,6 +129,19 @@ jobs:
           service_account: ${{ vars.TF_PLAN_SERVICE_ACCOUNT }}
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          state_bucket="$(grep -E '^\s*bucket\s*=' deployment/terraform/backend.tf 2>/dev/null | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]' || true)"
+          if [ -n "$state_bucket" ] && gcloud storage cp "gs://${state_bucket}/config/terraform.tfvars" deployment/terraform/terraform.tfvars 2>/dev/null; then
+            echo "Hydrated deployment/terraform/terraform.tfvars from gs://${state_bucket}/config/terraform.tfvars"
+          elif [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+            echo "Hydrated deployment/terraform/terraform.tfvars from PROD_TERRAFORM_TFVARS secret"
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::Neither gs://${state_bucket}/config/terraform.tfvars nor PROD_TERRAFORM_TFVARS was found."
+          fi
       - name: Initialize live Terraform outputs
         id: terraform
         uses: ./.github/actions/setup-terraform
@@ -169,15 +177,6 @@ jobs:
     steps:
       - name: Check out infrastructure configuration
         uses: actions/checkout@v4
-      - name: Hydrate production terraform.tfvars
-        env:
-          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
-        run: |
-          if [ -n "$PROD_TERRAFORM_TFVARS" ]; then
-            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
-          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
-            echo "::warning::PROD_TERRAFORM_TFVARS secret is not set and deployment/terraform/terraform.tfvars was not found."
-          fi
       - name: Recheck approval protection before authenticating
         env:
           GH_TOKEN: ${{ github.token }}
@@ -191,6 +190,19 @@ jobs:
         uses: google-github-actions/setup-gcloud@v3
         with:
           install_components: gke-gcloud-auth-plugin
+      - name: Hydrate production terraform.tfvars
+        env:
+          PROD_TERRAFORM_TFVARS: ${{ secrets.PROD_TERRAFORM_TFVARS }}
+        run: |
+          state_bucket="$(grep -E '^\s*bucket\s*=' deployment/terraform/backend.tf 2>/dev/null | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]' || true)"
+          if [ -n "$state_bucket" ] && gcloud storage cp "gs://${state_bucket}/config/terraform.tfvars" deployment/terraform/terraform.tfvars 2>/dev/null; then
+            echo "Hydrated deployment/terraform/terraform.tfvars from gs://${state_bucket}/config/terraform.tfvars"
+          elif [ -n "$PROD_TERRAFORM_TFVARS" ]; then
+            printf '%s\n' "$PROD_TERRAFORM_TFVARS" | tr -d '\r' > deployment/terraform/terraform.tfvars
+            echo "Hydrated deployment/terraform/terraform.tfvars from PROD_TERRAFORM_TFVARS secret"
+          elif [ ! -f deployment/terraform/terraform.tfvars ]; then
+            echo "::warning::Neither gs://${state_bucket}/config/terraform.tfvars nor PROD_TERRAFORM_TFVARS was found."
+          fi
       - name: Initialize Terraform workspace
         uses: ./.github/actions/setup-terraform
         with:
